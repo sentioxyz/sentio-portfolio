@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -362,5 +363,73 @@ func TestMorphoFeeRecipientTailReplaysEventOrder(t *testing.T) {
 	want := []common.Hash{marketBeforeChange, marketAfterRestore}
 	if len(markets) != len(want) || markets[0] != want[0] || markets[1] != want[1] {
 		t.Fatalf("fee markets = %v, want %v", markets, want)
+	}
+}
+
+func TestMorphoPositiveSetFeeTailDiscoversMarketBeforeAccrual(t *testing.T) {
+	marketWithFee := common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	marketWithoutFee := common.HexToHash("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	setFee := func(block uint64, index uint64, market common.Hash, fee int64) rpcLog {
+		return rpcLog{
+			Topics:      []common.Hash{morphoSetFeeTopic, market},
+			Data:        common.LeftPadBytes(big.NewInt(fee).Bytes(), 32),
+			BlockNumber: hexutil.Uint64(block),
+			LogIndex:    hexutil.Uint64(index),
+		}
+	}
+	markets, err := morphoPositiveSetFeeMarketIDsFromLogs([]rpcLog{
+		setFee(10, 0, marketWithFee, 100_000_000_000_000_000),
+		setFee(11, 0, marketWithoutFee, 0),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(markets) != 1 || markets[0] != marketWithFee {
+		t.Fatalf("positive fee markets = %v, want [%s]", markets, marketWithFee)
+	}
+}
+
+func TestMorphoFeeMarketGraphQLKeepsOnlyActiveFees(t *testing.T) {
+	active := common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	inactive := common.HexToHash("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body struct {
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Errorf("decode GraphQL request: %v", err)
+			return
+		}
+		if body.Variables["block"] != "123" || body.Variables["chainId"] != float64(1) {
+			t.Errorf("unexpected GraphQL variables: %#v", body.Variables)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(map[string]any{
+			"data": map[string]any{
+				"morphoFeeMarkets": []map[string]any{
+					{"id": "1:" + strings.ToLower(active.Hex()), "chainId": 1, "marketId": strings.ToLower(active.Hex()), "fee": "100000000000000000"},
+					{"id": "1:" + strings.ToLower(inactive.Hex()), "chainId": 1, "marketId": strings.ToLower(inactive.Hex()), "fee": "0"},
+				},
+			},
+		})
+	}))
+	t.Cleanup(server.Close)
+	indexer := &morphoIndexer{
+		api: &sentioAPIClient{
+			apiKey: "test", httpClient: server.Client(), statuses: make(map[string]sentioStatusCache),
+		},
+		config: SentioIndexerConfig{GraphQLURL: server.URL},
+	}
+	page, err := indexer.graphqlFeeMarketPage(
+		context.Background(), Ethereum, morphoFeeMarketRowPrefix(Ethereum), 123,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.RowIDs) != 2 {
+		t.Fatalf("fee-market rows = %d, want 2", len(page.RowIDs))
+	}
+	if len(page.ActiveMarketIDs) != 1 || page.ActiveMarketIDs[0] != active {
+		t.Fatalf("active fee markets = %v, want [%s]", page.ActiveMarketIDs, active)
 	}
 }

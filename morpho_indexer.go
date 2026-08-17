@@ -17,6 +17,7 @@ import (
 const (
 	morphoIndexerPageSize   = 500
 	morphoMaxIndexedMarkets = 4_096
+	morphoMaxFeeMarketRows  = 8_192
 	morphoMaxIndexedVaults  = 4_096
 	morphoMaxRPCTailBlocks  = 2_048
 	morphoMaxTailContracts  = 4_096
@@ -140,6 +141,103 @@ type morphoGraphQLPage struct {
 	VaultRowIDs     []string
 }
 
+const morphoFeeMarketsQuery = `
+query MorphoFeeMarkets(
+  $chainId: Int!
+  $after: ID!
+  $first: Int!
+  $block: BigInt!
+) {
+  morphoFeeMarkets(
+    first: $first
+    orderBy: id
+    orderDirection: asc
+    block: { number: $block }
+    where: { chainId: $chainId, id_gt: $after }
+  ) {
+    id
+    chainId
+    marketId
+    fee
+  }
+}`
+
+type morphoFeeMarketsGraphQLResponse struct {
+	Data struct {
+		Markets []struct {
+			ID       string `json:"id"`
+			ChainID  int    `json:"chainId"`
+			MarketID string `json:"marketId"`
+			Fee      string `json:"fee"`
+		} `json:"morphoFeeMarkets"`
+	} `json:"data"`
+	Errors []struct {
+		Message string `json:"message"`
+	} `json:"errors"`
+}
+
+type morphoFeeMarketPage struct {
+	RowIDs          []string
+	ActiveMarketIDs []common.Hash
+}
+
+func morphoFeeMarketRowPrefix(chainID ChainID) string {
+	return fmt.Sprintf("%d:", chainID)
+}
+
+func (i *morphoIndexer) graphqlFeeMarketPage(
+	ctx context.Context,
+	chainID ChainID,
+	after string,
+	block uint64,
+) (morphoFeeMarketPage, error) {
+	var payload morphoFeeMarketsGraphQLResponse
+	err := i.api.doJSON(
+		ctx,
+		http.MethodPost,
+		i.config.GraphQLURL,
+		map[string]any{
+			"query": morphoFeeMarketsQuery,
+			"variables": map[string]any{
+				"chainId": int(chainID), "after": after,
+				"first": morphoIndexerPageSize, "block": strconv.FormatUint(block, 10),
+			},
+		},
+		&payload,
+	)
+	if err != nil {
+		return morphoFeeMarketPage{}, err
+	}
+	if len(payload.Errors) > 0 {
+		messages := make([]string, 0, len(payload.Errors))
+		for _, graphQLError := range payload.Errors {
+			messages = append(messages, graphQLError.Message)
+		}
+		return morphoFeeMarketPage{}, fmt.Errorf("GraphQL: %s", strings.Join(messages, "; "))
+	}
+	prefix := morphoFeeMarketRowPrefix(chainID)
+	page := morphoFeeMarketPage{RowIDs: make([]string, 0, len(payload.Data.Markets))}
+	for _, row := range payload.Data.Markets {
+		if row.ChainID != int(chainID) || !strings.HasPrefix(row.ID, prefix) || row.ID <= after ||
+			!strings.HasPrefix(row.MarketID, "0x") || len(row.MarketID) != 66 {
+			return morphoFeeMarketPage{}, fmt.Errorf("GraphQL returned malformed fee-market row %q", row.ID)
+		}
+		marketID := common.HexToHash(row.MarketID)
+		if row.ID != prefix+strings.ToLower(marketID.Hex()) {
+			return morphoFeeMarketPage{}, fmt.Errorf("GraphQL returned foreign fee-market row %q", row.ID)
+		}
+		fee, valid := new(big.Int).SetString(row.Fee, 10)
+		if !valid || fee.Sign() < 0 {
+			return morphoFeeMarketPage{}, fmt.Errorf("GraphQL returned invalid fee for row %q", row.ID)
+		}
+		page.RowIDs = append(page.RowIDs, row.ID)
+		if fee.Sign() > 0 {
+			page.ActiveMarketIDs = append(page.ActiveMarketIDs, marketID)
+		}
+	}
+	return page, nil
+}
+
 func morphoRowPrefix(chainID ChainID, account common.Address) string {
 	return fmt.Sprintf("%d:%s:", chainID, strings.ToLower(account.Hex()))
 }
@@ -248,6 +346,7 @@ func (i *morphoIndexer) indexedRefs(
 	ctx context.Context,
 	block BlockRef,
 	account common.Address,
+	includeFeeMarkets bool,
 ) (morphoPositionRefs, error) {
 	statuses, err := i.api.chainStatuses(ctx, i.config, i.requiredChains, false)
 	if err != nil {
@@ -327,7 +426,34 @@ func (i *morphoIndexer) indexedRefs(
 			return morphoPositionRefs{}, fmt.Errorf("account has more than %d indexed Morpho vaults", morphoMaxIndexedVaults)
 		}
 	}
-	return result, nil
+	if includeFeeMarkets {
+		feeAfter := morphoFeeMarketRowPrefix(block.ChainID)
+		feeRows := 0
+		for {
+			page, pageErr := i.graphqlFeeMarketPage(ctx, block.ChainID, feeAfter, queryBlock)
+			if pageErr != nil {
+				return morphoPositionRefs{}, pageErr
+			}
+			for _, rowID := range page.RowIDs {
+				if rowID <= feeAfter {
+					return morphoPositionRefs{}, fmt.Errorf("fee-market rows are not ordered")
+				}
+				feeAfter = rowID
+			}
+			feeRows += len(page.RowIDs)
+			if feeRows > morphoMaxFeeMarketRows {
+				return morphoPositionRefs{}, fmt.Errorf(
+					"chain has more than %d indexed Morpho fee markets",
+					morphoMaxFeeMarketRows,
+				)
+			}
+			result.MarketIDs = append(result.MarketIDs, page.ActiveMarketIDs...)
+			if len(page.RowIDs) < morphoIndexerPageSize {
+				break
+			}
+		}
+	}
+	return mergeMorphoRefs(result, nil, nil)
 }
 
 func morphoAdaptiveLogs(
@@ -374,6 +500,7 @@ var (
 		[]byte("AccrueInterest(bytes32,uint256,uint256,uint256)"),
 	)
 	morphoSetFeeRecipientTopic = crypto.Keccak256Hash([]byte("SetFeeRecipient(address)"))
+	morphoSetFeeTopic          = crypto.Keccak256Hash([]byte("SetFee(bytes32,uint256)"))
 )
 
 func morphoAccountTopic(account common.Address) common.Hash {
@@ -387,6 +514,7 @@ func morphoTailMarketIDs(
 	toBlock uint64,
 	account common.Address,
 	core common.Address,
+	includeCurrentFeeMarkets bool,
 ) ([]common.Hash, error) {
 	if fromBlock > toBlock {
 		return nil, nil
@@ -409,7 +537,9 @@ func morphoTailMarketIDs(
 			seen[log.Topics[1]] = struct{}{}
 		}
 	}
-	feeMarkets, err := morphoTailFeeMarketIDs(ctx, client, fromBlock, toBlock, account, core)
+	feeMarkets, err := morphoTailFeeMarketIDs(
+		ctx, client, fromBlock, toBlock, account, core, includeCurrentFeeMarkets,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -421,6 +551,24 @@ func morphoTailMarketIDs(
 		result = append(result, marketID)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Hex() < result[j].Hex() })
+	return result, nil
+}
+
+func morphoPositiveSetFeeMarketIDsFromLogs(logs []rpcLog) ([]common.Hash, error) {
+	seen := make(map[common.Hash]struct{})
+	for _, log := range logs {
+		if len(log.Topics) != 2 || log.Topics[0] != morphoSetFeeTopic || len(log.Data) != 32 {
+			return nil, fmt.Errorf("fee-market RPC tail returned a malformed SetFee log")
+		}
+		if new(big.Int).SetBytes(log.Data).Sign() > 0 {
+			seen[log.Topics[1]] = struct{}{}
+		}
+	}
+	result := make([]common.Hash, 0, len(seen))
+	for marketID := range seen {
+		result = append(result, marketID)
+	}
+	sort.Slice(result, func(left, right int) bool { return result[left].Hex() < result[right].Hex() })
 	return result, nil
 }
 
@@ -474,6 +622,7 @@ func morphoTailFeeMarketIDs(
 	toBlock uint64,
 	account common.Address,
 	core common.Address,
+	includeCurrentFeeMarkets bool,
 ) ([]common.Hash, error) {
 	if fromBlock == 0 || fromBlock > toBlock {
 		return nil, nil
@@ -526,7 +675,38 @@ func morphoTailFeeMarketIDs(
 	if err != nil {
 		return nil, fmt.Errorf("fee accrual identifier RPC tail: %w", err)
 	}
-	return morphoFeeMarketIDsFromLogs(initialRecipient, account, append(setLogs, accrueLogs...))
+	result, err := morphoFeeMarketIDsFromLogs(initialRecipient, account, append(setLogs, accrueLogs...))
+	if err != nil {
+		return nil, err
+	}
+	if !includeCurrentFeeMarkets {
+		return result, nil
+	}
+	feeLogs, err := morphoAdaptiveLogs(
+		ctx,
+		client,
+		fromBlock,
+		toBlock,
+		[]common.Address{core},
+		[][]common.Hash{{morphoSetFeeTopic}},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("fee-market changes RPC tail: %w", err)
+	}
+	positiveFeeMarkets, err := morphoPositiveSetFeeMarketIDsFromLogs(feeLogs)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[common.Hash]struct{}, len(result)+len(positiveFeeMarkets))
+	for _, marketID := range append(result, positiveFeeMarkets...) {
+		seen[marketID] = struct{}{}
+	}
+	result = result[:0]
+	for marketID := range seen {
+		result = append(result, marketID)
+	}
+	sort.Slice(result, func(left, right int) bool { return result[left].Hex() < result[right].Hex() })
+	return result, nil
 }
 
 func morphoTailVaultCandidates(
@@ -669,10 +849,25 @@ func (i *morphoIndexer) PositionRefs(
 	account common.Address,
 	deployment morphoDeployment,
 ) (morphoPositionRefs, error) {
+	feeRecipientValues, err := client.Call(
+		ctx,
+		block,
+		deployment.Morpho,
+		morphoCoreABI,
+		"feeRecipient",
+	)
+	if err != nil {
+		return morphoPositionRefs{}, fmt.Errorf("Morpho fee recipient at pinned block: %w", err)
+	}
+	feeRecipient, err := AddressAt(feeRecipientValues, 0)
+	if err != nil {
+		return morphoPositionRefs{}, fmt.Errorf("Morpho fee recipient at pinned block: %w", err)
+	}
+	includeCurrentFeeMarkets := feeRecipient != (common.Address{}) && feeRecipient == account
 	indexed, err := func() (morphoPositionRefs, error) {
 		sentioQueryMu.Lock()
 		defer sentioQueryMu.Unlock()
-		return i.indexedRefs(ctx, block, account)
+		return i.indexedRefs(ctx, block, account, includeCurrentFeeMarkets)
 	}()
 	if err != nil {
 		return morphoPositionRefs{}, fmt.Errorf("Morpho index query: %w", err)
@@ -682,7 +877,13 @@ func (i *morphoIndexer) PositionRefs(
 	}
 	fromBlock := indexed.IndexerBlock + 1
 	tailMarkets, err := morphoTailMarketIDs(
-		ctx, client, fromBlock, block.Number, account, deployment.Morpho,
+		ctx,
+		client,
+		fromBlock,
+		block.Number,
+		account,
+		deployment.Morpho,
+		includeCurrentFeeMarkets,
 	)
 	if err != nil {
 		return morphoPositionRefs{}, err
