@@ -1,0 +1,233 @@
+package portfolio
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+const (
+	sentioRetryInitial   = 300 * time.Millisecond
+	sentioStatusCacheTTL = 30 * time.Second
+)
+
+// Sentio applies a queue limit per API key. All index-backed portfolio adapters therefore share
+// one lane across status checks, pagination, and retries instead of limiting concurrency inside
+// each protocol independently.
+var sentioQueryMu sync.Mutex
+
+// SentioIndexerConfig is supplied by the host at runtime. Endpoint values may
+// contain private project paths and must never be included in public errors.
+type SentioIndexerConfig struct {
+	GraphQLURL       string
+	StatusURL        string
+	ProcessorVersion string
+}
+
+func (c SentioIndexerConfig) validate() error {
+	if strings.TrimSpace(c.GraphQLURL) == "" {
+		return fmt.Errorf("Sentio indexer GraphQL endpoint is not configured")
+	}
+	if strings.TrimSpace(c.StatusURL) == "" {
+		return fmt.Errorf("Sentio indexer status endpoint is not configured")
+	}
+	if strings.TrimSpace(c.ProcessorVersion) == "" {
+		return fmt.Errorf("Sentio indexer processor version is not configured")
+	}
+	return nil
+}
+
+type sentioChainStatus struct {
+	State           string
+	ProcessedBlock  uint64
+	EstimatedLatest uint64
+}
+
+type sentioStatusCache struct {
+	At     time.Time
+	Chains map[ChainID]sentioChainStatus
+}
+
+type sentioAPIClient struct {
+	apiKey     string
+	httpClient *http.Client
+	statusMu   sync.Mutex
+	statuses   map[string]sentioStatusCache
+}
+
+func newSentioAPIClient() *sentioAPIClient {
+	apiKey := os.Getenv("PORTFOLIO_SENTIO_API_KEY")
+	if apiKey == "" {
+		apiKey = os.Getenv("NEXT_PUBLIC_SENTIO_API_KEY")
+	}
+	return &sentioAPIClient{
+		apiKey: apiKey, httpClient: &http.Client{Timeout: 25 * time.Second},
+		statuses: make(map[string]sentioStatusCache),
+	}
+}
+
+func (c *sentioAPIClient) doJSON(
+	ctx context.Context,
+	method string,
+	endpoint string,
+	body any,
+	result any,
+) error {
+	if c.apiKey == "" {
+		return fmt.Errorf("Sentio API key is not configured")
+	}
+	var last error
+	for attempt := 0; attempt < 3; attempt++ {
+		var reader io.Reader
+		if body != nil {
+			payload, err := json.Marshal(body)
+			if err != nil {
+				return err
+			}
+			reader = bytes.NewReader(payload)
+		}
+		request, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
+		if err != nil {
+			return err
+		}
+		request.Header.Set("accept", "application/json")
+		request.Header.Set("accept-encoding", "identity")
+		request.Header.Set("api-key", c.apiKey)
+		if body != nil {
+			request.Header.Set("content-type", "application/json")
+		}
+		response, err := c.httpClient.Do(request)
+		if err == nil {
+			payload, readErr := io.ReadAll(io.LimitReader(response.Body, 4<<20))
+			response.Body.Close()
+			if readErr != nil {
+				err = readErr
+			} else if response.StatusCode != http.StatusOK {
+				err = fmt.Errorf(
+					"HTTP %d: %s",
+					response.StatusCode,
+					strings.TrimSpace(string(payload[:min(len(payload), 300)])),
+				)
+				if response.StatusCode != http.StatusTooManyRequests &&
+					response.StatusCode < http.StatusInternalServerError {
+					return err
+				}
+			} else if decodeErr := json.Unmarshal(payload, result); decodeErr != nil {
+				err = decodeErr
+			} else {
+				return nil
+			}
+		}
+		last = err
+		if attempt < 2 {
+			timer := time.NewTimer(sentioRetryInitial << attempt)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+	return fmt.Errorf("request failed after 3 attempts: %w", last)
+}
+
+type sentioIndexerStatusResponse struct {
+	Processors []struct {
+		Version      any    `json:"version"`
+		VersionState string `json:"versionState"`
+		Status       struct {
+			State string `json:"state"`
+		} `json:"processorStatus"`
+		States []struct {
+			ChainID         string `json:"chainId"`
+			ProcessedBlock  string `json:"processedBlockNumber"`
+			EstimatedLatest string `json:"estimatedLatestBlockNumber"`
+			Status          struct {
+				State       string `json:"state"`
+				ErrorRecord struct {
+					Message string `json:"message"`
+				} `json:"errorRecord"`
+			} `json:"status"`
+		} `json:"states"`
+	} `json:"processors"`
+}
+
+func (c *sentioAPIClient) chainStatuses(
+	ctx context.Context,
+	config SentioIndexerConfig,
+	requiredChains []ChainID,
+	forceRefresh bool,
+) (map[ChainID]sentioChainStatus, error) {
+	if err := config.validate(); err != nil {
+		return nil, err
+	}
+	c.statusMu.Lock()
+	defer c.statusMu.Unlock()
+	cacheKey := config.StatusURL + "@" + config.ProcessorVersion
+	if !forceRefresh {
+		if cached, exists := c.statuses[cacheKey]; exists && time.Since(cached.At) < sentioStatusCacheTTL {
+			return cached.Chains, nil
+		}
+	}
+
+	var payload sentioIndexerStatusResponse
+	if err := c.doJSON(ctx, http.MethodGet, config.StatusURL, nil, &payload); err != nil {
+		return nil, fmt.Errorf("processor status: %w", err)
+	}
+	matched := 0
+	chains := make(map[ChainID]sentioChainStatus)
+	for _, processor := range payload.Processors {
+		if fmt.Sprint(processor.Version) != config.ProcessorVersion ||
+			processor.VersionState != "ACTIVE" || processor.Status.State != "PROCESSING" {
+			continue
+		}
+		matched++
+		for _, state := range processor.States {
+			chainNumber, err := strconv.ParseUint(state.ChainID, 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("processor returned invalid chain ID %q", state.ChainID)
+			}
+			chainID := ChainID(chainNumber)
+			if _, duplicate := chains[chainID]; duplicate {
+				return nil, fmt.Errorf("processor returned duplicate chain %d", chainID)
+			}
+			if state.Status.ErrorRecord.Message != "" {
+				return nil, fmt.Errorf("processor chain %d error: %s", chainID, state.Status.ErrorRecord.Message)
+			}
+			processed, err := strconv.ParseUint(state.ProcessedBlock, 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("processor returned invalid block %q", state.ProcessedBlock)
+			}
+			estimated, err := strconv.ParseUint(state.EstimatedLatest, 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("processor returned invalid latest block %q", state.EstimatedLatest)
+			}
+			chains[chainID] = sentioChainStatus{
+				State: state.Status.State, ProcessedBlock: processed, EstimatedLatest: estimated,
+			}
+		}
+	}
+	if matched != 1 {
+		return nil, fmt.Errorf(
+			"processor status returned %d active version %s processors",
+			matched,
+			config.ProcessorVersion,
+		)
+	}
+	for _, chainID := range requiredChains {
+		if _, exists := chains[chainID]; !exists {
+			return nil, fmt.Errorf("processor status omitted chain %d", chainID)
+		}
+	}
+	c.statuses[cacheKey] = sentioStatusCache{At: time.Now(), Chains: chains}
+	return chains, nil
+}

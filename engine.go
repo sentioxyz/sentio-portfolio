@@ -1,0 +1,370 @@
+package portfolio
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/ethereum/go-ethereum/common"
+)
+
+type Engine struct {
+	rpcURLs       map[ChainID]string
+	adapters      []Adapter
+	priceProvider PriceProvider
+}
+
+// EngineConfig contains deployment-specific integrations owned by the host.
+// Public source must not provide defaults for private indexer projects.
+type EngineConfig struct {
+	SentioIndexers map[string]SentioIndexerConfig
+}
+
+func (c EngineConfig) sentioIndexer(protocolID string) SentioIndexerConfig {
+	return c.SentioIndexers[protocolID]
+}
+
+type ScanOptions struct {
+	ProtocolIDs map[string]struct{}
+	ChainIDs    map[ChainID]struct{}
+	BlockNumber map[ChainID]uint64
+	SkipPrices  bool
+}
+
+func (o ScanOptions) empty() bool {
+	return len(o.ProtocolIDs) == 0 &&
+		len(o.ChainIDs) == 0 &&
+		len(o.BlockNumber) == 0 &&
+		!o.SkipPrices
+}
+
+func (o ScanOptions) includesProtocol(protocolID string) bool {
+	if len(o.ProtocolIDs) == 0 {
+		return true
+	}
+	_, exists := o.ProtocolIDs[protocolID]
+	return exists
+}
+
+func (o ScanOptions) includesChain(chainID ChainID) bool {
+	if len(o.ChainIDs) == 0 {
+		return true
+	}
+	_, exists := o.ChainIDs[chainID]
+	return exists
+}
+
+func NewEngine(
+	rpcURLs map[ChainID]string,
+	priceProvider PriceProvider,
+) *Engine {
+	return NewEngineWithConfig(rpcURLs, priceProvider, EngineConfig{})
+}
+
+func NewEngineWithConfig(
+	rpcURLs map[ChainID]string,
+	priceProvider PriceProvider,
+	config EngineConfig,
+) *Engine {
+	adapters := make([]Adapter, 0, 24)
+	adapters = append(adapters, aaveAdapters()...)
+	adapters = append(adapters, compoundV2Adapters()...)
+	adapters = append(adapters, newVenusAdapter())
+	adapters = append(adapters, newCompoundV3Adapter())
+	adapters = append(adapters, erc4626Adapters()...)
+	adapters = append(adapters, lstAdapters()...)
+	adapters = append(adapters, newLidoAdapter())
+	adapters = append(adapters, newMethAdapter(config.sentioIndexer("meth-protocol")))
+	adapters = append(adapters, newRocketPoolAdapter())
+	adapters = append(adapters, newStaderAdapter())
+	adapters = append(adapters, newOlympusAdapter())
+	adapters = append(adapters, newFraxlendAdapter())
+	adapters = append(adapters, newAaveV4Adapter())
+	adapters = append(adapters, newMakerDAOAdapter())
+	adapters = append(adapters, newMapleAdapter())
+	adapters = append(adapters, newLiquityV1Adapter())
+	adapters = append(adapters, newCurveCrvUSDAdapter())
+	adapters = append(adapters, newCurveLendingAdapter())
+	adapters = append(adapters, newVesperAdapter())
+	adapters = append(adapters, newYearnV3Adapter())
+	adapters = append(adapters, newBeefyAdapter())
+	adapters = append(adapters, newStakeWiseAdapter())
+	adapters = append(adapters, newListaAdapter())
+	adapters = append(adapters, newMorphoAdapter(config.sentioIndexer("morpho-blue")))
+	adapters = append(adapters, newFluidAdapter())
+	adapters = append(adapters, newUniswapAdapters(
+		config.sentioIndexer("uniswap-v3"),
+		config.sentioIndexer("uniswap-v4"),
+	)...)
+	return &Engine{
+		rpcURLs:       rpcURLs,
+		adapters:      adapters,
+		priceProvider: priceProvider,
+	}
+}
+
+func (e *Engine) Protocols() []ProtocolInfo {
+	result := make([]ProtocolInfo, 0, len(e.adapters))
+	for _, adapter := range e.adapters {
+		result = append(result, adapter.Info())
+	}
+	return result
+}
+
+type chainScan struct {
+	client   *RPCClient
+	block    BlockRef
+	accounts []attributedAccount
+}
+
+func attributedGroups(
+	groups []Group,
+	account attributedAccount,
+	root common.Address,
+) []Group {
+	if account.Address == root {
+		return groups
+	}
+	result := make([]Group, len(groups))
+	for index, group := range groups {
+		group.ID = fmt.Sprintf(
+			"attributed:%s:%s:%s",
+			account.Attribution,
+			strings.ToLower(account.Address.Hex()),
+			group.ID,
+		)
+		if group.Metadata == nil {
+			group.Metadata = make(map[string]any)
+		}
+		group.Metadata["attributedAccount"] = account.Address
+		group.Metadata["accountAttribution"] = account.Attribution
+		group.Metadata["accountAttributionSource"] = account.Source
+		result[index] = group
+	}
+	return result
+}
+
+func (e *Engine) Scan(ctx context.Context, address common.Address) *Response {
+	return e.ScanWithOptions(ctx, address, ScanOptions{})
+}
+
+func (e *Engine) ScanWithOptions(
+	ctx context.Context,
+	address common.Address,
+	options ScanOptions,
+) *Response {
+	protocols := make([]ProtocolInfo, 0, len(e.adapters))
+	for _, protocol := range e.Protocols() {
+		if options.includesProtocol(protocol.ID) {
+			protocols = append(protocols, protocol)
+		}
+	}
+	response := &Response{
+		SchemaVersion:      1,
+		Address:            address,
+		SupportedProtocols: protocols,
+		Snapshots:          make([]Snapshot, 0),
+		ProtocolSummaries:  make([]ProtocolSummary, 0),
+		Errors:             make([]ScanError, 0),
+		ChainBlocks:        make(map[ChainID]uint64),
+		Prices:             make(map[string]float64),
+	}
+	chains := make(map[ChainID]*chainScan)
+	var mutex sync.Mutex
+	var wait sync.WaitGroup
+	for _, chainID := range SupportedChainIDs {
+		if !options.includesChain(chainID) {
+			continue
+		}
+		wait.Add(1)
+		go func(chainID ChainID) {
+			defer wait.Done()
+			url := e.rpcURLs[chainID]
+			if url == "" {
+				mutex.Lock()
+				response.Errors = append(response.Errors, ScanError{
+					Scope: "chain", ChainID: chainID, Message: "RPC URL is not configured",
+				})
+				mutex.Unlock()
+				return
+			}
+			client, err := DialRPC(ctx, chainID, url)
+			if err != nil {
+				mutex.Lock()
+				response.Errors = append(response.Errors, ScanError{
+					Scope: "chain", ChainID: chainID, Message: PublicError(err),
+				})
+				mutex.Unlock()
+				return
+			}
+			var block BlockRef
+			blockNumber, fixedBlock := options.BlockNumber[chainID]
+			if fixedBlock {
+				block, err = client.BlockByNumber(ctx, blockNumber)
+				block.Fixed = true
+			} else {
+				block, err = client.LatestBlock(ctx)
+			}
+			if err != nil {
+				client.Close()
+				mutex.Lock()
+				response.Errors = append(response.Errors, ScanError{
+					Scope: "chain", ChainID: chainID, Message: PublicError(err),
+				})
+				mutex.Unlock()
+				return
+			}
+			accounts, err := resolveAccountScope(ctx, client, block, address)
+			if err != nil {
+				client.Close()
+				mutex.Lock()
+				response.Errors = append(response.Errors, ScanError{
+					Scope: "chain", ChainID: chainID, Message: PublicError(err),
+				})
+				mutex.Unlock()
+				return
+			}
+			mutex.Lock()
+			chains[chainID] = &chainScan{client: client, block: block, accounts: accounts}
+			response.ChainBlocks[chainID] = block.Number
+			mutex.Unlock()
+		}(chainID)
+	}
+	wait.Wait()
+	defer func() {
+		for _, chain := range chains {
+			chain.client.Close()
+		}
+	}()
+
+	type deployment struct {
+		adapter Adapter
+		chainID ChainID
+	}
+	deployments := make([]deployment, 0)
+	for _, adapter := range e.adapters {
+		info := adapter.Info()
+		if !options.includesProtocol(info.ID) {
+			continue
+		}
+		for _, chainID := range info.Chains {
+			if !options.includesChain(chainID) {
+				continue
+			}
+			deployments = append(deployments, deployment{adapter: adapter, chainID: chainID})
+		}
+	}
+	jobs := make(chan deployment)
+	var workers sync.WaitGroup
+	for worker := 0; worker < 3; worker++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for job := range jobs {
+				chain := chains[job.chainID]
+				if chain == nil {
+					continue
+				}
+				info := job.adapter.Info()
+				startedAt := time.Now()
+				groups := make([]Group, 0)
+				var positionErr error
+				for _, account := range chain.accounts {
+					accountGroups, err := job.adapter.Positions(
+						ctx,
+						chain.client,
+						chain.block,
+						account.Address,
+					)
+					if err != nil {
+						positionErr = err
+						break
+					}
+					groups = append(groups, attributedGroups(accountGroups, account, address)...)
+				}
+				mutex.Lock()
+				if positionErr != nil {
+					response.Errors = append(response.Errors, ScanError{
+						Scope:        "protocol",
+						ChainID:      job.chainID,
+						ProtocolID:   info.ID,
+						ProtocolName: info.Name,
+						Message:      PublicError(positionErr),
+					})
+				} else if len(groups) > 0 {
+					response.Snapshots = append(response.Snapshots, Snapshot{
+						ProtocolID:     info.ID,
+						ProtocolName:   info.Name,
+						ChainID:        job.chainID,
+						Account:        address,
+						Block:          chain.block,
+						Groups:         groups,
+						NetValuePolicy: "floor-zero",
+					})
+				}
+				mutex.Unlock()
+				log.Printf(
+					"portfolio protocol=%s chain=%d duration=%s error=%q",
+					info.ID,
+					job.chainID,
+					time.Since(startedAt).Round(time.Millisecond),
+					PublicError(positionErr),
+				)
+			}
+		}()
+	}
+sendJobs:
+	for _, job := range deployments {
+		select {
+		case jobs <- job:
+		case <-ctx.Done():
+			break sendJobs
+		}
+	}
+	close(jobs)
+	workers.Wait()
+	sort.Slice(response.Snapshots, func(left, right int) bool {
+		if response.Snapshots[left].ProtocolID != response.Snapshots[right].ProtocolID {
+			return response.Snapshots[left].ProtocolID < response.Snapshots[right].ProtocolID
+		}
+		return response.Snapshots[left].ChainID < response.Snapshots[right].ChainID
+	})
+
+	if !options.SkipPrices {
+		prices, priceErrors := fetchPrices(ctx, e.priceProvider, response.Snapshots)
+		response.Prices = prices
+		response.Errors = append(response.Errors, priceErrors...)
+	}
+	summaries, valuationErr := applyValuations(
+		response.Snapshots,
+		response.Prices,
+		response.SupportedProtocols,
+	)
+	if valuationErr != nil {
+		response.Errors = append(response.Errors, ScanError{
+			Scope: "pricing", Message: PublicError(valuationErr),
+		})
+	} else {
+		response.ProtocolSummaries = summaries
+	}
+	sort.Slice(response.Errors, func(left, right int) bool {
+		leftError := response.Errors[left]
+		rightError := response.Errors[right]
+		if leftError.Scope != rightError.Scope {
+			return leftError.Scope < rightError.Scope
+		}
+		if leftError.ChainID != rightError.ChainID {
+			return leftError.ChainID < rightError.ChainID
+		}
+		if leftError.ProtocolID != rightError.ProtocolID {
+			return leftError.ProtocolID < rightError.ProtocolID
+		}
+		return leftError.Message < rightError.Message
+	})
+	response.CompletedAt = time.Now().UTC()
+	return response
+}

@@ -1,0 +1,224 @@
+{
+  "version": 1,
+  "generatedAt": "2026-08-13T14:24:49Z",
+  "source": "https://mainnet-api.stakewise.io/graphql",
+  "scope": "verified Ethereum StakeWise V3 vault shares; excludes exit queue tickets",
+  "vaults": [
+    {
+      "address": "0x05e393ec11d0197a88d84457908edd4ff235f323",
+      "activationBlock": 18733446
+    },
+    {
+      "address": "0x06ec2d731b2fa8895e5a9482c22ee33573f44a13",
+      "activationBlock": 18707782
+    },
+    {
+      "address": "0x1b3ce55dde0e0d4b9a200855406e7b14334c10b0",
+      "activationBlock": 19491487
+    },
+    {
+      "address": "0x1e4b47c6c414b7d8320eca4abeaa15a50934f608",
+      "activationBlock": 20083059
+    },
+    {
+      "address": "0x2cf7cd8004c99cb4b6946e0dd2b19fba89bbe4eb",
+      "activationBlock": 20572463
+    },
+    {
+      "address": "0x2e1f06e9777e90070eff3b4755e4443e9cc76ab7",
+      "activationBlock": 19218719
+    },
+    {
+      "address": "0x3f2f7424074bac9337ddca38e83e1518436e0ed0",
+      "activationBlock": 18627640
+    },
+    {
+      "address": "0x3fcbc480f3bb3ce8379bb475d95de603f188d9c0",
+      "activationBlock": 22544696
+    },
+    {
+      "address": "0x41adbf980d09e6e50afffe606e5c259dcec0af27",
+      "activationBlock": 21191305
+    },
+    {
+      "address": "0x475064d69be1933c3ec0301a7397b0a667993f95",
+      "activationBlock": 19728082
+    },
+    {
+      "address": "0x47fd7ac6c6bc73f2d419a18d0692f37df3f48034",
+      "activationBlock": 23533282
+    },
+    {
+      "address": "0x4aafdb911085dd7703e57951279744dd713f744d",
+      "activationBlock": 24276564
+    },
+    {
+      "address": "0x4c09bc47db288f998b33cd63bcc1b6ddcce13f33",
+      "activationBlock": 23017665
+    },
+    {
+      "address": "0x4e0a83509f5d0ef2e55b6f08dbf2462b72bcd30a",
+      "activationBlock": 20086165
+    },
+    {
+      "address": "0x5610297eb32542b8f13378fe7d783dcb1ac3b1a1",
+      "activationBlock": 18670037
+    },
+    {
+      "address": "0x579684ecef8ea89224f1898d69fdcc820ee12431",
+      "activationBlock": 22445153
+    },
+    {
+      "address": "0x5799be451ee9fddd171c23bf5be86eccfe1f062f",
+      "activationBlock": 22970039
+    },
+    {
+      "address": "0x649955f4189c3921df60e25f58cb1e81070fedb0",
+      "activationBlock": 18625638
+    },
+    {
+      "address": "0x64f2907f92631619ed7ea510982835f9e1024767",
+      "activationBlock": 18677504
+    },
+    {
+      "address": "0x663580b3edad914d0b59cea88616f06278d42bb2",
+      "activationBlock": 20634347
+    },
+    {
+      "address": "0x663a8c9e88c5cdc565cc4bf0b2bec8d862d744a6",
+      "activationBlock": 23501553
+    },
+    {
+      "address": "0x77ace5f2a80635576f7d00e4914abae2e4e875f9",
+      "activationBlock": 18631729
+    },
+    {
+      "address": "0x8216e50b1dd76faeb1ff4cafaba6790ea71910df",
+      "activationBlock": 18616425
+    },
+    {
+      "address": "0x8a164c92002b77d9893cbd3a7373531278e9e30f",
+      "activationBlock": 23032803
+    },
+    {
+      "address": "0x8a93a876912c9f03f88bc9114847cf5b63c89f56",
+      "activationBlock": 18612909
+    },
+    {
+      "address": "0x907660805fb78ae4e8419f76537671cc4df2d4ab",
+      "activationBlock": 18629546
+    },
+    {
+      "address": "0x91211a4965e75152cb549b308f8ba398c3ab337e",
+      "activationBlock": 19938323
+    },
+    {
+      "address": "0x9633b4d631d363fc8337fad80a6d0932e8767662",
+      "activationBlock": 18684649
+    },
+    {
+      "address": "0x99510bfc5d420cd3c41458f4692b1c3321908734",
+      "activationBlock": 18672788
+    },
+    {
+      "address": "0x9c29c571847a68a947acec8bacd303e36bc72ec5",
+      "activationBlock": 18733380
+    },
+    {
+      "address": "0xa071d03d96554e185a86ab178ea3d76c9caaaad8",
+      "activationBlock": 20476240
+    },
+    {
+      "address": "0xa40587e781bc31ffa2a0369edaaf7b8dcf1776d0",
+      "activationBlock": 18647387
+    },
+    {
+      "address": "0xac0f906e433d58fa868f936e8a43230473652885",
+      "activationBlock": 18470152
+    },
+    {
+      "address": "0xb144b3b2d2a7d82e53bc70659be03bcd21cd94e8",
+      "activationBlock": 24179701
+    },
+    {
+      "address": "0xb1e3ca426d3a3810edb58017a4d6a71fc6221f44",
+      "activationBlock": 24000863
+    },
+    {
+      "address": "0xb266274f55e784689e97b7e363b0666d92e6305b",
+      "activationBlock": 22319339
+    },
+    {
+      "address": "0xb36fc5e542cb4fc562a624912f55da2758998113",
+      "activationBlock": 18641880
+    },
+    {
+      "address": "0xb72668d6ff7a0e318f83097a754c6aed0f8af034",
+      "activationBlock": 23082025
+    },
+    {
+      "address": "0xc3cf55551058872a8b21f38514c2fb6f82ef09b8",
+      "activationBlock": 18679256
+    },
+    {
+      "address": "0xc502a1008cae7ad560294ac987355dfdb287e597",
+      "activationBlock": 21717330
+    },
+    {
+      "address": "0xc75b3aa5a9baf47df1e4952aabc40e8475ebc9b9",
+      "activationBlock": 20508180
+    },
+    {
+      "address": "0xcb1d4c9834c7ee489830ff43802685d14f4c177b",
+      "activationBlock": 21287981
+    },
+    {
+      "address": "0xcf8357e5d8d90aa3c86eeba3c494947dab28bfaf",
+      "activationBlock": 20285321
+    },
+    {
+      "address": "0xd21b6bc0a1434aef8cf468a20bf2daefcaf6eab9",
+      "activationBlock": 22416370
+    },
+    {
+      "address": "0xdee6d927edc33dee314db9f17ed7d26600060d92",
+      "activationBlock": 23357440
+    },
+    {
+      "address": "0xe2aeecc76839692aea35a8d119181b14ebf411c9",
+      "activationBlock": 20063757
+    },
+    {
+      "address": "0xe2d8f982708ce1e3814c8986cbab624ca926288a",
+      "activationBlock": 18619061
+    },
+    {
+      "address": "0xe6d8d8ac54461b1c5ed15740eee322043f696c08",
+      "activationBlock": 18640259
+    },
+    {
+      "address": "0xea5e8e9732c79584c0980f2bd3c29d37c747969f",
+      "activationBlock": 18640919
+    },
+    {
+      "address": "0xea6db44b0d7e20f72f2b4b3deaaa9e710e718bd9",
+      "activationBlock": 18633272
+    },
+    {
+      "address": "0xedb5133e583dad20b43b6f54bd9b287ad484d4a3",
+      "activationBlock": 19268084
+    },
+    {
+      "address": "0xef0157733e476dbb753a61ed7d742d6b6f0f9096",
+      "activationBlock": 21827857
+    },
+    {
+      "address": "0xf41a0282807760872885f2af1d7716a1a524ee04",
+      "activationBlock": 21502329
+    },
+    {
+      "address": "0xfceefd777c10352d637187f83a2b27ebd817b3b8",
+      "activationBlock": 24892849
+    }
+  ]
+}
