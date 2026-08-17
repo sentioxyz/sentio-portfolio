@@ -26,14 +26,14 @@ func TestListaManifestAndRegistration(t *testing.T) {
 	}
 }
 
-func TestListaShareFractionUsesProtocolVirtualBalances(t *testing.T) {
-	numerator, denominator := listaShareFraction(big.NewInt(7), big.NewInt(99), big.NewInt(1_000_000))
+func TestMorphoShareFractionUsesProtocolVirtualBalances(t *testing.T) {
+	numerator, denominator := morphoShareFraction(big.NewInt(7), big.NewInt(99), big.NewInt(1_000_000))
 	if numerator.String() != "700" || denominator.String() != "2000000" {
 		t.Fatalf("fraction = %s/%s, want 700/2000000", numerator, denominator)
 	}
 }
 
-func TestListaExpectedMarketBalancesAccruesInterestAndFee(t *testing.T) {
+func TestMorphoExpectedMarketBalancesAccruesInterestAndFee(t *testing.T) {
 	state := listaMoolahMarketState{
 		TotalSupplyAssets: big.NewInt(2_000_000_000),
 		TotalSupplyShares: big.NewInt(1_000_000_000),
@@ -42,7 +42,7 @@ func TestListaExpectedMarketBalancesAccruesInterestAndFee(t *testing.T) {
 		LastUpdate:        big.NewInt(100),
 		Fee:               big.NewInt(100_000_000_000_000_000),
 	}
-	got, feeShares := listaExpectedMarketBalances(state, big.NewInt(1_000_000_000_000), 1_000)
+	got, feeShares := morphoExpectedMarketBalances(state, big.NewInt(1_000_000_000_000), 1_000)
 	// Taylor factor is 1_000_500_166_666_666, yielding 1_000_500 units of interest.
 	if got.TotalBorrowAssets.String() != "1001000500" {
 		t.Fatalf("total borrow assets = %s, want 1001000500", got.TotalBorrowAssets)
@@ -61,8 +61,8 @@ func TestListaExpectedMarketBalancesAccruesInterestAndFee(t *testing.T) {
 	}
 }
 
-func TestListaMulDivUp(t *testing.T) {
-	if got := listaMulDivUp(big.NewInt(10), big.NewInt(10), big.NewInt(6)); got.String() != "17" {
+func TestMorphoMulDivUp(t *testing.T) {
+	if got := morphoMulDivUp(big.NewInt(10), big.NewInt(10), big.NewInt(6)); got.String() != "17" {
 		t.Fatalf("mulDivUp = %s, want 17", got)
 	}
 }
@@ -83,15 +83,15 @@ func TestListaFeeRecipientLoadsFeeOnlyMarket(t *testing.T) {
 	}
 }
 
-func TestListaEffectiveSupplySharesCreditsPendingFeesOnlyToRecipient(t *testing.T) {
+func TestMorphoEffectiveSupplySharesCreditsPendingFeesOnlyToRecipient(t *testing.T) {
 	feeRecipient := common.HexToAddress("0x00000000000000000000000000000000000000f1")
 	stored := big.NewInt(7)
 	pendingFees := big.NewInt(5)
-	if got := listaEffectiveSupplyShares(stored, pendingFees, feeRecipient, feeRecipient); got.String() != "12" {
+	if got := morphoEffectiveSupplyShares(stored, pendingFees, feeRecipient, feeRecipient); got.String() != "12" {
 		t.Fatalf("fee recipient effective shares = %s, want 12", got)
 	}
 	other := common.HexToAddress("0x00000000000000000000000000000000000000a1")
-	if got := listaEffectiveSupplyShares(stored, pendingFees, other, feeRecipient); got.String() != "7" {
+	if got := morphoEffectiveSupplyShares(stored, pendingFees, other, feeRecipient); got.String() != "7" {
 		t.Fatalf("ordinary account effective shares = %s, want 7", got)
 	}
 	if stored.String() != "7" {

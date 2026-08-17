@@ -19,13 +19,6 @@ var listaMoolahABI = MustABI(`[
   {"type":"function","name":"idToMarketParams","stateMutability":"view","inputs":[{"name":"id","type":"bytes32"}],"outputs":[{"name":"loanToken","type":"address"},{"name":"collateralToken","type":"address"},{"name":"oracle","type":"address"},{"name":"irm","type":"address"},{"name":"lltv","type":"uint256"}]}
 ]`)
 
-var listaMoolahIRMABI = MustABI(`[
-  {"type":"function","name":"borrowRateView","stateMutability":"view","inputs":[
-    {"name":"marketParams","type":"tuple","components":[{"name":"loanToken","type":"address"},{"name":"collateralToken","type":"address"},{"name":"oracle","type":"address"},{"name":"irm","type":"address"},{"name":"lltv","type":"uint256"}]},
-    {"name":"market","type":"tuple","components":[{"name":"totalSupplyAssets","type":"uint128"},{"name":"totalSupplyShares","type":"uint128"},{"name":"totalBorrowAssets","type":"uint128"},{"name":"totalBorrowShares","type":"uint128"},{"name":"lastUpdate","type":"uint128"},{"name":"fee","type":"uint128"}]}
-  ],"outputs":[{"type":"uint256"}]}
-]`)
-
 var listaInteractionABI = MustABI(`[
   {"type":"function","name":"collaterals","stateMutability":"view","inputs":[{"name":"token","type":"address"}],"outputs":[{"name":"gem","type":"address"},{"name":"ilk","type":"bytes32"},{"name":"live","type":"uint256"},{"name":"clip","type":"address"}]},
   {"type":"function","name":"locked","stateMutability":"view","inputs":[{"name":"token","type":"address"},{"name":"user","type":"address"}],"outputs":[{"type":"uint256"}]},
@@ -175,19 +168,6 @@ func listaShouldLoadMoolahMarket(
 	return feeRecipient != (common.Address{}) && account == feeRecipient
 }
 
-func listaEffectiveSupplyShares(
-	storedShares *big.Int,
-	pendingFeeShares *big.Int,
-	account common.Address,
-	feeRecipient common.Address,
-) *big.Int {
-	result := new(big.Int).Set(storedShares)
-	if feeRecipient != (common.Address{}) && account == feeRecipient {
-		result.Add(result, pendingFeeShares)
-	}
-	return result
-}
-
 type listaMoolahHeldMarket struct {
 	holding listaMoolahHolding
 	params  listaMoolahMarketParams
@@ -205,78 +185,9 @@ func listaShouldProcessMoolahMarket(held listaMoolahHeldMarket) (bool, error) {
 	return false, nil
 }
 
-func listaShareFraction(shares, totalAssets, totalShares *big.Int) (*big.Int, *big.Int) {
-	numerator := new(big.Int).Mul(shares, new(big.Int).Add(totalAssets, big.NewInt(1)))
-	denominator := new(big.Int).Add(totalShares, big.NewInt(1_000_000))
-	return numerator, denominator
-}
+type listaMoolahMarketParams = morphoMarketParams
 
-type listaMoolahMarketParams struct {
-	LoanToken       common.Address
-	CollateralToken common.Address
-	Oracle          common.Address
-	Irm             common.Address
-	Lltv            *big.Int
-}
-
-type listaMoolahMarketState struct {
-	TotalSupplyAssets *big.Int
-	TotalSupplyShares *big.Int
-	TotalBorrowAssets *big.Int
-	TotalBorrowShares *big.Int
-	LastUpdate        *big.Int
-	Fee               *big.Int
-}
-
-func listaMulDivDown(x, y, denominator *big.Int) *big.Int {
-	return new(big.Int).Div(new(big.Int).Mul(x, y), denominator)
-}
-
-func listaMulDivUp(x, y, denominator *big.Int) *big.Int {
-	if x.Sign() == 0 || y.Sign() == 0 {
-		return new(big.Int)
-	}
-	numerator := new(big.Int).Mul(x, y)
-	numerator.Add(numerator, new(big.Int).Sub(denominator, big.NewInt(1)))
-	return numerator.Div(numerator, denominator)
-}
-
-func listaExpectedMarketBalances(
-	state listaMoolahMarketState,
-	borrowRate *big.Int,
-	elapsed uint64,
-) (listaMoolahMarketState, *big.Int) {
-	result := listaMoolahMarketState{
-		TotalSupplyAssets: new(big.Int).Set(state.TotalSupplyAssets),
-		TotalSupplyShares: new(big.Int).Set(state.TotalSupplyShares),
-		TotalBorrowAssets: new(big.Int).Set(state.TotalBorrowAssets),
-		TotalBorrowShares: new(big.Int).Set(state.TotalBorrowShares),
-		LastUpdate:        new(big.Int).Set(state.LastUpdate),
-		Fee:               new(big.Int).Set(state.Fee),
-	}
-	feeShares := new(big.Int)
-	if elapsed == 0 || result.TotalBorrowAssets.Sign() == 0 || borrowRate.Sign() == 0 {
-		return result, feeShares
-	}
-	wad := big.NewInt(1_000_000_000_000_000_000)
-	firstTerm := new(big.Int).Mul(borrowRate, new(big.Int).SetUint64(elapsed))
-	secondTerm := listaMulDivDown(firstTerm, firstTerm, new(big.Int).Mul(big.NewInt(2), wad))
-	thirdTerm := listaMulDivDown(secondTerm, firstTerm, new(big.Int).Mul(big.NewInt(3), wad))
-	compounded := new(big.Int).Add(firstTerm, secondTerm)
-	compounded.Add(compounded, thirdTerm)
-	interest := listaMulDivDown(result.TotalBorrowAssets, compounded, wad)
-	result.TotalBorrowAssets.Add(result.TotalBorrowAssets, interest)
-	result.TotalSupplyAssets.Add(result.TotalSupplyAssets, interest)
-	if result.Fee.Sign() > 0 && interest.Sign() > 0 {
-		feeAmount := listaMulDivDown(interest, result.Fee, wad)
-		feeAssets := new(big.Int).Sub(result.TotalSupplyAssets, feeAmount)
-		virtualShares := new(big.Int).Add(result.TotalSupplyShares, big.NewInt(1_000_000))
-		virtualAssets := new(big.Int).Add(feeAssets, big.NewInt(1))
-		feeShares = listaMulDivDown(feeAmount, virtualShares, virtualAssets)
-		result.TotalSupplyShares.Add(result.TotalSupplyShares, feeShares)
-	}
-	return result, feeShares
-}
+type listaMoolahMarketState = morphoMarketState
 
 func listaDecodeHeldMarket(
 	holding listaMoolahHolding,
@@ -429,7 +340,7 @@ func (a *ListaAdapter) moolahGroups(
 		if held.params.Irm != (common.Address{}) && held.state.TotalBorrowAssets.Sign() > 0 &&
 			held.state.LastUpdate.Uint64() < block.Timestamp {
 			rateCalls = append(rateCalls, ContractCall{
-				Contract: held.params.Irm, ABI: listaMoolahIRMABI, Method: "borrowRateView",
+				Contract: held.params.Irm, ABI: morphoIRMABI, Method: "borrowRateView",
 				Args: []any{held.params, held.state},
 			})
 			rateIndexes = append(rateIndexes, heldIndex)
@@ -459,8 +370,8 @@ func (a *ListaAdapter) moolahGroups(
 		if held.state.LastUpdate.Uint64() < block.Timestamp {
 			elapsed = block.Timestamp - held.state.LastUpdate.Uint64()
 		}
-		expected, pendingFeeShares := listaExpectedMarketBalances(held.state, held.rate, elapsed)
-		effectiveSupplyShares := listaEffectiveSupplyShares(
+		expected, pendingFeeShares := morphoExpectedMarketBalances(held.state, held.rate, elapsed)
+		effectiveSupplyShares := morphoEffectiveSupplyShares(
 			holding.supplyShares, pendingFeeShares, account, feeRecipient,
 		)
 		components := make([]Component, 0, 3)
@@ -469,7 +380,7 @@ func (a *ListaAdapter) moolahGroups(
 				Source{Contract: deployment.Address, Method: "position(id,account).collateral"}))
 		}
 		if effectiveSupplyShares.Sign() > 0 {
-			numerator, denominator := listaShareFraction(effectiveSupplyShares, expected.TotalSupplyAssets, expected.TotalSupplyShares)
+			numerator, denominator := morphoShareFraction(effectiveSupplyShares, expected.TotalSupplyAssets, expected.TotalSupplyShares)
 			amount := new(big.Int).Div(numerator, denominator)
 			component := NewComponent("asset", tokens[held.params.LoanToken], amount,
 				Source{Contract: deployment.Address, Method: "expected supply assets after interest, rounded down"})
@@ -485,7 +396,7 @@ func (a *ListaAdapter) moolahGroups(
 		if holding.borrowShares.Sign() > 0 {
 			borrowAssets := new(big.Int).Add(expected.TotalBorrowAssets, big.NewInt(1))
 			borrowShares := new(big.Int).Add(expected.TotalBorrowShares, big.NewInt(1_000_000))
-			amount := listaMulDivUp(holding.borrowShares, borrowAssets, borrowShares)
+			amount := morphoMulDivUp(holding.borrowShares, borrowAssets, borrowShares)
 			component := NewComponent("debt", tokens[held.params.LoanToken], amount,
 				Source{Contract: deployment.Address, Method: "expected borrow assets after interest, rounded up"})
 			component.Metadata = map[string]any{"shares": holding.borrowShares.String(), "borrowRatePerSecondWad": held.rate.String()}

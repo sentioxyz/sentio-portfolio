@@ -87,20 +87,39 @@ var morphoDeployments = map[ChainID]morphoDeployment{
 }
 
 type morphoCorePosition struct {
-	MarketID          common.Hash
-	SupplyShares      *big.Int
-	BorrowShares      *big.Int
-	Collateral        *big.Int
-	TotalSupplyAssets *big.Int
-	TotalSupplyShares *big.Int
-	TotalBorrowAssets *big.Int
-	TotalBorrowShares *big.Int
-	LastUpdate        *big.Int
-	LoanToken         common.Address
-	CollateralToken   common.Address
-	Oracle            common.Address
-	IRM               common.Address
-	LLTV              *big.Int
+	MarketID           common.Hash
+	StoredSupplyShares *big.Int
+	SupplyShares       *big.Int
+	BorrowShares       *big.Int
+	Collateral         *big.Int
+	TotalSupplyAssets  *big.Int
+	TotalSupplyShares  *big.Int
+	TotalBorrowAssets  *big.Int
+	TotalBorrowShares  *big.Int
+	LastUpdate         *big.Int
+	Fee                *big.Int
+	BorrowRate         *big.Int
+	PendingFeeShares   *big.Int
+	LoanToken          common.Address
+	CollateralToken    common.Address
+	Oracle             common.Address
+	IRM                common.Address
+	LLTV               *big.Int
+}
+
+func (p morphoCorePosition) marketParams() morphoMarketParams {
+	return morphoMarketParams{
+		LoanToken: p.LoanToken, CollateralToken: p.CollateralToken,
+		Oracle: p.Oracle, Irm: p.IRM, Lltv: p.LLTV,
+	}
+}
+
+func (p morphoCorePosition) storedMarket() morphoMarketState {
+	return morphoMarketState{
+		TotalSupplyAssets: p.TotalSupplyAssets, TotalSupplyShares: p.TotalSupplyShares,
+		TotalBorrowAssets: p.TotalBorrowAssets, TotalBorrowShares: p.TotalBorrowShares,
+		LastUpdate: p.LastUpdate, Fee: p.Fee,
+	}
 }
 
 type morphoComponentDraft struct {
@@ -155,16 +174,6 @@ func morphoMarketID(
 	return crypto.Keccak256Hash(encoded), nil
 }
 
-func morphoStoredShareFraction(
-	shares *big.Int,
-	totalAssets *big.Int,
-	totalShares *big.Int,
-) (*big.Int, *big.Int) {
-	numerator := new(big.Int).Mul(shares, new(big.Int).Add(totalAssets, big.NewInt(1)))
-	denominator := new(big.Int).Add(totalShares, big.NewInt(1_000_000))
-	return numerator, denominator
-}
-
 func readMorphoCorePositions(
 	ctx context.Context,
 	client *RPCClient,
@@ -176,7 +185,10 @@ func readMorphoCorePositions(
 	if len(marketIDs) == 0 {
 		return nil, nil
 	}
-	calls := make([]ContractCall, 0, len(marketIDs)*3)
+	calls := make([]ContractCall, 0, len(marketIDs)*3+1)
+	calls = append(calls, ContractCall{
+		Contract: deployment.Morpho, ABI: morphoCoreABI, Method: "feeRecipient",
+	})
 	for _, marketID := range marketIDs {
 		calls = append(calls,
 			ContractCall{Contract: deployment.Morpho, ABI: morphoCoreABI, Method: "position", Args: []any{marketID, account}},
@@ -188,14 +200,20 @@ func readMorphoCorePositions(
 	if err != nil {
 		return nil, fmt.Errorf("core state: %w", err)
 	}
+	feeRecipient, err := AddressAt(rows[0], 0)
+	if err != nil {
+		return nil, fmt.Errorf("fee recipient: %w", err)
+	}
+	rows = rows[1:]
 	positions := make([]morphoCorePosition, 0, len(marketIDs))
 	for index, marketID := range marketIDs {
 		positionRow, marketRow, paramsRow := rows[index*3], rows[index*3+1], rows[index*3+2]
 		position := morphoCorePosition{MarketID: marketID}
 		var decodeErr error
-		if position.SupplyShares, decodeErr = BigIntAt(positionRow, 0); decodeErr != nil {
+		if position.StoredSupplyShares, decodeErr = BigIntAt(positionRow, 0); decodeErr != nil {
 			return nil, fmt.Errorf("market %s supply shares: %w", marketID, decodeErr)
 		}
+		position.SupplyShares = new(big.Int).Set(position.StoredSupplyShares)
 		if position.BorrowShares, decodeErr = BigIntAt(positionRow, 1); decodeErr != nil {
 			return nil, fmt.Errorf("market %s borrow shares: %w", marketID, decodeErr)
 		}
@@ -215,6 +233,9 @@ func readMorphoCorePositions(
 			return nil, decodeErr
 		}
 		if position.LastUpdate, decodeErr = BigIntAt(marketRow, 4); decodeErr != nil {
+			return nil, decodeErr
+		}
+		if position.Fee, decodeErr = BigIntAt(marketRow, 5); decodeErr != nil {
 			return nil, decodeErr
 		}
 		if position.LoanToken, decodeErr = AddressAt(paramsRow, 0); decodeErr != nil {
@@ -238,11 +259,74 @@ func readMorphoCorePositions(
 		if hashErr != nil || computedID != marketID || position.LastUpdate.Sign() == 0 {
 			return nil, fmt.Errorf("index returned unknown Morpho market %s", marketID)
 		}
-		if position.SupplyShares.Sign() > 0 || position.BorrowShares.Sign() > 0 || position.Collateral.Sign() > 0 {
+		if !position.LastUpdate.IsUint64() || position.LastUpdate.Uint64() > block.Timestamp {
+			return nil, fmt.Errorf(
+				"Morpho market %s last update %s is ahead of pinned timestamp %d",
+				marketID,
+				position.LastUpdate,
+				block.Timestamp,
+			)
+		}
+		position.BorrowRate = new(big.Int)
+		position.PendingFeeShares = new(big.Int)
+		if position.SupplyShares.Sign() > 0 || position.BorrowShares.Sign() > 0 ||
+			position.Collateral.Sign() > 0 || (feeRecipient != (common.Address{}) && account == feeRecipient) {
 			positions = append(positions, position)
 		}
 	}
-	return positions, nil
+	rateCalls := make([]ContractCall, 0, len(positions))
+	rateIndexes := make([]int, 0, len(positions))
+	for index := range positions {
+		position := positions[index]
+		if position.IRM == (common.Address{}) || position.TotalBorrowAssets.Sign() == 0 ||
+			position.LastUpdate.Uint64() == block.Timestamp {
+			continue
+		}
+		rateCalls = append(rateCalls, ContractCall{
+			Contract: position.IRM,
+			ABI:      morphoIRMABI,
+			Method:   "borrowRateView",
+			Args:     []any{position.marketParams(), position.storedMarket()},
+		})
+		rateIndexes = append(rateIndexes, index)
+	}
+	if len(rateCalls) > 0 {
+		rates, rateErr := client.ParallelCalls(ctx, block, rateCalls)
+		if rateErr != nil {
+			return nil, fmt.Errorf("Morpho borrow rates: %w", rateErr)
+		}
+		for index, row := range rates {
+			rate, decodeErr := BigIntAt(row, 0)
+			if decodeErr != nil {
+				return nil, fmt.Errorf(
+					"Morpho market %s borrow rate: %w",
+					positions[rateIndexes[index]].MarketID,
+					decodeErr,
+				)
+			}
+			positions[rateIndexes[index]].BorrowRate = rate
+		}
+	}
+	projected := positions[:0]
+	for index := range positions {
+		position := positions[index]
+		elapsed := block.Timestamp - position.LastUpdate.Uint64()
+		expected, pendingFeeShares := morphoExpectedMarketBalances(
+			position.storedMarket(), position.BorrowRate, elapsed,
+		)
+		position.TotalSupplyAssets = expected.TotalSupplyAssets
+		position.TotalSupplyShares = expected.TotalSupplyShares
+		position.TotalBorrowAssets = expected.TotalBorrowAssets
+		position.TotalBorrowShares = expected.TotalBorrowShares
+		position.PendingFeeShares = pendingFeeShares
+		position.SupplyShares = morphoEffectiveSupplyShares(
+			position.StoredSupplyShares, pendingFeeShares, account, feeRecipient,
+		)
+		if position.SupplyShares.Sign() > 0 || position.BorrowShares.Sign() > 0 || position.Collateral.Sign() > 0 {
+			projected = append(projected, position)
+		}
+	}
+	return projected, nil
 }
 
 func morphoCoreDrafts(deployment morphoDeployment, positions []morphoCorePosition) []morphoGroupDraft {
@@ -257,28 +341,32 @@ func morphoCoreDrafts(deployment morphoDeployment, positions []morphoCorePositio
 			})
 		}
 		if position.SupplyShares.Sign() > 0 {
-			numerator, denominator := morphoStoredShareFraction(
+			numerator, denominator := morphoShareFraction(
 				position.SupplyShares, position.TotalSupplyAssets, position.TotalSupplyShares,
 			)
 			components = append(components, morphoComponentDraft{
 				Kind: "asset", Token: position.LoanToken, Amount: numerator, Denominator: denominator,
-				Source: Source{Contract: deployment.Morpho, Method: "stored supply-share ratio"},
+				Source: Source{Contract: deployment.Morpho, Method: "expected supply-share ratio after interest"},
 				Metadata: map[string]any{
 					"role": "supply", "marketId": position.MarketID.Hex(),
-					"supplyShares": position.SupplyShares.String(),
+					"supplyShares":           position.SupplyShares.String(),
+					"storedSupplyShares":     position.StoredSupplyShares.String(),
+					"pendingFeeShares":       position.PendingFeeShares.String(),
+					"borrowRatePerSecondWad": position.BorrowRate.String(),
 				},
 			})
 		}
 		if position.BorrowShares.Sign() > 0 {
-			numerator, denominator := morphoStoredShareFraction(
+			numerator, denominator := morphoShareFraction(
 				position.BorrowShares, position.TotalBorrowAssets, position.TotalBorrowShares,
 			)
 			components = append(components, morphoComponentDraft{
 				Kind: "debt", Token: position.LoanToken, Amount: numerator, Denominator: denominator,
-				Source: Source{Contract: deployment.Morpho, Method: "stored borrow-share ratio"},
+				Source: Source{Contract: deployment.Morpho, Method: "expected borrow-share ratio after interest"},
 				Metadata: map[string]any{
 					"role": "borrow", "marketId": position.MarketID.Hex(),
-					"borrowShares": position.BorrowShares.String(),
+					"borrowShares":           position.BorrowShares.String(),
+					"borrowRatePerSecondWad": position.BorrowRate.String(),
 				},
 			})
 		}
@@ -294,7 +382,7 @@ func morphoCoreDrafts(deployment morphoDeployment, positions []morphoCorePositio
 				"marketId": position.MarketID.Hex(), "loanToken": position.LoanToken,
 				"collateralToken": position.CollateralToken, "oracle": position.Oracle,
 				"irm": position.IRM, "lltv": position.LLTV.String(),
-				"marketLastUpdate": position.LastUpdate.String(), "accounting": "stored-share-ratio",
+				"marketLastUpdate": position.LastUpdate.String(), "accounting": "expected-share-ratio",
 			},
 		})
 	}

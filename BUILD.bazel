@@ -27,6 +27,7 @@ go_library(
         "morpho.go",
         "morpho_collateral.go",
         "morpho_indexer.go",
+        "morpho_math.go",
         "olympus.go",
         "pricing.go",
         "rocketpool.go",
