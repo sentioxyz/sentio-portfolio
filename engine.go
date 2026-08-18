@@ -79,6 +79,11 @@ func NewEngineWithConfig(
 	adapters = append(adapters, lstAdapters()...)
 	adapters = append(adapters, newLidoAdapter())
 	adapters = append(adapters, newMethAdapter(config.sentioIndexer("meth-protocol")))
+	adapters = append(adapters, newEtherfiAdapter(config.sentioIndexer("etherfi")))
+	adapters = append(adapters, newFraxEtherAdapter(config.sentioIndexer("frax-ether")))
+	adapters = append(adapters, newRenzoAdapter(config.sentioIndexer("renzo")))
+	adapters = append(adapters, newAsterAdapter(config.sentioIndexer("aster")))
+	adapters = append(adapters, newFxProtocolAdapter())
 	adapters = append(adapters, newRocketPoolAdapter())
 	adapters = append(adapters, newStaderAdapter())
 	adapters = append(adapters, newOlympusAdapter())
@@ -94,6 +99,7 @@ func NewEngineWithConfig(
 	adapters = append(adapters, newBeefyAdapter())
 	adapters = append(adapters, newStakeWiseAdapter())
 	adapters = append(adapters, newListaAdapter())
+	adapters = append(adapters, newEulerV2Adapter(config.sentioIndexer("euler-v2")))
 	adapters = append(adapters, newMorphoAdapter(config.sentioIndexer("morpho-blue")))
 	adapters = append(adapters, newFluidAdapter())
 	adapters = append(adapters, newUniswapAdapters(
@@ -280,11 +286,11 @@ func (e *Engine) ScanWithOptions(
 						chain.block,
 						account.Address,
 					)
+					groups = append(groups, attributedGroups(accountGroups, account, address)...)
 					if err != nil {
 						positionErr = err
 						break
 					}
-					groups = append(groups, attributedGroups(accountGroups, account, address)...)
 				}
 				mutex.Lock()
 				if positionErr != nil {
@@ -295,7 +301,8 @@ func (e *Engine) ScanWithOptions(
 						ProtocolName: info.Name,
 						Message:      PublicError(positionErr),
 					})
-				} else if len(groups) > 0 {
+				}
+				if len(groups) > 0 {
 					response.Snapshots = append(response.Snapshots, Snapshot{
 						ProtocolID:     info.ID,
 						ProtocolName:   info.Name,
