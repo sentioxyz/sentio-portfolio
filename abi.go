@@ -29,6 +29,24 @@ func BigIntAt(values []any, index int) (*big.Int, error) {
 	return new(big.Int).Set(value), nil
 }
 
+func BigIntSliceAt(values []any, index int) ([]*big.Int, error) {
+	if index < 0 || index >= len(values) {
+		return nil, fmt.Errorf("missing result at index %d", index)
+	}
+	value, ok := values[index].([]*big.Int)
+	if !ok {
+		return nil, fmt.Errorf("result %d is %T, expected []*big.Int", index, values[index])
+	}
+	result := make([]*big.Int, len(value))
+	for itemIndex, item := range value {
+		if item == nil {
+			return nil, fmt.Errorf("result %d item %d is nil", index, itemIndex)
+		}
+		result[itemIndex] = new(big.Int).Set(item)
+	}
+	return result, nil
+}
+
 func AddressAt(values []any, index int) (common.Address, error) {
 	if index < 0 || index >= len(values) {
 		return common.Address{}, fmt.Errorf("missing result at index %d", index)

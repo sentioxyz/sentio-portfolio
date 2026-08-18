@@ -10,6 +10,7 @@ import (
 var convertedBalanceABI = MustABI(`[
   {"type":"function","name":"balanceOf","stateMutability":"view","inputs":[{"name":"account","type":"address"}],"outputs":[{"type":"uint256"}]},
   {"type":"function","name":"getStETHByWstETH","stateMutability":"view","inputs":[{"name":"shares","type":"uint256"}],"outputs":[{"type":"uint256"}]},
+  {"type":"function","name":"getEETHByWeETH","stateMutability":"view","inputs":[{"name":"shares","type":"uint256"}],"outputs":[{"type":"uint256"}]},
   {"type":"function","name":"underlyingBalanceFromShares","stateMutability":"view","inputs":[{"name":"shares","type":"uint256"}],"outputs":[{"type":"uint256"}]},
   {"type":"function","name":"mETHToETH","stateMutability":"view","inputs":[{"name":"amount","type":"uint256"}],"outputs":[{"type":"uint256"}]},
   {"type":"function","name":"getEthValue","stateMutability":"view","inputs":[{"name":"amount","type":"uint256"}],"outputs":[{"type":"uint256"}]},
@@ -54,8 +55,18 @@ func (a *ConvertedBalanceAdapter) Positions(
 	block BlockRef,
 	account common.Address,
 ) ([]Group, error) {
+	return readConvertedBalancePositions(ctx, client, block, account, a.positions[block.ChainID])
+}
+
+func readConvertedBalancePositions(
+	ctx context.Context,
+	client *RPCClient,
+	block BlockRef,
+	account common.Address,
+	positions []convertedBalancePosition,
+) ([]Group, error) {
 	groups := make([]Group, 0)
-	for _, position := range a.positions[block.ChainID] {
+	for _, position := range positions {
 		if block.Number < position.ActivationBlock {
 			continue
 		}

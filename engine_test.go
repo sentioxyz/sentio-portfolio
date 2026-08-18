@@ -28,7 +28,10 @@ func TestEngineRegistersAtLeastTwentyUniqueProtocols(t *testing.T) {
 			t.Fatalf("protocol %q has no chains", protocol.ID)
 		}
 	}
-	for _, required := range []string{"beefy", "fluid", "lista", "morpho-blue", "stakewise"} {
+	for _, required := range []string{
+		"aster", "beefy", "etherfi", "euler-v2", "fluid", "frax-ether", "fxprotocol",
+		"lista", "morpho-blue", "renzo", "stakewise",
+	} {
 		if _, exists := seen[required]; !exists {
 			t.Errorf("protocol %q is not registered", required)
 		}
@@ -37,8 +40,13 @@ func TestEngineRegistersAtLeastTwentyUniqueProtocols(t *testing.T) {
 
 func TestEngineWiresRuntimeSentioIndexerConfig(t *testing.T) {
 	configs := map[string]SentioIndexerConfig{
+		"aster":         testSentioIndexerConfig("aster"),
+		"etherfi":       testSentioIndexerConfig("etherfi"),
+		"euler-v2":      testSentioIndexerConfig("euler-v2"),
+		"frax-ether":    testSentioIndexerConfig("frax-ether"),
 		"meth-protocol": testSentioIndexerConfig("meth"),
 		"morpho-blue":   testSentioIndexerConfig("morpho"),
+		"renzo":         testSentioIndexerConfig("renzo"),
 		"uniswap-v3":    testSentioIndexerConfig("uniswap-v3"),
 		"uniswap-v4":    testSentioIndexerConfig("uniswap-v4"),
 	}
@@ -46,6 +54,27 @@ func TestEngineWiresRuntimeSentioIndexerConfig(t *testing.T) {
 	found := make(map[string]bool)
 	for _, adapter := range engine.adapters {
 		switch typed := adapter.(type) {
+		case *AsterAdapter:
+			if typed.indexer.config != configs["aster"] {
+				t.Fatalf("Aster indexer config was not wired")
+			}
+			found["aster"] = true
+		case *EtherfiAdapter:
+			if typed.indexer.config != configs["etherfi"] {
+				t.Fatalf("Ether.fi indexer config was not wired")
+			}
+			found["etherfi"] = true
+		case *EulerV2Adapter:
+			indexer, ok := typed.indexer.(*eulerIndexer)
+			if !ok || indexer.config != configs["euler-v2"] {
+				t.Fatalf("Euler V2 indexer config was not wired")
+			}
+			found["euler-v2"] = true
+		case *FraxEtherAdapter:
+			if typed.indexer.config != configs["frax-ether"] {
+				t.Fatalf("Frax Ether indexer config was not wired")
+			}
+			found["frax-ether"] = true
 		case *MethAdapter:
 			if typed.indexer != configs["meth-protocol"] {
 				t.Fatalf("mETH indexer config = %+v, want %+v", typed.indexer, configs["meth-protocol"])
@@ -57,6 +86,11 @@ func TestEngineWiresRuntimeSentioIndexerConfig(t *testing.T) {
 				t.Fatalf("Morpho indexer config was not wired")
 			}
 			found["morpho-blue"] = true
+		case *RenzoAdapter:
+			if typed.indexer.config != configs["renzo"] {
+				t.Fatalf("Renzo indexer config was not wired")
+			}
+			found["renzo"] = true
 		case *UniswapV3Adapter:
 			if typed.indexer.configs[uniswapV3] != configs["uniswap-v3"] {
 				t.Fatalf("Uniswap V3 indexer config was not wired")

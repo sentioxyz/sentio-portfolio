@@ -8,6 +8,8 @@ import (
 
 type Adapter interface {
 	Info() ProtocolInfo
+	// Positions may return verified groups together with an error when an independent
+	// protocol surface fails. The engine preserves those groups and reports the error.
 	Positions(
 		ctx context.Context,
 		client *RPCClient,
