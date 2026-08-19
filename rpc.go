@@ -67,7 +67,7 @@ func DialRPC(ctx context.Context, chainID ChainID, endpoint string) (*RPCClient,
 	}
 	client, err := rpc.DialOptions(ctx, endpoint, rpc.WithHTTPClient(httpClient))
 	if err != nil {
-		return nil, fmt.Errorf("dial chain %d RPC: %w", chainID, err)
+		return nil, fmt.Errorf("dial chain %d RPC: %w", chainID, redactEndpoints(err))
 	}
 	result := &RPCClient{chainID: chainID, client: client, transport: transport}
 	var actual hexutil.Big
@@ -115,6 +115,10 @@ func retryableRPCError(err error) bool {
 }
 
 func (c *RPCClient) call(ctx context.Context, result any, method string, args ...any) error {
+	return redactEndpoints(c.callRaw(ctx, result, method, args...))
+}
+
+func (c *RPCClient) callRaw(ctx context.Context, result any, method string, args ...any) error {
 	var last error
 	for attempt := 0; attempt < rpcAttempts; attempt++ {
 		callCtx, cancel := context.WithTimeout(ctx, rpcCallTimeout)
@@ -143,6 +147,10 @@ func (c *RPCClient) call(ctx context.Context, result any, method string, args ..
 }
 
 func (c *RPCClient) batchCall(ctx context.Context, batch []rpc.BatchElem) error {
+	return redactEndpoints(c.batchCallRaw(ctx, batch))
+}
+
+func (c *RPCClient) batchCallRaw(ctx context.Context, batch []rpc.BatchElem) error {
 	var last error
 	for attempt := 0; attempt < rpcAttempts; attempt++ {
 		for index := range batch {
@@ -409,6 +417,10 @@ func (c *RPCClient) ParallelCallsAllowFailure(
 }
 
 func (c *RPCClient) batchCallTransport(ctx context.Context, batch []rpc.BatchElem) error {
+	return redactEndpoints(c.batchCallTransportRaw(ctx, batch))
+}
+
+func (c *RPCClient) batchCallTransportRaw(ctx context.Context, batch []rpc.BatchElem) error {
 	var last error
 	for attempt := 0; attempt < rpcAttempts; attempt++ {
 		for index := range batch {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"math/big"
 	"net/http"
@@ -289,6 +290,17 @@ func TestDeBankReconciliationCorpora(t *testing.T) {
 	})
 }
 
+// debankFetcher retrieves one account's position payload for a single DeBank project.
+type debankFetcher func(
+	t *testing.T,
+	ctx context.Context,
+	httpClient *http.Client,
+	accessKey string,
+	account string,
+	projectID string,
+	chainID ChainID,
+) json.RawMessage
+
 func reconcileDeBankAPIAccount(
 	t *testing.T,
 	ctx context.Context,
@@ -299,9 +311,10 @@ func reconcileDeBankAPIAccount(
 	adapter Adapter,
 	chainID ChainID,
 	account string,
+	fetch debankFetcher,
 ) {
 	t.Helper()
-	payload := fetchDeBankProtocol(t, ctx, httpClient, accessKey, account, projectID, chainID)
+	payload := fetch(t, ctx, httpClient, accessKey, account, projectID, chainID)
 	oracleTimestamp := requireFreshDeBankProtocol(t, payload, projectID, chainID)
 	wrapped := []byte(fmt.Sprintf(
 		`{"projectId":%q,"response":{"data":[%s]}}`,
@@ -417,6 +430,70 @@ func requireFreshDeBankProtocol(
 		t.Fatalf("DeBank %s response is stale: update_at=%.3f", projectID, latestUpdate)
 	}
 	return uint64(latestUpdate)
+}
+
+func fetchDeBankProtocolRefreshed(
+	t *testing.T,
+	ctx context.Context,
+	httpClient *http.Client,
+	accessKey string,
+	account string,
+	projectID string,
+	chainID ChainID,
+) json.RawMessage {
+	t.Helper()
+	const attempts = 3
+	var failures []error
+	for attempt := 0; attempt < attempts; attempt++ {
+		request, err := http.NewRequestWithContext(
+			ctx,
+			http.MethodGet,
+			"https://pro-openapi.debank.com/v1/user/protocol?id="+account+"&protocol_id="+projectID,
+			nil,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("AccessKey", accessKey)
+		request.Header.Set("Accept", "application/json")
+		request.Header.Set("Accept-Encoding", "identity")
+		response, requestErr := httpClient.Do(request)
+		if requestErr != nil {
+			failures = append(failures, fmt.Errorf("attempt %d: %w", attempt+1, requestErr))
+		} else {
+			payload, readErr := io.ReadAll(response.Body)
+			closeErr := response.Body.Close()
+			if readErr != nil || closeErr != nil {
+				failures = append(failures, fmt.Errorf(
+					"attempt %d: read response: %w", attempt+1, errors.Join(readErr, closeErr),
+				))
+			} else if response.StatusCode != http.StatusOK {
+				failures = append(failures, fmt.Errorf(
+					"attempt %d: DeBank returned %d", attempt+1, response.StatusCode,
+				))
+			} else {
+				var identity struct {
+					ID    string `json:"id"`
+					Chain string `json:"chain"`
+				}
+				if err := json.Unmarshal(payload, &identity); err != nil {
+					failures = append(failures, fmt.Errorf("attempt %d: decode response: %w", attempt+1, err))
+				} else if identity.ID != projectID || identity.Chain != reconciliationChainNames[chainID] {
+					t.Fatalf(
+						"DeBank returned %s on chain %s, expected %s on chain %s",
+						identity.ID, identity.Chain, projectID, reconciliationChainNames[chainID],
+					)
+				} else {
+					return json.RawMessage(payload)
+				}
+			}
+		}
+		if attempt+1 < attempts {
+			time.Sleep(time.Duration(1<<attempt) * 500 * time.Millisecond)
+		}
+	}
+	t.Fatalf("DeBank %s request failed after %d attempts: %v", projectID, len(failures), errors.Join(failures...))
+	return nil
 }
 
 func fetchDeBankProtocol(
@@ -642,6 +719,33 @@ func runDeBankAPIReconciliation(
 	accounts []string,
 ) {
 	t.Helper()
+	runDeBankAPIReconciliationWith(t, projectID, adapter, chainID, accounts, fetchDeBankProtocol)
+}
+
+// runDeBankAPIReconciliationRefreshed compares against DeBank's single-protocol endpoint, which
+// forces a refresh before answering. Corpora drawn from an index rather than from DeBank's own
+// popular-account set are usually absent from its cache for months, so the cached surface would
+// fail the freshness gate rather than disagree on a number.
+func runDeBankAPIReconciliationRefreshed(
+	t *testing.T,
+	projectID string,
+	adapter Adapter,
+	chainID ChainID,
+	accounts []string,
+) {
+	t.Helper()
+	runDeBankAPIReconciliationWith(t, projectID, adapter, chainID, accounts, fetchDeBankProtocolRefreshed)
+}
+
+func runDeBankAPIReconciliationWith(
+	t *testing.T,
+	projectID string,
+	adapter Adapter,
+	chainID ChainID,
+	accounts []string,
+	fetch debankFetcher,
+) {
+	t.Helper()
 	if os.Getenv("PORTFOLIO_DEBANK_API_LIVE_TEST") != "1" {
 		t.Skip("set PORTFOLIO_DEBANK_API_LIVE_TEST=1 to compare with DeBank Pro API")
 	}
@@ -670,7 +774,7 @@ func runDeBankAPIReconciliation(
 		account := account
 		t.Run(strings.ToLower(account), func(t *testing.T) {
 			reconcileDeBankAPIAccount(
-				t, ctx, rpcClient, httpClient, accessKey, projectID, adapter, chainID, account,
+				t, ctx, rpcClient, httpClient, accessKey, projectID, adapter, chainID, account, fetch,
 			)
 		})
 	}

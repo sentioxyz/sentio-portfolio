@@ -1,5 +1,22 @@
 # Repository guidance
 
+## Indexer topology
+
+Every adapter that needs a Sentio indexer gets its own processor project. Never
+share one project across protocols, even when the entity schemas would fit in a
+single processor:
+
+- one `SentioIndexerConfig` per protocol ID, supplied by the host service as a
+  distinct project and processor version;
+- the generic indexer clients (`ownerTokenIndexer`, `accountRequestIndexer`) are
+  shared *code*, not a shared deployment — reuse the client, keep the project
+  separate;
+- a protocol's backfill state, checkpoint lag, and schema migrations must never
+  be able to stall or break an unrelated protocol's positions;
+- adding a protocol means a new project, a new processor version, and new host
+  configuration — never an extra contract binding inside another protocol's
+  processor.
+
 ## Sensitive data
 
 This is a public repository. Never commit secrets or environment-specific

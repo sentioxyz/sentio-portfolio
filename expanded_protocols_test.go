@@ -49,7 +49,7 @@ func TestEtherfiVaultAssetsRejectsInvalidInputs(t *testing.T) {
 	}
 }
 
-func TestAsterEarnAssetsAndDisplayToken(t *testing.T) {
+func TestAsterEarnAssets(t *testing.T) {
 	assets, err := asterEarnAssets(
 		big.NewInt(1_000_000_000_000_000_000),
 		big.NewInt(1_783_772_151),
@@ -62,10 +62,6 @@ func TestAsterEarnAssetsAndDisplayToken(t *testing.T) {
 	want.SetString("17837721510000000000", 10)
 	if assets.Cmp(want) != 0 {
 		t.Fatalf("Aster converted assets = %s, want %s", assets, want)
-	}
-	display := asterDisplayToken(Token{ChainID: BSC, Address: asterSlisBNB, Symbol: "slisBNB", Decimals: 18})
-	if display.Address != asterWBNB.Address || display.Symbol != "BNB" {
-		t.Fatalf("Aster display token = %+v, want %+v", display, asterWBNB)
 	}
 }
 

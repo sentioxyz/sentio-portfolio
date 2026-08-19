@@ -388,6 +388,7 @@ func (a *RenzoAdapter) readEigenWithdrawals(
 			{Contract: vault.Address, ABI: renzoEigenVaultABI, Method: "withdrawRequest", Args: []any{root}},
 			{Contract: vault.Address, ABI: renzoEigenVaultABI, Method: "scaleFactor"},
 			{Contract: vault.Address, ABI: renzoEigenVaultABI, Method: "queuedWithdrawalInfo", Args: []any{root}},
+			{Contract: vault.Address, ABI: renzoEigenVaultABI, Method: "getRate"},
 		})
 		if err != nil {
 			return nil, fmt.Errorf("%s withdrawal %s: %w", vault.Label, root, err)
@@ -421,14 +422,14 @@ func (a *RenzoAdapter) readEigenWithdrawals(
 			slashedShares.Sign() < 0 || initialShares.Sign() < 0 || slashedShares.Cmp(initialShares) > 0 {
 			return nil, fmt.Errorf("%s withdrawal %s does not match the pinned index", vault.Label, root)
 		}
-		creationBlock := BlockRef{ChainID: Ethereum, Number: createdAt.Uint64(), Fixed: true}
-		rateRow, err := client.Call(ctx, creationBlock, vault.Address, renzoEigenVaultABI, "getRate")
-		if err != nil {
-			return nil, fmt.Errorf("%s withdrawal %s creation rate: %w", vault.Label, root, err)
-		}
-		rate, err := BigIntAt(rateRow, 0)
+		// A queued EigenLayer withdrawal holds shares, not a settled amount: it keeps tracking
+		// the vault rate until it is completed. Value it at the pinned block's rate, the same
+		// rate every other position on this vault is valued at, rather than freezing it at the
+		// rate when the withdrawal was queued. createdAtBlock is still read — the slashing
+		// adjustment below and the index cross-check both need it.
+		rate, err := BigIntAt(rows[3], 0)
 		if err != nil || rate.Sign() <= 0 {
-			return nil, fmt.Errorf("%s withdrawal %s creation rate is invalid", vault.Label, root)
+			return nil, fmt.Errorf("%s withdrawal %s rate is invalid", vault.Label, root)
 		}
 		amount := new(big.Int).Mul(locked, rate)
 		amount.Quo(amount, scale)
@@ -442,12 +443,12 @@ func (a *RenzoAdapter) readEigenWithdrawals(
 		}
 		component := NewComponent(
 			"asset", vault.Underlying, amount,
-			Source{Contract: vault.Address, Method: "withdrawRequest/getRate@creationBlock"},
+			Source{Contract: vault.Address, Method: "withdrawRequest/getRate"},
 		)
 		component.Metadata = map[string]any{
 			"withdrawalRoot": strings.ToLower(root.Hex()),
 			"lockedShares":   locked.String(), "createdAtBlock": createdAt.String(),
-			"creationRate": rate.String(), "scaleFactor": scale.String(),
+			"rate": rate.String(), "scaleFactor": scale.String(),
 			"initialWithdrawableShares": initialShares.String(),
 			"slashedShares":             slashedShares.String(),
 		}

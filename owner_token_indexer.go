@@ -360,40 +360,8 @@ func (i *ownerTokenIndexer) positionRefs(
 				applyOwnerTokenTransfer(refsByKey, event.Address, tokenID, from, to, owner)
 				continue
 			}
-			if len(event.Topics) != 4 {
-				return nil, fmt.Errorf("owner-token RPC tail returned malformed ERC1155 Transfer event")
-			}
-			from := addressFromIndexedTopic(event.Topics[2])
-			to := addressFromIndexedTopic(event.Topics[3])
-			switch event.Topics[0] {
-			case erc1155TransferSingleTopic:
-				if len(event.Data) != 64 {
-					return nil, fmt.Errorf("owner-token RPC tail returned malformed TransferSingle data")
-				}
-				tokenID := new(big.Int).SetBytes(event.Data[:32])
-				value := new(big.Int).SetBytes(event.Data[32:])
-				if value.Cmp(big.NewInt(1)) != 0 {
-					return nil, fmt.Errorf("owner-token RPC tail returned a non-unique TransferSingle value")
-				}
-				applyOwnerTokenTransfer(refsByKey, event.Address, tokenID, from, to, owner)
-			case erc1155TransferBatchTopic:
-				values, decodeErr := erc1155TransferABI.Events["TransferBatch"].Inputs.NonIndexed().Unpack(event.Data)
-				if decodeErr != nil || len(values) != 2 {
-					return nil, fmt.Errorf("owner-token RPC tail returned malformed TransferBatch data")
-				}
-				ids, idsOK := values[0].([]*big.Int)
-				amounts, amountsOK := values[1].([]*big.Int)
-				if !idsOK || !amountsOK || len(ids) != len(amounts) {
-					return nil, fmt.Errorf("owner-token RPC tail returned malformed TransferBatch arrays")
-				}
-				for index, tokenID := range ids {
-					if tokenID == nil || tokenID.Sign() < 0 || amounts[index] == nil || amounts[index].Cmp(big.NewInt(1)) != 0 {
-						return nil, fmt.Errorf("owner-token RPC tail returned invalid TransferBatch item")
-					}
-					applyOwnerTokenTransfer(refsByKey, event.Address, tokenID, from, to, owner)
-				}
-			default:
-				return nil, fmt.Errorf("owner-token RPC tail returned unexpected ERC1155 event")
+			if err := applyERC1155TailLog(refsByKey, event, owner); err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -411,6 +379,64 @@ func (i *ownerTokenIndexer) positionRefs(
 		return refs[left].TokenID.Cmp(refs[right].TokenID) < 0
 	})
 	return refs, nil
+}
+
+// applyERC1155TailLog folds one ERC-1155 transfer from the RPC tail into refs.
+//
+// The tokens read through this path are non-fungible, so a transfer that moves ownership moves
+// exactly one unit. A zero-unit transfer is nonetheless legal and appears in real history —
+// Ether.fi's membership NFT emits them — and it changes no owner, so it is skipped. Failing on
+// one would drop every position on the account rather than ignore an event that says nothing.
+// Above one unit the token is not the non-fungible this indexer assumes, and the scan fails.
+func applyERC1155TailLog(
+	refs map[string]ownerTokenRef,
+	event rpcLog,
+	owner common.Address,
+) error {
+	if len(event.Topics) != 4 {
+		return fmt.Errorf("owner-token RPC tail returned malformed ERC1155 Transfer event")
+	}
+	from := addressFromIndexedTopic(event.Topics[2])
+	to := addressFromIndexedTopic(event.Topics[3])
+	switch event.Topics[0] {
+	case erc1155TransferSingleTopic:
+		if len(event.Data) != 64 {
+			return fmt.Errorf("owner-token RPC tail returned malformed TransferSingle data")
+		}
+		tokenID := new(big.Int).SetBytes(event.Data[:32])
+		value := new(big.Int).SetBytes(event.Data[32:])
+		if value.Cmp(big.NewInt(1)) > 0 {
+			return fmt.Errorf("owner-token RPC tail returned a non-unique TransferSingle value")
+		}
+		if value.Sign() == 0 {
+			return nil
+		}
+		applyOwnerTokenTransfer(refs, event.Address, tokenID, from, to, owner)
+	case erc1155TransferBatchTopic:
+		values, decodeErr := erc1155TransferABI.Events["TransferBatch"].Inputs.NonIndexed().Unpack(event.Data)
+		if decodeErr != nil || len(values) != 2 {
+			return fmt.Errorf("owner-token RPC tail returned malformed TransferBatch data")
+		}
+		ids, idsOK := values[0].([]*big.Int)
+		amounts, amountsOK := values[1].([]*big.Int)
+		if !idsOK || !amountsOK || len(ids) != len(amounts) {
+			return fmt.Errorf("owner-token RPC tail returned malformed TransferBatch arrays")
+		}
+		for index, tokenID := range ids {
+			amount := amounts[index]
+			if tokenID == nil || tokenID.Sign() < 0 || amount == nil || amount.Sign() < 0 ||
+				amount.Cmp(big.NewInt(1)) > 0 {
+				return fmt.Errorf("owner-token RPC tail returned invalid TransferBatch item")
+			}
+			if amount.Sign() == 0 {
+				continue
+			}
+			applyOwnerTokenTransfer(refs, event.Address, tokenID, from, to, owner)
+		}
+	default:
+		return fmt.Errorf("owner-token RPC tail returned unexpected ERC1155 event")
+	}
+	return nil
 }
 
 func applyOwnerTokenTransfer(
