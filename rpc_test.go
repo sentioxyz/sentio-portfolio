@@ -3,9 +3,12 @@ package portfolio
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -237,5 +240,47 @@ func TestLogsPinsRangeAndTopics(t *testing.T) {
 		len(filter.Topics) != 3 || len(filter.Topics[0]) != 1 || filter.Topics[0][0] != topic ||
 		filter.Topics[1] != nil || len(filter.Topics[2]) != 1 || filter.Topics[2][0] != account {
 		t.Fatalf("filter = %+v", filter)
+	}
+}
+
+// AGENTS.md requires errors to redact endpoint URLs. The endpoints this service dials carry a
+// credential in the path, and go-ethereum quotes the URL in transport errors, so an unredacted
+// error is enough to leak one into a log line or a test failure.
+func TestRPCErrorsRedactTheEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	endpoint := server.URL + "/tOkEnThatMustNotLeak"
+	server.Close()
+
+	_, err := DialRPC(context.Background(), Ethereum, endpoint)
+	if err == nil {
+		t.Fatal("expected dialing a closed endpoint to fail")
+	}
+	message := err.Error()
+	if strings.Contains(message, endpoint) || strings.Contains(message, "tOkEnThatMustNotLeak") {
+		t.Fatalf("RPC error leaked the endpoint: %s", message)
+	}
+	if !strings.Contains(message, "[redacted URL]") {
+		t.Fatalf("RPC error was not redacted: %s", message)
+	}
+}
+
+func TestRedactEndpointsKeepsTheCauseInspectable(t *testing.T) {
+	cause := errors.New(`Post "https://mainnet.example/secret": connection refused`)
+	wrapped := fmt.Errorf("read chain id: %w", cause)
+	redacted := redactEndpoints(wrapped)
+	if strings.Contains(redacted.Error(), "secret") {
+		t.Fatalf("redaction left the endpoint in place: %s", redacted.Error())
+	}
+	if !errors.Is(redacted, cause) {
+		t.Fatal("redaction broke the error chain")
+	}
+}
+
+// An error with no URL in it is returned unchanged, so redaction cannot disturb the callers that
+// match on RPC error text (head lag, unknown block, and the rest).
+func TestRedactEndpointsLeavesCleanErrorsAlone(t *testing.T) {
+	cause := errors.New("block 21 is beyond the latest block 20")
+	if redactEndpoints(cause) != cause {
+		t.Fatal("an error without an endpoint was rewritten")
 	}
 }

@@ -21,8 +21,6 @@ var (
 	asterAsBTCMinter  = common.HexToAddress("0x8a3C77E6c6A488d26CD44F403b95e44675f46e6A")
 	asterAsUSDFMinter = common.HexToAddress("0xdB57a53C428a9faFcbFefFB6dd80d0f427543695")
 	asterAsCAKEMinter = common.HexToAddress("0x1A81A28482Edd40ff1689CB3D857c3dAdF11D502")
-	asterSlisBNB      = common.HexToAddress("0xB0b84D294e0C75A6abe60171b70edEb2EFd14A1B")
-	asterWBNB         = token(BSC, "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c", "BNB", 18)
 	asterAsBTC        = token(BSC, "0x184b72289c0992BDf96751354680985a7C4825d6", "asBTC", 18)
 	asterAsUSDF       = token(BSC, "0x917AF46B3C3c6e1Bb7286B9F59637Fb7C65851Fb", "asUSDF", 18)
 	asterAsBNB        = token(BSC, "0x77734e70b6E88b4d82fE632a168EDf6e700912b6", "asBNB", 18)
@@ -92,13 +90,6 @@ func asterEarnAssets(shares, rate *big.Int, sourceDecimals uint8) (*big.Int, err
 		new(big.Int).Mul(new(big.Int).Mul(new(big.Int).Set(shares), rate), sourceScale),
 		denominator,
 	), nil
-}
-
-func asterDisplayToken(tokenMetadata Token) Token {
-	if tokenMetadata.Address == asterSlisBNB {
-		return asterWBNB
-	}
-	return tokenMetadata
 }
 
 func (a *AsterAdapter) readYieldPositions(
@@ -220,11 +211,13 @@ func (a *AsterAdapter) readYieldPositions(
 		if err != nil || amount == nil || amount.Sign() <= 0 || underlyingAddress == (common.Address{}) {
 			return groups, fmt.Errorf("%s conversion returned invalid state", state.position.Receipt.Symbol)
 		}
+		// Report the minter's own underlying, whatever it is. asBNB converts through slisBNB,
+		// so the amount above is slisBNB-denominated; naming it BNB priced a slisBNB quantity
+		// at the BNB price and understated the position by the slisBNB/BNB premium.
 		underlying, tokenErr := readERC20Token(ctx, client, block, underlyingAddress)
 		if tokenErr != nil {
 			return groups, fmt.Errorf("%s underlying token: %w", state.position.Receipt.Symbol, tokenErr)
 		}
-		underlying = asterDisplayToken(underlying)
 		component := NewComponent("asset", underlying, amount, source)
 		component.Metadata = map[string]any{"receiptRaw": state.shares.String()}
 		groups = append(groups, Group{
@@ -553,11 +546,12 @@ func (a *AsterAdapter) readMintRequests(
 	if receiptAddress != asterAsBNB.Address {
 		return nil, fmt.Errorf("asBNB minter receipt token changed")
 	}
+	// The queue holds the token the minter takes in, which is slisBNB rather than BNB. Report it
+	// as-is so the amount and the price agree.
 	underlying, err := readERC20Token(ctx, client, block, underlyingAddress)
 	if err != nil {
 		return nil, fmt.Errorf("asBNB mint request token metadata: %w", err)
 	}
-	underlying = asterDisplayToken(underlying)
 	calls := make([]ContractCall, 0, len(refs))
 	ids := make([]*big.Int, 0, len(refs))
 	for _, ref := range refs {

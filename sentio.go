@@ -118,7 +118,7 @@ func (c *sentioAPIClient) doJSON(
 				)
 				if response.StatusCode != http.StatusTooManyRequests &&
 					response.StatusCode < http.StatusInternalServerError {
-					return err
+					return redactEndpoints(err)
 				}
 			} else if decodeErr := json.Unmarshal(payload, result); decodeErr != nil {
 				err = decodeErr
@@ -137,7 +137,7 @@ func (c *sentioAPIClient) doJSON(
 			}
 		}
 	}
-	return fmt.Errorf("request failed after 3 attempts: %w", last)
+	return fmt.Errorf("request failed after 3 attempts: %w", redactEndpoints(last))
 }
 
 type sentioIndexerStatusResponse struct {

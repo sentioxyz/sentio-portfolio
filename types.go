@@ -129,6 +129,34 @@ func ParseAddress(value string) (common.Address, error) {
 
 var publicURLPattern = regexp.MustCompile(`(?i)\b(?:https?|wss?)://[^\s"'<>]+`)
 
+// redactedError keeps an error's cause reachable through errors.Is and errors.As while its
+// message no longer quotes the endpoint.
+type redactedError struct {
+	message string
+	cause   error
+}
+
+func (e redactedError) Error() string { return e.message }
+
+func (e redactedError) Unwrap() error { return e.cause }
+
+// redactEndpoints strips endpoint URLs from an error at the layer that produced it. The
+// endpoints this service dials carry credentials, and both go-ethereum and net/http quote the
+// URL in transport errors, so a raw error is enough to put one in a log line or a test failure.
+// PublicError applies the same pattern at the service boundary; redacting at the source covers
+// every error that never reaches it.
+func redactEndpoints(err error) error {
+	if err == nil {
+		return nil
+	}
+	message := err.Error()
+	redacted := publicURLPattern.ReplaceAllString(message, "[redacted URL]")
+	if redacted == message {
+		return err
+	}
+	return redactedError{message: redacted, cause: err}
+}
+
 func PublicError(err error) string {
 	if err == nil {
 		return ""

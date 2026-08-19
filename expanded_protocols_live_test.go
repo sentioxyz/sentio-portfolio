@@ -61,9 +61,11 @@ func TestExpandedProtocolsLiveNonZeroPositions(t *testing.T) {
 			partialError: true,
 		},
 		{
+			// The asBNB minter converts through slisBNB and holds slisBNB, so that is what the
+			// adapter reports; it deliberately does not rewrite the token to BNB.
 			name: "Aster BSC asBNB", chainID: BSC, rpcEnv: "PORTFOLIO_BSC_RPC_URL",
 			adapter: newAsterAdapter(SentioIndexerConfig{}),
-			account: "0xb6e80081610f99757cc910fb31b0a3311f6c3a1c", wantToken: "BNB",
+			account: "0xb6e80081610f99757cc910fb31b0a3311f6c3a1c", wantToken: "slisBNB",
 			partialError: true,
 		},
 		{
