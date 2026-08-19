@@ -191,6 +191,29 @@ func (c *RPCClient) LatestBlock(ctx context.Context) (BlockRef, error) {
 	return c.blockByTag(ctx, "latest")
 }
 
+// LatestSettledBlock is the head an RPC pool can be trusted to serve, not the head it advertises.
+//
+// A pool answers eth_blockNumber from whichever backend it routes to, and that backend may have a
+// block its siblings have not received yet. Pinning a scan to the advertised head then sends the
+// scan's eth_call and eth_getLogs to a backend that rejects it — "block N is beyond the latest
+// block N-1 of this node" — which fails a whole protocol surface for a block that plainly exists.
+// The RPC layer already treats that error as retryable, but the retries are exhausted while the
+// lagging backends are still behind, so the only reliable fix is not to ask for the tip.
+//
+// Staying `lag` blocks back trades a little freshness for removing the race. The unit is blocks
+// rather than seconds because the lag is a backend being N blocks behind, which is the same
+// whether the chain produces a block every quarter second or every twelve.
+func (c *RPCClient) LatestSettledBlock(ctx context.Context, lag uint64) (BlockRef, error) {
+	head, err := c.LatestBlock(ctx)
+	if err != nil {
+		return BlockRef{}, err
+	}
+	if lag == 0 || head.Number <= lag {
+		return head, nil
+	}
+	return c.BlockByNumber(ctx, head.Number-lag)
+}
+
 func (c *RPCClient) BlockByNumber(ctx context.Context, number uint64) (BlockRef, error) {
 	return c.blockByTag(ctx, hexutil.EncodeUint64(number))
 }
