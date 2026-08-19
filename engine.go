@@ -16,12 +16,28 @@ type Engine struct {
 	rpcURLs       map[ChainID]string
 	adapters      []Adapter
 	priceProvider PriceProvider
+	headLagBlocks uint64
 }
+
+// defaultHeadLagBlocks is how far behind the advertised head a live scan pins itself. Four blocks
+// was enough to remove the failure on every chain measured; see LatestSettledBlock for why the
+// margin is needed at all.
+const defaultHeadLagBlocks = 4
 
 // EngineConfig contains deployment-specific integrations owned by the host.
 // Public source must not provide defaults for private indexer projects.
 type EngineConfig struct {
 	SentioIndexers map[string]SentioIndexerConfig
+	// HeadLagBlocks overrides how far behind the advertised head a live scan pins itself. Zero
+	// selects defaultHeadLagBlocks; a deployment whose RPC pool is in lockstep may set it to 1.
+	HeadLagBlocks uint64
+}
+
+func (c EngineConfig) headLagBlocks() uint64 {
+	if c.HeadLagBlocks == 0 {
+		return defaultHeadLagBlocks
+	}
+	return c.HeadLagBlocks
 }
 
 func (c EngineConfig) sentioIndexer(protocolID string) SentioIndexerConfig {
@@ -110,6 +126,7 @@ func NewEngineWithConfig(
 		rpcURLs:       rpcURLs,
 		adapters:      adapters,
 		priceProvider: priceProvider,
+		headLagBlocks: config.headLagBlocks(),
 	}
 }
 
@@ -213,7 +230,7 @@ func (e *Engine) ScanWithOptions(
 				block, err = client.BlockByNumber(ctx, blockNumber)
 				block.Fixed = true
 			} else {
-				block, err = client.LatestBlock(ctx)
+				block, err = client.LatestSettledBlock(ctx, e.headLagBlocks)
 			}
 			if err != nil {
 				client.Close()
