@@ -39,33 +39,44 @@ var (
 )
 
 type eulerV2ChainConfig struct {
-	ChainID           ChainID
-	ActivationBlock   uint64
-	EVC               common.Address
-	TrackingRewards   common.Address
-	RewardEUL         common.Address
-	EUL               Token
-	EVaultFactory     common.Address
-	EulerEarnFactory  common.Address
-	SecuritizeFactory common.Address
+	ChainID         ChainID
+	ActivationBlock uint64
+	EVC             common.Address
+	TrackingRewards common.Address
+	// TrackingRewardsBlock and RewardEULBlock are the blocks at which those two contracts first
+	// have code. Both postdate ActivationBlock on at least one chain, and both are read with
+	// eth_call, which returns empty data for an address with no code — data that fails to decode
+	// and would otherwise abort the whole Euler scan. Lending and vault positions are already
+	// live in the interval, so each component is gated on its own block rather than by moving
+	// ActivationBlock forward, which would discard them.
+	TrackingRewardsBlock uint64
+	RewardEUL            common.Address
+	RewardEULBlock       uint64
+	EUL                  Token
+	EVaultFactory        common.Address
+	EulerEarnFactory     common.Address
+	SecuritizeFactory    common.Address
 }
 
 var eulerV2ChainConfigs = map[ChainID]eulerV2ChainConfig{
 	Ethereum: {
 		ChainID: Ethereum, ActivationBlock: 20_529_207,
-		EVC:               common.HexToAddress("0x0C9a3dd6b8F28529d72d7f9cE918D493519EE383"),
-		TrackingRewards:   common.HexToAddress("0x0D52d06ceB8Dcdeeb40Cfd9f17489B350dD7F8a3"),
-		RewardEUL:         common.HexToAddress("0xf3e621395fc714B90dA337AA9108771597b4E696"),
-		EUL:               token(Ethereum, "0xd9Fcd98c322942075A5C3860693e9f4f03AAE07b", "EUL", 18),
-		EVaultFactory:     common.HexToAddress("0x29a56a1b8214D9Cf7c5561811750D5cBDb45CC8e"),
-		EulerEarnFactory:  common.HexToAddress("0x59709B029B140C853FE28d277f83C3a65e308aF4"),
-		SecuritizeFactory: common.HexToAddress("0x5F51D980F15fE6075aE30394dc35De57A4f76Cbb"),
+		EVC:                  common.HexToAddress("0x0C9a3dd6b8F28529d72d7f9cE918D493519EE383"),
+		TrackingRewards:      common.HexToAddress("0x0D52d06ceB8Dcdeeb40Cfd9f17489B350dD7F8a3"),
+		TrackingRewardsBlock: 20_529_210,
+		RewardEUL:            common.HexToAddress("0xf3e621395fc714B90dA337AA9108771597b4E696"),
+		RewardEULBlock:       21_081_636,
+		EUL:                  token(Ethereum, "0xd9Fcd98c322942075A5C3860693e9f4f03AAE07b", "EUL", 18),
+		EVaultFactory:        common.HexToAddress("0x29a56a1b8214D9Cf7c5561811750D5cBDb45CC8e"),
+		EulerEarnFactory:     common.HexToAddress("0x59709B029B140C853FE28d277f83C3a65e308aF4"),
+		SecuritizeFactory:    common.HexToAddress("0x5F51D980F15fE6075aE30394dc35De57A4f76Cbb"),
 	},
 	BSC: {
 		ChainID: BSC, ActivationBlock: 46_370_645,
 		EVC:              common.HexToAddress("0xb2E5a73CeE08593d1a076a2AE7A6e02925a640ea"),
 		TrackingRewards:  common.HexToAddress("0x2D13C46FE6c8B6c9ad3C5A78eD51b26733caE350"),
 		RewardEUL:        common.HexToAddress("0x5e13d41913aDF18bb2acAe34228E8D21f3c2f2Eb"),
+		RewardEULBlock:   46_370_749,
 		EUL:              token(BSC, "0x2117E8b79e8E176A670c9fCf945d4348556bfFad", "EUL", 18),
 		EVaultFactory:    common.HexToAddress("0x7F53E2755eB3c43824E162F7F6F087832B9C9Df6"),
 		EulerEarnFactory: common.HexToAddress("0xc456d04E3F43597CC7E5a2AF284fF4C4AdDA0cb1"),
@@ -75,6 +86,7 @@ var eulerV2ChainConfigs = map[ChainID]eulerV2ChainConfig{
 		EVC:              common.HexToAddress("0x5301c7dD20bD945D2013b48ed0DEE3A284ca8989"),
 		TrackingRewards:  common.HexToAddress("0x029fDEe85BEdB0553D6fdc538546586641DD7438"),
 		RewardEUL:        common.HexToAddress("0xE08e1f00D388E201e48842E53fA96195568e6813"),
+		RewardEULBlock:   24_127_572,
 		EUL:              token(Base, "0xa153Ad732F831a79b5575Fa02e793EC4E99181b0", "EUL", 18),
 		EVaultFactory:    common.HexToAddress("0x7F321498A801A191a93C840750ed637149dDf8D0"),
 		EulerEarnFactory: common.HexToAddress("0x75F49a2621b6DeC6a5baB22ce961bF3e676EFAE6"),
@@ -84,6 +96,7 @@ var eulerV2ChainConfigs = map[ChainID]eulerV2ChainConfig{
 		EVC:              common.HexToAddress("0x6302ef0F34100CDDFb5489fbcB6eE1AA95CD1066"),
 		TrackingRewards:  common.HexToAddress("0xbCD29c1B596d9fFAfaa6F90780956b4D3d47832f"),
 		RewardEUL:        common.HexToAddress("0xFA31599a4928c2d57C0dd77DFCA5DA1E94E6D2D2"),
+		RewardEULBlock:   300_691_010,
 		EUL:              token(Arbitrum, "0x462cD9E0247b2e63831c3189aE738E5E9a5a4b64", "EUL", 18),
 		EVaultFactory:    common.HexToAddress("0x78Df1CF5bf06a7f27f2ACc580B934238C1b80D50"),
 		EulerEarnFactory: common.HexToAddress("0xB9B5d62B9fE9E1B505466e75817aB178A1D2ec9d"),
@@ -295,6 +308,10 @@ func (a *EulerV2Adapter) readRewards(
 	states []eulerPositionState,
 	chain eulerV2ChainConfig,
 ) ([]eulerRewardState, error) {
+	// Same rule for the rewards tracker, which trails activation by three blocks on Ethereum.
+	if block.Number < chain.TrackingRewardsBlock {
+		return nil, nil
+	}
 	eVaults := make([]eulerPositionState, 0)
 	for _, state := range states {
 		if state.ref.Kind == eulerEVault {
@@ -366,6 +383,13 @@ func (a *EulerV2Adapter) readVestings(
 	owner common.Address,
 	chain eulerV2ChainConfig,
 ) ([]eulerVestingState, error) {
+	// rEUL is deployed long after the adapter activates on some chains — 552k blocks on Ethereum,
+	// 1.8M on Base. Before that block nobody can hold a lock, so report none rather than reading a
+	// contract that does not exist: the read would return empty data, fail to decode, and abort a
+	// scan whose lending and vault positions are perfectly valid.
+	if block.Number < chain.RewardEULBlock {
+		return nil, nil
+	}
 	row, err := client.Call(ctx, block, chain.RewardEUL, eulerRewardTokenABI, "getLockedAmounts", owner)
 	if err != nil {
 		return nil, fmt.Errorf("rEUL locks: %w", err)
