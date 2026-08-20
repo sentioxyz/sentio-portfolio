@@ -57,6 +57,7 @@ var aaveV4EthereumSpokes = []aaveV4Spoke{
 	{Label: "Lombard BTC", Address: common.HexToAddress("0x7EC68b5695e803e98a21a9A05d744F28b0a7753D"), ActivationBlock: 24_720_911},
 	{Label: "Main", Address: common.HexToAddress("0x94e7A5dCbE816e498b89aB752661904E2F56c485"), ActivationBlock: 24_720_899},
 	{Label: "USDG Pendle", Address: common.HexToAddress("0x956d8e0A89cfa3744428C4641b5a53B56167a7f9"), ActivationBlock: 25_094_394},
+	{Label: "USDG Syrup", Address: common.HexToAddress("0x774B9655413C34809c1F1B16b654465a89EbE989"), ActivationBlock: 25_594_472},
 	{Label: "EtherFi", Address: common.HexToAddress("0xbF10BDfE177dE0336aFD7fcCF80A904E15386219"), ActivationBlock: 24_720_905},
 	{Label: "Kelp", Address: common.HexToAddress("0x3131FE68C4722e726fe6B2819ED68e514395B9a4"), ActivationBlock: 24_720_908},
 	{Label: "Lido", Address: common.HexToAddress("0xe1900480ac69f0B296841Cd01cC37546d92F35Cd"), ActivationBlock: 24_720_902},

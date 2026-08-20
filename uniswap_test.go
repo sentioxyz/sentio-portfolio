@@ -1,9 +1,12 @@
 package portfolio
 
 import (
+	"errors"
 	"math/big"
 	"testing"
 	"time"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 func requireBigInt(t *testing.T, value string) *big.Int {
@@ -158,4 +161,68 @@ func TestUniswapCheckpointUsesSeparateRealtimeAndBackfillBounds(t *testing.T) {
 	if err := validateUniswapCheckpoint(fixed, page); err != nil {
 		t.Fatalf("fixed block rejected a valid backfill checkpoint: %v", err)
 	}
+}
+
+func TestUniswapV3DetailFailureClassification(t *testing.T) {
+	position := func(id int64) uniswapV3Position {
+		return uniswapV3Position{
+			NFT:       uniswapIndexedNFT{TokenID: big.NewInt(id)},
+			Pool:      common.HexToAddress("0x000000000000000000000000000000000000dEaD"),
+			Liquidity: big.NewInt(1),
+		}
+	}
+	healthySlot := ContractCallResult{Values: []any{big.NewInt(1 << 32)}}
+	healthyCollect := ContractCallResult{Values: []any{big.NewInt(7), big.NewInt(11)}}
+	revert := ContractCallResult{Error: errors.New("execution reverted: TF")}
+	transport := ContractCallResult{Error: errors.New("connection refused")}
+
+	t.Run("collect revert keeps principal with zero fees", func(t *testing.T) {
+		detailed, err := applyUniswapV3Details(
+			[]uniswapV3Position{position(1), position(2)},
+			[]ContractCallResult{healthySlot, revert, healthySlot, healthyCollect},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(detailed) != 2 {
+			t.Fatalf("got %d positions, want 2", len(detailed))
+		}
+		if detailed[0].Collectible0.Sign() != 0 || detailed[0].Collectible1.Sign() != 0 {
+			t.Fatalf(
+				"poisoned position fees = %s/%s, want 0/0",
+				detailed[0].Collectible0, detailed[0].Collectible1,
+			)
+		}
+		if detailed[1].Collectible0.Int64() != 7 || detailed[1].Collectible1.Int64() != 11 {
+			t.Fatal("healthy position fees were not preserved")
+		}
+	})
+
+	t.Run("slot0 revert drops only its own position", func(t *testing.T) {
+		detailed, err := applyUniswapV3Details(
+			[]uniswapV3Position{position(1), position(2)},
+			[]ContractCallResult{revert, healthyCollect, healthySlot, healthyCollect},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(detailed) != 1 || detailed[0].NFT.TokenID.Int64() != 2 {
+			t.Fatalf("got %d positions, want only token 2", len(detailed))
+		}
+	})
+
+	t.Run("transport errors still fail the scan", func(t *testing.T) {
+		if _, err := applyUniswapV3Details(
+			[]uniswapV3Position{position(1)},
+			[]ContractCallResult{healthySlot, transport},
+		); err == nil {
+			t.Fatal("transport-level collect error was swallowed")
+		}
+		if _, err := applyUniswapV3Details(
+			[]uniswapV3Position{position(1)},
+			[]ContractCallResult{transport, healthyCollect},
+		); err == nil {
+			t.Fatal("transport-level slot0 error was swallowed")
+		}
+	})
 }

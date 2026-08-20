@@ -9,13 +9,13 @@ import (
 
 func TestListaManifestAndRegistration(t *testing.T) {
 	adapter := newListaAdapter().(*ListaAdapter)
-	if got, want := len(adapter.moolah[BSC].Markets), 56; got != want {
+	if got, want := len(adapter.moolah[BSC].Markets), 484; got != want {
 		t.Fatalf("Lista BSC markets = %d, want %d", got, want)
 	}
-	if got, want := len(adapter.moolah[Ethereum].Markets), 6; got != want {
+	if got, want := len(adapter.moolah[Ethereum].Markets), 25; got != want {
 		t.Fatalf("Lista Ethereum markets = %d, want %d", got, want)
 	}
-	if got, want := len(adapter.moolah[BSC].Vaults), 7; got != want {
+	if got, want := len(adapter.moolah[BSC].Vaults), 68; got != want {
 		t.Fatalf("Lista callable BSC vaults = %d, want %d", got, want)
 	}
 	if got, want := len(adapter.moolah[Ethereum].Vaults), 1; got != want {

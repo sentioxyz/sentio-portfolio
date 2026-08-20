@@ -85,6 +85,7 @@ go_test(
         "account_indexer_reconciliation_live_test.go",
         "beefy_test.go",
         "curve_test.go",
+        "debank_sweep_reconciliation_live_test.go",
         "deployment_test.go",
         "engine_test.go",
         "euler_v2_deployment_window_test.go",

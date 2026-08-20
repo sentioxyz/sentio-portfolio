@@ -444,3 +444,125 @@ func readAaveUmbrellaPositions(
 	}
 	return groups, nil
 }
+
+var aaveStataFactoryABI = MustABI(`[
+  {"type":"function","name":"getStaticATokens","stateMutability":"view","inputs":[],"outputs":[{"type":"address[]"}]}
+]`)
+
+var (
+	// StaticATokenFactory for the Ethereum core market; deployed at 18,627,030.
+	aaveStataFactoryAddress    = common.HexToAddress("0x411D79b8cC43384FDE66CaBf9b6a17180c842511")
+	aaveStataFactoryActivation = uint64(18_627_030)
+)
+
+const aaveStataMaximumTokens = 256
+
+// readAaveStataPositions reports wallet-held static aTokens (stata, the ERC-4626 wrappers
+// of aTokens): a stata balance is an Aave supply position the same way wstETH is a Lido
+// position. The family is enumerated from the factory at the pinned block, so newly listed
+// wrappers cannot rot a hardcoded list.
+func readAaveStataPositions(
+	ctx context.Context,
+	client *RPCClient,
+	block BlockRef,
+	account common.Address,
+) ([]Group, error) {
+	if block.Number < aaveStataFactoryActivation {
+		return nil, nil
+	}
+	listed, err := client.Call(
+		ctx, block, aaveStataFactoryAddress, aaveStataFactoryABI, "getStaticATokens",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("enumerate stata tokens: %w", err)
+	}
+	if len(listed) != 1 {
+		return nil, fmt.Errorf("getStaticATokens returned %d fields", len(listed))
+	}
+	stataTokens, err := decodeAddresses(listed[0])
+	if err != nil {
+		return nil, fmt.Errorf("decode stata tokens: %w", err)
+	}
+	if len(stataTokens) > aaveStataMaximumTokens {
+		return nil, fmt.Errorf(
+			"stata token count %d exceeds maximum %d", len(stataTokens), aaveStataMaximumTokens,
+		)
+	}
+	balanceCalls := make([]ContractCall, len(stataTokens))
+	for index, stata := range stataTokens {
+		balanceCalls[index] = ContractCall{
+			Contract: stata, ABI: erc4626ABI, Method: "balanceOf", Args: []any{account},
+		}
+	}
+	balanceRows, err := client.ParallelCalls(ctx, block, balanceCalls)
+	if err != nil {
+		return nil, fmt.Errorf("stata balances: %w", err)
+	}
+	type stataHolding struct {
+		stata  common.Address
+		shares *big.Int
+	}
+	holdings := make([]stataHolding, 0, 2)
+	for index, row := range balanceRows {
+		shares, decodeErr := BigIntAt(row, 0)
+		if decodeErr != nil {
+			return nil, fmt.Errorf("stata %s balance: %w", stataTokens[index], decodeErr)
+		}
+		if shares.Sign() > 0 {
+			holdings = append(holdings, stataHolding{stata: stataTokens[index], shares: shares})
+		}
+	}
+	if len(holdings) == 0 {
+		return nil, nil
+	}
+	detailCalls := make([]ContractCall, 0, len(holdings)*2)
+	for _, holding := range holdings {
+		detailCalls = append(detailCalls,
+			ContractCall{Contract: holding.stata, ABI: erc4626ABI, Method: "asset"},
+			ContractCall{
+				Contract: holding.stata, ABI: erc4626ABI,
+				Method: "convertToAssets", Args: []any{holding.shares},
+			},
+		)
+	}
+	details, err := client.ParallelCalls(ctx, block, detailCalls)
+	if err != nil {
+		return nil, fmt.Errorf("stata details: %w", err)
+	}
+	assets := make([]common.Address, len(holdings))
+	for index := range holdings {
+		assets[index], err = AddressAt(details[index*2], 0)
+		if err != nil {
+			return nil, fmt.Errorf("stata %s asset: %w", holdings[index].stata, err)
+		}
+	}
+	tokens, err := tokenMetadataAt(ctx, client, block, assets)
+	if err != nil {
+		return nil, fmt.Errorf("stata token metadata: %w", err)
+	}
+	groups := make([]Group, 0, len(holdings))
+	for index, holding := range holdings {
+		amount, decodeErr := BigIntAt(details[index*2+1], 0)
+		if decodeErr != nil {
+			return nil, fmt.Errorf("stata %s assets: %w", holding.stata, decodeErr)
+		}
+		if amount.Sign() == 0 {
+			continue
+		}
+		underlying := tokens[assets[index]]
+		component := NewComponent(
+			"asset",
+			underlying,
+			amount,
+			Source{Contract: holding.stata, Method: "convertToAssets(balanceOf)"},
+		)
+		component.Metadata = map[string]any{"stataShares": holding.shares.String()}
+		groups = append(groups, Group{
+			ID:         "stata:" + strings.ToLower(holding.stata.Hex()),
+			MarketID:   "stata:" + strings.ToLower(holding.stata.Hex()),
+			Label:      "Yield · sta" + underlying.Symbol,
+			Components: []Component{component},
+		})
+	}
+	return groups, nil
+}

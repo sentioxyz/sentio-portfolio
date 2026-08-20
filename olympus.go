@@ -9,6 +9,7 @@ import (
 
 var olympusABI = MustABI(`[
   {"type":"function","name":"balanceOf","stateMutability":"view","inputs":[{"name":"account","type":"address"}],"outputs":[{"type":"uint256"}]},
+  {"type":"function","name":"balanceFrom","stateMutability":"view","inputs":[{"name":"amount","type":"uint256"}],"outputs":[{"type":"uint256"}]},
   {"type":"function","name":"gOHM","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
   {"type":"function","name":"stakingContract","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
   {"type":"function","name":"collateralToken","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
@@ -47,6 +48,7 @@ func (a *OlympusAdapter) Positions(
 		{Contract: sOhm, ABI: olympusABI, Method: "balanceOf", Args: []any{account}},
 		{Contract: sOhm, ABI: olympusABI, Method: "gOHM"},
 		{Contract: sOhm, ABI: olympusABI, Method: "stakingContract"},
+		{Contract: gOhm, ABI: olympusABI, Method: "balanceOf", Args: []any{account}},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("sOHM position: %w", err)
@@ -66,7 +68,17 @@ func (a *OlympusAdapter) Positions(
 	if actualGOhm != gOhm || actualStaking != staking {
 		return nil, fmt.Errorf("sOHM contract wiring changed")
 	}
-	groups := make([]Group, 0, 2)
+	gOhmBalance, err := BigIntAt(rows[3], 0)
+	if err != nil {
+		return nil, err
+	}
+	ohmToken := token(
+		Ethereum,
+		"0x64aa3364F17a4D01c6f1751Fd97C2BD3D7e7f1D5",
+		"OHM",
+		9,
+	)
+	groups := make([]Group, 0, 3)
 	if balance.Sign() > 0 {
 		groups = append(groups, Group{
 			ID:       "sohm-staking",
@@ -74,15 +86,38 @@ func (a *OlympusAdapter) Positions(
 			Label:    "Staked · sOHM",
 			Components: []Component{NewComponent(
 				"asset",
-				token(
-					Ethereum,
-					"0x64aa3364F17a4D01c6f1751Fd97C2BD3D7e7f1D5",
-					"OHM",
-					9,
-				),
+				ohmToken,
 				balance,
 				Source{Contract: sOhm, Method: "balanceOf"},
 			)},
+		})
+	}
+	// gOHM is the non-rebasing wrapper of the staked position, so a wallet balance is a
+	// staking position the same way wstETH is a Lido position; convert it to OHM at the
+	// wrapper's own rate, matching the wstETH treatment in the Lido adapter.
+	if gOhmBalance.Sign() > 0 {
+		converted, convertErr := client.Call(
+			ctx, block, gOhm, olympusABI, "balanceFrom", gOhmBalance,
+		)
+		if convertErr != nil {
+			return nil, convertErr
+		}
+		amount, decodeErr := BigIntAt(converted, 0)
+		if decodeErr != nil {
+			return nil, decodeErr
+		}
+		component := NewComponent(
+			"asset",
+			ohmToken,
+			amount,
+			Source{Contract: gOhm, Method: "balanceFrom(balanceOf)"},
+		)
+		component.Metadata = map[string]any{"gOhmBalance": gOhmBalance.String()}
+		groups = append(groups, Group{
+			ID:         "gohm",
+			MarketID:   "gohm",
+			Label:      "Staked · gOHM",
+			Components: []Component{component},
 		})
 	}
 	if block.Number < coolerActivation {

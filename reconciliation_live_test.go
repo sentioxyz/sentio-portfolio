@@ -312,6 +312,7 @@ func reconcileDeBankAPIAccount(
 	chainID ChainID,
 	account string,
 	fetch debankFetcher,
+	tolerance float64,
 ) {
 	t.Helper()
 	payload := fetch(t, ctx, httpClient, accessKey, account, projectID, chainID)
@@ -334,7 +335,7 @@ func reconcileDeBankAPIAccount(
 	// aligning to update_at, its internal snapshot can straddle nearby blocks, so live comparisons
 	// allow 10 ppm quantity drift. Fixed-block corpora above retain the stricter 1e-12 tolerance.
 	if differences := reconciliationDiffsWithRelativeTolerance(
-		expected, reconciliationActual(t, groups), prices, 1e-5,
+		expected, reconciliationActual(t, groups), prices, tolerance,
 	); len(differences) > 0 {
 		t.Fatalf(
 			"%s DeBank API reconciliation failed at block %d:\n%s",
@@ -737,6 +738,24 @@ func runDeBankAPIReconciliationRefreshed(
 	runDeBankAPIReconciliationWith(t, projectID, adapter, chainID, accounts, fetchDeBankProtocolRefreshed)
 }
 
+// runDeBankAPIReconciliationRefreshedWithTolerance is for protocols whose positions accrue
+// interest fast enough that DeBank's per-item cache lag routinely exceeds 10 ppm (e.g. Lista
+// Moolah borrows on BSC). The looser bound still fails loudly on structural gaps, which show
+// up as whole missing tokens rather than ppm drift.
+func runDeBankAPIReconciliationRefreshedWithTolerance(
+	t *testing.T,
+	projectID string,
+	adapter Adapter,
+	chainID ChainID,
+	accounts []string,
+	tolerance float64,
+) {
+	t.Helper()
+	runDeBankAPIReconciliationWithTolerance(
+		t, projectID, adapter, chainID, accounts, fetchDeBankProtocolRefreshed, tolerance,
+	)
+}
+
 func runDeBankAPIReconciliationWith(
 	t *testing.T,
 	projectID string,
@@ -744,6 +763,19 @@ func runDeBankAPIReconciliationWith(
 	chainID ChainID,
 	accounts []string,
 	fetch debankFetcher,
+) {
+	t.Helper()
+	runDeBankAPIReconciliationWithTolerance(t, projectID, adapter, chainID, accounts, fetch, 1e-5)
+}
+
+func runDeBankAPIReconciliationWithTolerance(
+	t *testing.T,
+	projectID string,
+	adapter Adapter,
+	chainID ChainID,
+	accounts []string,
+	fetch debankFetcher,
+	tolerance float64,
 ) {
 	t.Helper()
 	if os.Getenv("PORTFOLIO_DEBANK_API_LIVE_TEST") != "1" {
@@ -774,7 +806,8 @@ func runDeBankAPIReconciliationWith(
 		account := account
 		t.Run(strings.ToLower(account), func(t *testing.T) {
 			reconcileDeBankAPIAccount(
-				t, ctx, rpcClient, httpClient, accessKey, projectID, adapter, chainID, account, fetch,
+				t, ctx, rpcClient, httpClient, accessKey, projectID, adapter, chainID, account,
+				fetch, tolerance,
 			)
 		})
 	}

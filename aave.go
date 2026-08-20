@@ -676,6 +676,12 @@ func (a *AaveAdapter) Positions(
 			return nil, fmt.Errorf("sGHO vault: %w", err)
 		}
 		groups = append(groups, vaultGroups...)
+
+		stataGroups, err := readAaveStataPositions(ctx, client, block, account)
+		if err != nil {
+			return nil, fmt.Errorf("stata tokens: %w", err)
+		}
+		groups = append(groups, stataGroups...)
 	}
 	return groups, nil
 }
