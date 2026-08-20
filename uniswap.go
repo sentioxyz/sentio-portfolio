@@ -205,7 +205,7 @@ func applyUniswapV3Details(
 	for index := range owned {
 		slotRow, collectRow := details[index*2], details[index*2+1]
 		if slotRow.Error != nil {
-			if uniswapExecutionRevert(slotRow.Error) {
+			if executionReverted(slotRow.Error) {
 				continue
 			}
 			return nil, fmt.Errorf("slot0 %s: %w", owned[index].Pool, slotRow.Error)
@@ -216,7 +216,7 @@ func applyUniswapV3Details(
 			return nil, err
 		}
 		if collectRow.Error != nil {
-			if !uniswapExecutionRevert(collectRow.Error) {
+			if !executionReverted(collectRow.Error) {
 				return nil, fmt.Errorf(
 					"collect %s: %w", owned[index].NFT.TokenID, collectRow.Error,
 				)
@@ -238,7 +238,7 @@ func applyUniswapV3Details(
 	return detailed, nil
 }
 
-func uniswapExecutionRevert(err error) bool {
+func executionReverted(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -438,7 +438,7 @@ func (a *UniswapV3Adapter) Positions(
 	positions := make([]uniswapV3Position, 0)
 	for index, row := range positionRows {
 		if row.Error != nil {
-			if uniswapExecutionRevert(row.Error) {
+			if executionReverted(row.Error) {
 				continue
 			}
 			return nil, fmt.Errorf("position %s: %w", indexed.NFTs[index].TokenID, row.Error)
@@ -473,7 +473,7 @@ func (a *UniswapV3Adapter) Positions(
 	owned := make([]uniswapV3Position, 0, len(positions))
 	for index, row := range ownerRows {
 		if row.Error != nil {
-			if uniswapExecutionRevert(row.Error) {
+			if executionReverted(row.Error) {
 				continue
 			}
 			return nil, fmt.Errorf("ownerOf %s: %w", positions[index].NFT.TokenID, row.Error)
@@ -709,7 +709,7 @@ func (a *UniswapV4Adapter) Positions(
 	positions := make([]uniswapV4Position, 0)
 	for index, row := range ownerRows {
 		if row.Error != nil {
-			if uniswapExecutionRevert(row.Error) {
+			if executionReverted(row.Error) {
 				continue
 			}
 			return nil, fmt.Errorf("ownerOf %s: %w", indexed.NFTs[index].TokenID, row.Error)
