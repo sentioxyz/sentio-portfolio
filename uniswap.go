@@ -186,6 +186,58 @@ func newUniswapAdapters(
 	}
 }
 
+// applyUniswapV3Details folds the interleaved slot0/collect batch into the owned
+// positions, classifying per-position failures: a defunct pool (slot0 reverts) drops
+// only its own position, and a reverting collect simulation zeroes the unreadable fees
+// while keeping the principal — one frozen or malicious pool asset must not drop the
+// account's whole Uniswap surface. Transport-level errors still fail the scan.
+// Extracted so the unit rules are testable without a live RPC client.
+func applyUniswapV3Details(
+	owned []uniswapV3Position,
+	details []ContractCallResult,
+) ([]uniswapV3Position, error) {
+	if len(details) != len(owned)*2 {
+		return nil, fmt.Errorf(
+			"position details: got %d results for %d positions", len(details), len(owned),
+		)
+	}
+	detailed := make([]uniswapV3Position, 0, len(owned))
+	for index := range owned {
+		slotRow, collectRow := details[index*2], details[index*2+1]
+		if slotRow.Error != nil {
+			if uniswapExecutionRevert(slotRow.Error) {
+				continue
+			}
+			return nil, fmt.Errorf("slot0 %s: %w", owned[index].Pool, slotRow.Error)
+		}
+		var err error
+		owned[index].SqrtPrice, err = BigIntAt(slotRow.Values, 0)
+		if err != nil {
+			return nil, err
+		}
+		if collectRow.Error != nil {
+			if !uniswapExecutionRevert(collectRow.Error) {
+				return nil, fmt.Errorf(
+					"collect %s: %w", owned[index].NFT.TokenID, collectRow.Error,
+				)
+			}
+			owned[index].Collectible0 = new(big.Int)
+			owned[index].Collectible1 = new(big.Int)
+		} else {
+			owned[index].Collectible0, err = BigIntAt(collectRow.Values, 0)
+			if err != nil {
+				return nil, err
+			}
+			owned[index].Collectible1, err = BigIntAt(collectRow.Values, 1)
+			if err != nil {
+				return nil, err
+			}
+		}
+		detailed = append(detailed, owned[index])
+	}
+	return detailed, nil
+}
+
 func uniswapExecutionRevert(err error) bool {
 	if err == nil {
 		return false
@@ -475,32 +527,24 @@ func (a *UniswapV3Adapter) Positions(
 			},
 		)
 	}
-	details, err := client.ParallelCalls(ctx, block, detailCalls)
+	details, err := client.ParallelCallsAllowFailure(ctx, block, detailCalls)
 	if err != nil {
 		return nil, fmt.Errorf("position details: %w", err)
 	}
-	tokenAddresses := make([]common.Address, 0, len(owned)*2)
-	for index := range owned {
-		owned[index].SqrtPrice, err = BigIntAt(details[index*2], 0)
-		if err != nil {
-			return nil, err
-		}
-		owned[index].Collectible0, err = BigIntAt(details[index*2+1], 0)
-		if err != nil {
-			return nil, err
-		}
-		owned[index].Collectible1, err = BigIntAt(details[index*2+1], 1)
-		if err != nil {
-			return nil, err
-		}
-		tokenAddresses = append(tokenAddresses, owned[index].Token0, owned[index].Token1)
+	detailed, err := applyUniswapV3Details(owned, details)
+	if err != nil {
+		return nil, err
+	}
+	tokenAddresses := make([]common.Address, 0, len(detailed)*2)
+	for _, position := range detailed {
+		tokenAddresses = append(tokenAddresses, position.Token0, position.Token1)
 	}
 	tokens, err := tokenMetadataAt(ctx, client, block, tokenAddresses)
 	if err != nil {
 		return nil, fmt.Errorf("token metadata: %w", err)
 	}
-	groups := make([]Group, 0, len(owned))
-	for _, position := range owned {
+	groups := make([]Group, 0, len(detailed))
+	for _, position := range detailed {
 		principal0, principal1, mathErr := uniswapAmountsForLiquidity(
 			position.SqrtPrice,
 			position.TickLower,
