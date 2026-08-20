@@ -8,18 +8,20 @@ import (
 )
 
 func TestListaManifestAndRegistration(t *testing.T) {
-	adapter := newListaAdapter().(*ListaAdapter)
-	if got, want := len(adapter.moolah[BSC].Markets), 484; got != want {
-		t.Fatalf("Lista BSC markets = %d, want %d", got, want)
+	adapter := newListaAdapterWithIndexer(nil)
+	// Market and vault discovery is indexer-backed; only the deployment anchors and the
+	// closed seed-vault history are static.
+	if got, want := len(adapter.moolah), 2; got != want {
+		t.Fatalf("Lista Moolah deployments = %d, want %d", got, want)
 	}
-	if got, want := len(adapter.moolah[Ethereum].Markets), 25; got != want {
-		t.Fatalf("Lista Ethereum markets = %d, want %d", got, want)
+	if got, want := len(adapter.moolah[BSC].SeedVaults), 8; got != want {
+		t.Fatalf("Lista BSC seed vaults = %d, want %d", got, want)
 	}
-	if got, want := len(adapter.moolah[BSC].Vaults), 68; got != want {
-		t.Fatalf("Lista callable BSC vaults = %d, want %d", got, want)
+	if adapter.moolah[BSC].VaultFactory == (common.Address{}) {
+		t.Fatal("Lista BSC vault factory is unset")
 	}
-	if got, want := len(adapter.moolah[Ethereum].Vaults), 1; got != want {
-		t.Fatalf("Lista callable Ethereum vaults = %d, want %d", got, want)
+	if got, want := len(adapter.moolah[Ethereum].SeedVaults), 1; got != want {
+		t.Fatalf("Lista Ethereum seed vaults = %d, want %d", got, want)
 	}
 	if got, want := len(adapter.cdp.CandidateTokens), 68; got != want {
 		t.Fatalf("Lista CDP candidates = %d, want %d", got, want)

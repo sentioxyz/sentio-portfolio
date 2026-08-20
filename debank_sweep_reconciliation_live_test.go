@@ -6,7 +6,10 @@ package portfolio
 // live non-dust position, and admitted only when the sweep (or the in-process rerun with the
 // fixes from that session) reconciled them cleanly.
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 // sweepAdapterByID resolves a registered adapter, so these corpora exercise exactly what the
 // engine ships rather than a hand-built twin.
@@ -209,11 +212,16 @@ func TestOlympusSweepDeBankAPIReconciliation(t *testing.T) {
 // eight-figure interest-bearing balances accrue past the 10 ppm tolerance between
 // DeBank's item refresh and the pinned block.
 func TestListaSweepDeBankAPIReconciliation(t *testing.T) {
+	if os.Getenv("PORTFOLIO_DEBANK_API_LIVE_TEST") != "1" {
+		t.Skip("set PORTFOLIO_DEBANK_API_LIVE_TEST=1 to compare with DeBank Pro API")
+	}
 	// 1e-4 rather than the usual 1e-5: BSC Moolah borrow rates accrue interest per 0.75 s
 	// block, so DeBank's per-item cache lag alone drifts 1e-5–3e-5 on any active account.
 	// Structural regressions (a rotted market or vault list) fail as whole missing tokens,
 	// far outside either bound.
-	runDeBankAPIReconciliationRefreshedWithTolerance(t, "bsc_helio", sweepAdapterByID(t, "lista"), BSC, []string{
+	runDeBankAPIReconciliationRefreshedWithTolerance(t, "bsc_helio", newListaAdapter(
+		liveSentioIndexerConfig(t, "PORTFOLIO_LISTA_INDEXER"),
+	), BSC, []string{
 		"0x8a06ac91265dbebe6d4606f45b10993e9a571869",
 		"0x899dbbfd8c746d2716312196a41d3151320fe766",
 		"0xc4ae5142652bd4d76f5f01b866f8e53aa97dfb2d",

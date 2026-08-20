@@ -12,6 +12,20 @@ type fixedMorphoLiveIndexer struct {
 	refs morphoPositionRefs
 }
 
+type fixedListaLiveIndexer struct {
+	refs listaPositionRefs
+}
+
+func (i fixedListaLiveIndexer) PositionRefs(
+	context.Context,
+	*RPCClient,
+	BlockRef,
+	common.Address,
+	listaMoolahDeployment,
+) (listaPositionRefs, error) {
+	return i.refs, nil
+}
+
 func liveSentioIndexerConfig(t *testing.T, environmentPrefix string) SentioIndexerConfig {
 	t.Helper()
 	config := SentioIndexerConfig{
@@ -99,7 +113,11 @@ func TestNewProtocolsLiveNonZeroPositions(t *testing.T) {
 			name:    "Lista BSC Moolah",
 			chainID: BSC,
 			rpcEnv:  "PORTFOLIO_BSC_RPC_URL",
-			adapter: newListaAdapter(),
+			adapter: newListaAdapterWithIndexer(fixedListaLiveIndexer{refs: listaPositionRefs{
+				MarketIDs: []common.Hash{common.HexToHash(
+					"0x975f4cf3db16812d995f60e19bec91a96108d47429237acc8d208bc0519c5b19",
+				)},
+			}}),
 			account: "0x0458edb2418e83157f470f38c9875df10fc731e8",
 		},
 		{

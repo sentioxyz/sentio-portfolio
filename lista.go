@@ -25,17 +25,54 @@ var listaInteractionABI = MustABI(`[
   {"type":"function","name":"borrowed","stateMutability":"view","inputs":[{"name":"token","type":"address"},{"name":"user","type":"address"}],"outputs":[{"type":"uint256"}]}
 ]`)
 
-type listaVaultDeployment struct {
-	Address         common.Address `json:"address"`
-	ActivationBlock uint64         `json:"activationBlock"`
+// listaMoolahDeployment anchors one Moolah core: the market and vault sets themselves
+// come from the Lista indexer at the pinned block (Moolah market creation is
+// permissionless and has no enumeration view, so any embedded list rots — the 2026-08-13
+// manifest held 56 of 484 live markets within a week). Only closed history stays static:
+// the hand-deployed seed vaults predate the factory and cannot grow.
+type listaMoolahDeployment struct {
+	ChainID            ChainID
+	Address            common.Address
+	ActivationBlock    uint64
+	VaultFactory       common.Address
+	VaultFactoryWindow deploymentWindow
+	SeedVaults         map[common.Address]struct{}
 }
 
-type listaMoolahDeployment struct {
-	ChainID         ChainID                `json:"chainId"`
-	Address         common.Address         `json:"address"`
-	ActivationBlock uint64                 `json:"activationBlock"`
-	Markets         []common.Hash          `json:"markets"`
-	Vaults          []listaVaultDeployment `json:"vaults"`
+func listaSeedVaults(addresses ...string) map[common.Address]struct{} {
+	seeds := make(map[common.Address]struct{}, len(addresses))
+	for _, address := range addresses {
+		seeds[common.HexToAddress(address)] = struct{}{}
+	}
+	return seeds
+}
+
+var listaMoolahDeployments = map[ChainID]listaMoolahDeployment{
+	BSC: {
+		ChainID:            BSC,
+		Address:            common.HexToAddress("0x8F73b65B4caAf64FBA2aF91cC5D4a2A1318E5D8C"),
+		ActivationBlock:    48_172_369,
+		VaultFactory:       common.HexToAddress("0x2a0cb6401fd3c6196750dc6b46702040761d9671"),
+		VaultFactoryWindow: deploymentWindow{ActivationBlock: 48_172_369},
+		SeedVaults: listaSeedVaults(
+			"0x57134a64B7cD9F9eb72F8255A671F5Bf2fe3E2d0",
+			"0xfa27f172e0b6ebcEF9c51ABf817E2cb142FbE627",
+			"0xe46b8e65006e6450bdd8cb7d3274ab4f76f4c705",
+			"0x6d6783c146f2b0b2774c1725297f1845dc502525",
+			"0x384729e442b7636709896e9a3bef63ef70c22fb0",
+			"0x68e83ca4c2869fc6e92774e549ff9d547eae24ab",
+			"0x9a17fd5cb8efc25d11567e713ae795a89775a759",
+			"0x4e82fa869f8d05c8f94900d4652fdb82f3c7a004",
+		),
+	},
+	Ethereum: {
+		ChainID:         Ethereum,
+		Address:         common.HexToAddress("0xf820fb4680712cd7263a0d3d024d5b5aea82fd70"),
+		ActivationBlock: 23_445_769,
+		SeedVaults: listaSeedVaults(
+			"0x1a9bee2f5c85f6b4a0221fb1c733246af5306ae3",
+		),
+	},
 }
 
 type listaTokenConfig struct {
@@ -53,12 +90,11 @@ type listaCDPDeployment struct {
 }
 
 type listaManifest struct {
-	Version     int                     `json:"version"`
-	GeneratedAt string                  `json:"generatedAt"`
-	Sources     []string                `json:"sources"`
-	Scope       string                  `json:"scope"`
-	Moolah      []listaMoolahDeployment `json:"moolah"`
-	CDP         listaCDPDeployment      `json:"cdp"`
+	Version     int                `json:"version"`
+	GeneratedAt string             `json:"generatedAt"`
+	Sources     []string           `json:"sources"`
+	Scope       string             `json:"scope"`
+	CDP         listaCDPDeployment `json:"cdp"`
 }
 
 //go:embed lista-markets.json
@@ -71,43 +107,9 @@ func mustListaManifest() listaManifest {
 	if err := json.Unmarshal(listaManifestJSON, &manifest); err != nil {
 		panic(fmt.Errorf("decode Lista manifest: %w", err))
 	}
-	if manifest.Version != 1 || manifest.GeneratedAt == "" || len(manifest.Sources) == 0 || manifest.Scope == "" || len(manifest.Moolah) == 0 ||
+	if manifest.Version != 1 || manifest.GeneratedAt == "" || len(manifest.Sources) == 0 || manifest.Scope == "" ||
 		manifest.CDP.Interaction == (common.Address{}) || len(manifest.CDP.CandidateTokens) == 0 {
 		panic("invalid Lista manifest")
-	}
-	seenChains := make(map[ChainID]struct{}, len(manifest.Moolah))
-	seenVaults := make(map[ChainID]map[common.Address]struct{}, len(manifest.Moolah))
-	for _, deployment := range manifest.Moolah {
-		if deployment.ChainID != Ethereum && deployment.ChainID != BSC {
-			panic(fmt.Sprintf("unsupported Lista Moolah chain %d", deployment.ChainID))
-		}
-		if _, exists := seenChains[deployment.ChainID]; exists {
-			panic(fmt.Sprintf("duplicate Lista Moolah deployment on chain %d", deployment.ChainID))
-		}
-		seenChains[deployment.ChainID] = struct{}{}
-		if deployment.Address == (common.Address{}) || deployment.ActivationBlock == 0 || len(deployment.Markets) == 0 {
-			panic(fmt.Sprintf("invalid Lista Moolah deployment on chain %d", deployment.ChainID))
-		}
-		seenMarkets := make(map[common.Hash]struct{}, len(deployment.Markets))
-		for _, market := range deployment.Markets {
-			if market == (common.Hash{}) {
-				panic("Lista manifest contains zero market id")
-			}
-			if _, exists := seenMarkets[market]; exists {
-				panic(fmt.Sprintf("duplicate Lista market %s", market))
-			}
-			seenMarkets[market] = struct{}{}
-		}
-		seenVaults[deployment.ChainID] = make(map[common.Address]struct{}, len(deployment.Vaults))
-		for _, vault := range deployment.Vaults {
-			if vault.Address == (common.Address{}) || vault.ActivationBlock == 0 {
-				panic(fmt.Sprintf("invalid Lista vault on chain %d", deployment.ChainID))
-			}
-			if _, exists := seenVaults[deployment.ChainID][vault.Address]; exists {
-				panic(fmt.Sprintf("duplicate Lista vault %s on chain %d", vault.Address, deployment.ChainID))
-			}
-			seenVaults[deployment.ChainID][vault.Address] = struct{}{}
-		}
 	}
 	if manifest.CDP.ChainID != BSC || manifest.CDP.ActivationBlock == 0 ||
 		manifest.CDP.DebtToken.Address == (common.Address{}) || manifest.CDP.DebtToken.Symbol == "" {
@@ -128,21 +130,23 @@ func mustListaManifest() listaManifest {
 
 type ListaAdapter struct {
 	adapterBase
-	moolah map[ChainID]listaMoolahDeployment
-	cdp    listaCDPDeployment
+	moolah  map[ChainID]listaMoolahDeployment
+	indexer listaPositionIndexer
+	cdp     listaCDPDeployment
 }
 
-func newListaAdapter() Adapter {
-	moolah := make(map[ChainID]listaMoolahDeployment, len(listaDeployments.Moolah))
-	for _, deployment := range listaDeployments.Moolah {
-		moolah[deployment.ChainID] = deployment
-	}
+func newListaAdapter(config SentioIndexerConfig) Adapter {
+	return newListaAdapterWithIndexer(newListaIndexer(config))
+}
+
+func newListaAdapterWithIndexer(indexer listaPositionIndexer) *ListaAdapter {
 	return &ListaAdapter{
 		adapterBase: adapterBase{info: ProtocolInfo{
 			ID: "lista", Name: "Lista DAO", Chains: []ChainID{Ethereum, BSC},
 		}},
-		moolah: moolah,
-		cdp:    listaDeployments.CDP,
+		moolah:  listaMoolahDeployments,
+		indexer: indexer,
+		cdp:     listaDeployments.CDP,
 	}
 }
 
@@ -180,7 +184,7 @@ func listaShouldProcessMoolahMarket(held listaMoolahHeldMarket) (bool, error) {
 		return true, nil
 	}
 	if held.holding.hasStoredPosition() {
-		return false, fmt.Errorf("Lista Moolah manifest contains uncreated market %s", held.holding.id)
+		return false, fmt.Errorf("Lista index returned uncreated Moolah market %s", held.holding.id)
 	}
 	return false, nil
 }
@@ -264,14 +268,15 @@ func (a *ListaAdapter) moolahGroups(
 	client *RPCClient,
 	block BlockRef,
 	account common.Address,
+	deployment listaMoolahDeployment,
+	marketIDs []common.Hash,
 ) ([]Group, error) {
-	deployment, exists := a.moolah[block.ChainID]
-	if !exists || block.Number < deployment.ActivationBlock {
+	if len(marketIDs) == 0 {
 		return nil, nil
 	}
-	positionCalls := make([]ContractCall, len(deployment.Markets)+1)
+	positionCalls := make([]ContractCall, len(marketIDs)+1)
 	positionCalls[0] = ContractCall{Contract: deployment.Address, ABI: listaMoolahABI, Method: "feeRecipient"}
-	for index, id := range deployment.Markets {
+	for index, id := range marketIDs {
 		positionCalls[index+1] = ContractCall{
 			Contract: deployment.Address, ABI: listaMoolahABI, Method: "position", Args: []any{id, account},
 		}
@@ -300,7 +305,7 @@ func (a *ListaAdapter) moolahGroups(
 		if decodeErr != nil {
 			return nil, fmt.Errorf("Lista Moolah collateral: %w", decodeErr)
 		}
-		holding := listaMoolahHolding{deployment.Markets[index], supply, borrow, collateral}
+		holding := listaMoolahHolding{marketIDs[index], supply, borrow, collateral}
 		if !listaShouldLoadMoolahMarket(holding, account, feeRecipient) {
 			continue
 		}
@@ -419,20 +424,14 @@ func (a *ListaAdapter) vaultGroups(
 	client *RPCClient,
 	block BlockRef,
 	account common.Address,
+	vaults []common.Address,
 ) ([]Group, error) {
-	deployment, exists := a.moolah[block.ChainID]
-	if !exists {
+	if len(vaults) == 0 {
 		return nil, nil
-	}
-	vaults := make([]listaVaultDeployment, 0, len(deployment.Vaults))
-	for _, vault := range deployment.Vaults {
-		if vault.ActivationBlock <= block.Number {
-			vaults = append(vaults, vault)
-		}
 	}
 	calls := make([]ContractCall, len(vaults))
 	for index, vault := range vaults {
-		calls[index] = ContractCall{Contract: vault.Address, ABI: erc4626ABI, Method: "balanceOf", Args: []any{account}}
+		calls[index] = ContractCall{Contract: vault, ABI: erc4626ABI, Method: "balanceOf", Args: []any{account}}
 	}
 	rows, err := client.ParallelCalls(ctx, block, calls)
 	if err != nil {
@@ -442,25 +441,25 @@ func (a *ListaAdapter) vaultGroups(
 	for index, row := range rows {
 		shares, decodeErr := BigIntAt(row, 0)
 		if decodeErr != nil {
-			return nil, fmt.Errorf("Lista Moolah vault %s balance: %w", vaults[index].Address, decodeErr)
+			return nil, fmt.Errorf("Lista Moolah vault %s balance: %w", vaults[index], decodeErr)
 		}
 		if shares.Sign() == 0 {
 			continue
 		}
 		state, callErr := client.ParallelCalls(ctx, block, []ContractCall{
-			{Contract: vaults[index].Address, ABI: erc4626ABI, Method: "asset"},
-			{Contract: vaults[index].Address, ABI: erc4626ABI, Method: "convertToAssets", Args: []any{shares}},
+			{Contract: vaults[index], ABI: erc4626ABI, Method: "asset"},
+			{Contract: vaults[index], ABI: erc4626ABI, Method: "convertToAssets", Args: []any{shares}},
 		})
 		if callErr != nil {
-			return nil, fmt.Errorf("Lista Moolah vault %s state: %w", vaults[index].Address, callErr)
+			return nil, fmt.Errorf("Lista Moolah vault %s state: %w", vaults[index], callErr)
 		}
 		asset, decodeErr := AddressAt(state[0], 0)
 		if decodeErr != nil {
-			return nil, fmt.Errorf("Lista Moolah vault %s asset: %w", vaults[index].Address, decodeErr)
+			return nil, fmt.Errorf("Lista Moolah vault %s asset: %w", vaults[index], decodeErr)
 		}
 		amount, decodeErr := BigIntAt(state[1], 0)
 		if decodeErr != nil {
-			return nil, fmt.Errorf("Lista Moolah vault %s converted assets: %w", vaults[index].Address, decodeErr)
+			return nil, fmt.Errorf("Lista Moolah vault %s converted assets: %w", vaults[index], decodeErr)
 		}
 		if amount.Sign() == 0 {
 			continue
@@ -470,12 +469,12 @@ func (a *ListaAdapter) vaultGroups(
 			return nil, fmt.Errorf("Lista Moolah vault asset metadata: %w", tokenErr)
 		}
 		component := NewComponent("asset", metadata, amount,
-			Source{Contract: vaults[index].Address, Method: "convertToAssets(balanceOf)"})
+			Source{Contract: vaults[index], Method: "convertToAssets(balanceOf)"})
 		component.Metadata = map[string]any{"shares": shares.String()}
-		id := strings.ToLower(vaults[index].Address.Hex())
+		id := strings.ToLower(vaults[index].Hex())
 		groups = append(groups, Group{
 			ID: "vault:" + id, MarketID: id, Label: "Yield", Components: []Component{component},
-			Metadata: map[string]any{"vault": vaults[index].Address},
+			Metadata: map[string]any{"vault": vaults[index]},
 		})
 	}
 	return groups, nil
@@ -561,17 +560,32 @@ func (a *ListaAdapter) Positions(
 	block BlockRef,
 	account common.Address,
 ) ([]Group, error) {
-	moolah, err := a.moolahGroups(ctx, client, block, account)
-	if err != nil {
-		return nil, err
-	}
-	vaults, err := a.vaultGroups(ctx, client, block, account)
-	if err != nil {
-		return nil, err
+	groups := make([]Group, 0)
+	if deployment, exists := a.moolah[block.ChainID]; exists && block.Number >= deployment.ActivationBlock {
+		refs, err := a.indexer.PositionRefs(ctx, client, block, account, deployment)
+		if err != nil {
+			return nil, err
+		}
+		moolah, err := a.moolahGroups(ctx, client, block, account, deployment, refs.MarketIDs)
+		if err != nil {
+			return nil, err
+		}
+		for index := range moolah {
+			if moolah[index].Metadata == nil {
+				moolah[index].Metadata = map[string]any{}
+			}
+			moolah[index].Metadata["indexerBlock"] = refs.IndexerBlock
+		}
+		groups = append(groups, moolah...)
+		vaults, err := a.vaultGroups(ctx, client, block, account, refs.Vaults)
+		if err != nil {
+			return nil, err
+		}
+		groups = append(groups, vaults...)
 	}
 	cdp, err := a.cdpGroups(ctx, client, block, account)
 	if err != nil {
 		return nil, err
 	}
-	return append(append(moolah, vaults...), cdp...), nil
+	return append(groups, cdp...), nil
 }
