@@ -114,7 +114,7 @@ func NewEngineWithConfig(
 	adapters = append(adapters, newYearnV3Adapter())
 	adapters = append(adapters, newBeefyAdapter())
 	adapters = append(adapters, newStakeWiseAdapter())
-	adapters = append(adapters, newListaAdapter())
+	adapters = append(adapters, newListaAdapter(config.sentioIndexer("lista")))
 	adapters = append(adapters, newEulerV2Adapter(config.sentioIndexer("euler-v2")))
 	adapters = append(adapters, newMorphoAdapter(config.sentioIndexer("morpho-blue")))
 	adapters = append(adapters, newFluidAdapter())
