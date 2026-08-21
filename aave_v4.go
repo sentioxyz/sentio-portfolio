@@ -10,7 +10,18 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-const aaveV4MaximumReservesPerSpoke = 256
+const (
+	aaveV4MaximumReservesPerSpoke = 256
+	aaveV4MaximumSpokes           = 512
+	// The hubs went live with the first spokes; before this block the protocol does not exist.
+	aaveV4HubActivationBlock = 24_720_899
+)
+
+var aaveV4HubABI = MustABI(`[
+  {"type":"function","name":"getAssetCount","stateMutability":"view","inputs":[],"outputs":[{"type":"uint256"}]},
+  {"type":"function","name":"getSpokeCount","stateMutability":"view","inputs":[{"name":"assetId","type":"uint256"}],"outputs":[{"type":"uint256"}]},
+  {"type":"function","name":"getSpokeAddress","stateMutability":"view","inputs":[{"name":"assetId","type":"uint256"},{"name":"index","type":"uint256"}],"outputs":[{"type":"address"}]}
+]`)
 
 var aaveV4SpokeABI = MustABI(`[
   {"type":"function","name":"getReserveCount","stateMutability":"view","inputs":[],"outputs":[{"type":"uint256"}]},
@@ -20,9 +31,8 @@ var aaveV4SpokeABI = MustABI(`[
 ]`)
 
 type aaveV4Spoke struct {
-	Label           string
-	Address         common.Address
-	ActivationBlock uint64
+	Label   string
+	Address common.Address
 }
 
 type aaveV4ReserveData struct {
@@ -44,36 +54,149 @@ type aaveV4Reserve struct {
 
 type AaveV4Adapter struct {
 	adapterBase
-	spokes      []aaveV4Spoke
+	hubs        []common.Address
+	spokeLabels map[common.Address]string
 	allowedHubs map[common.Address]struct{}
 }
 
-var aaveV4EthereumSpokes = []aaveV4Spoke{
-	{Label: "Bluechip", Address: common.HexToAddress("0x973a023A77420ba610f06b3858aD991Df6d85A08"), ActivationBlock: 24_720_920},
-	{Label: "Ethena Correlated", Address: common.HexToAddress("0x58131E79531caB1d52301228d1f7b842F26B9649"), ActivationBlock: 24_720_926},
-	{Label: "Ethena Ecosystem", Address: common.HexToAddress("0xba1B3D55D249692b669A164024A838309B7508AF"), ActivationBlock: 24_720_923},
-	{Label: "Forex", Address: common.HexToAddress("0xD8B93635b8C6d0fF98CbE90b5988E3F2d1Cd9da1"), ActivationBlock: 24_720_917},
-	{Label: "Gold", Address: common.HexToAddress("0x65407b940966954b23dfA3caA5C0702bB42984DC"), ActivationBlock: 24_720_914},
-	{Label: "Lombard BTC", Address: common.HexToAddress("0x7EC68b5695e803e98a21a9A05d744F28b0a7753D"), ActivationBlock: 24_720_911},
-	{Label: "Main", Address: common.HexToAddress("0x94e7A5dCbE816e498b89aB752661904E2F56c485"), ActivationBlock: 24_720_899},
-	{Label: "USDG Pendle", Address: common.HexToAddress("0x956d8e0A89cfa3744428C4641b5a53B56167a7f9"), ActivationBlock: 25_094_394},
-	{Label: "USDG Syrup", Address: common.HexToAddress("0x774B9655413C34809c1F1B16b654465a89EbE989"), ActivationBlock: 25_594_472},
-	{Label: "EtherFi", Address: common.HexToAddress("0xbF10BDfE177dE0336aFD7fcCF80A904E15386219"), ActivationBlock: 24_720_905},
-	{Label: "Kelp", Address: common.HexToAddress("0x3131FE68C4722e726fe6B2819ED68e514395B9a4"), ActivationBlock: 24_720_908},
-	{Label: "Lido", Address: common.HexToAddress("0xe1900480ac69f0B296841Cd01cC37546d92F35Cd"), ActivationBlock: 24_720_902},
+// Spokes are enumerated from the hubs at the pinned block (getAssetCount ->
+// getSpokeCount -> getSpokeAddress), so a newly listed spoke can never be missed the way
+// the old hardcoded list missed 39 of 51 live spokes. Only display names are static:
+// a stale entry here degrades a label, never a position.
+var aaveV4SpokeLabels = map[common.Address]string{
+	common.HexToAddress("0x973a023A77420ba610f06b3858aD991Df6d85A08"): "Bluechip",
+	common.HexToAddress("0x58131E79531caB1d52301228d1f7b842F26B9649"): "Ethena Correlated",
+	common.HexToAddress("0xba1B3D55D249692b669A164024A838309B7508AF"): "Ethena Ecosystem",
+	common.HexToAddress("0xD8B93635b8C6d0fF98CbE90b5988E3F2d1Cd9da1"): "Forex",
+	common.HexToAddress("0x65407b940966954b23dfA3caA5C0702bB42984DC"): "Gold",
+	common.HexToAddress("0x7EC68b5695e803e98a21a9A05d744F28b0a7753D"): "Lombard BTC",
+	common.HexToAddress("0x94e7A5dCbE816e498b89aB752661904E2F56c485"): "Main",
+	common.HexToAddress("0x956d8e0A89cfa3744428C4641b5a53B56167a7f9"): "USDG Pendle",
+	common.HexToAddress("0x774B9655413C34809c1F1B16b654465a89EbE989"): "USDG Syrup",
+	common.HexToAddress("0xbF10BDfE177dE0336aFD7fcCF80A904E15386219"): "EtherFi",
+	common.HexToAddress("0x3131FE68C4722e726fe6B2819ED68e514395B9a4"): "Kelp",
+	common.HexToAddress("0xe1900480ac69f0B296841Cd01cC37546d92F35Cd"): "Lido",
+}
+
+var aaveV4EthereumHubs = []common.Address{
+	common.HexToAddress("0xCca852Bc40e560adC3b1Cc58CA5b55638ce826c9"),
+	common.HexToAddress("0x06002e9c4412CB7814a791eA3666D905871E536A"),
+	common.HexToAddress("0x943827DCA022D0F354a8a8c332dA1e5Eb9f9F931"),
+	common.HexToAddress("0x62d63197660c080236193CA60b70E49A08E90368"),
 }
 
 func newAaveV4Adapter() Adapter {
+	allowed := make(map[common.Address]struct{}, len(aaveV4EthereumHubs))
+	for _, hub := range aaveV4EthereumHubs {
+		allowed[hub] = struct{}{}
+	}
 	return &AaveV4Adapter{
 		adapterBase: adapterBase{info: ProtocolInfo{ID: "aave-v4", Name: "Aave V4", Chains: []ChainID{Ethereum}}},
-		spokes:      aaveV4EthereumSpokes,
-		allowedHubs: map[common.Address]struct{}{
-			common.HexToAddress("0xCca852Bc40e560adC3b1Cc58CA5b55638ce826c9"): {},
-			common.HexToAddress("0x06002e9c4412CB7814a791eA3666D905871E536A"): {},
-			common.HexToAddress("0x943827DCA022D0F354a8a8c332dA1e5Eb9f9F931"): {},
-			common.HexToAddress("0x62d63197660c080236193CA60b70E49A08E90368"): {},
-		},
+		hubs:        aaveV4EthereumHubs,
+		spokeLabels: aaveV4SpokeLabels,
+		allowedHubs: allowed,
 	}
+}
+
+func aaveV4SpokeLabel(labels map[common.Address]string, spoke common.Address) string {
+	if label, exists := labels[spoke]; exists {
+		return label
+	}
+	return strings.ToLower(spoke.Hex())
+}
+
+// enumerateSpokes resolves the live spoke set from the hubs at the pinned block:
+// getAssetCount -> getSpokeCount(assetId) -> getSpokeAddress(assetId, index), deduplicated
+// in discovery order. Because the set is read from chain state at the scan block, newly
+// listed spokes appear immediately and historical scans see exactly the spokes listed then.
+func (a *AaveV4Adapter) enumerateSpokes(
+	ctx context.Context,
+	client *RPCClient,
+	block BlockRef,
+) ([]aaveV4Spoke, error) {
+	countCalls := make([]ContractCall, len(a.hubs))
+	for index, hub := range a.hubs {
+		countCalls[index] = ContractCall{Contract: hub, ABI: aaveV4HubABI, Method: "getAssetCount"}
+	}
+	countRows, err := client.ParallelCalls(ctx, block, countCalls)
+	if err != nil {
+		return nil, fmt.Errorf("hub asset counts: %w", err)
+	}
+	type hubAsset struct {
+		hub     common.Address
+		assetID *big.Int
+	}
+	assets := make([]hubAsset, 0)
+	for index, values := range countRows {
+		count, decodeErr := BigIntAt(values, 0)
+		if decodeErr != nil {
+			return nil, fmt.Errorf("hub %s asset count: %w", a.hubs[index], decodeErr)
+		}
+		if !count.IsUint64() || count.Uint64() > aaveV4MaximumReservesPerSpoke {
+			return nil, fmt.Errorf("hub %s asset count %s exceeds maximum", a.hubs[index], count)
+		}
+		for id := uint64(0); id < count.Uint64(); id++ {
+			assets = append(assets, hubAsset{hub: a.hubs[index], assetID: new(big.Int).SetUint64(id)})
+		}
+	}
+	spokeCountCalls := make([]ContractCall, len(assets))
+	for index, asset := range assets {
+		spokeCountCalls[index] = ContractCall{
+			Contract: asset.hub, ABI: aaveV4HubABI, Method: "getSpokeCount", Args: []any{asset.assetID},
+		}
+	}
+	spokeCountRows, err := client.ParallelCalls(ctx, block, spokeCountCalls)
+	if err != nil {
+		return nil, fmt.Errorf("hub spoke counts: %w", err)
+	}
+	type attachment struct {
+		asset hubAsset
+		index *big.Int
+	}
+	attachments := make([]attachment, 0)
+	for index, values := range spokeCountRows {
+		count, decodeErr := BigIntAt(values, 0)
+		if decodeErr != nil {
+			return nil, fmt.Errorf("hub %s asset %s spoke count: %w", assets[index].hub, assets[index].assetID, decodeErr)
+		}
+		if !count.IsUint64() || count.Uint64() > aaveV4MaximumSpokes {
+			return nil, fmt.Errorf("hub %s asset %s spoke count %s exceeds maximum", assets[index].hub, assets[index].assetID, count)
+		}
+		for position := uint64(0); position < count.Uint64(); position++ {
+			attachments = append(attachments, attachment{asset: assets[index], index: new(big.Int).SetUint64(position)})
+		}
+	}
+	addressCalls := make([]ContractCall, len(attachments))
+	for index, entry := range attachments {
+		addressCalls[index] = ContractCall{
+			Contract: entry.asset.hub, ABI: aaveV4HubABI, Method: "getSpokeAddress",
+			Args: []any{entry.asset.assetID, entry.index},
+		}
+	}
+	addressRows, err := client.ParallelCalls(ctx, block, addressCalls)
+	if err != nil {
+		return nil, fmt.Errorf("hub spoke addresses: %w", err)
+	}
+	seen := make(map[common.Address]struct{})
+	spokes := make([]aaveV4Spoke, 0)
+	for index, values := range addressRows {
+		address, decodeErr := AddressAt(values, 0)
+		if decodeErr != nil {
+			return nil, fmt.Errorf("spoke address %d: %w", index, decodeErr)
+		}
+		if address == (common.Address{}) {
+			return nil, fmt.Errorf("hub %s listed a zero spoke", attachments[index].asset.hub)
+		}
+		if _, exists := seen[address]; exists {
+			continue
+		}
+		seen[address] = struct{}{}
+		spokes = append(spokes, aaveV4Spoke{Label: aaveV4SpokeLabel(a.spokeLabels, address), Address: address})
+	}
+	if len(spokes) > aaveV4MaximumSpokes {
+		return nil, fmt.Errorf("spoke count %d exceeds maximum %d", len(spokes), aaveV4MaximumSpokes)
+	}
+	return spokes, nil
 }
 
 func decodeAaveV4Reserve(value any) (aaveV4ReserveData, error) {
@@ -85,27 +208,20 @@ func decodeAaveV4Reserve(value any) (aaveV4ReserveData, error) {
 	return *reserve, nil
 }
 
-func (a *AaveV4Adapter) activeSpokes(block uint64) []aaveV4Spoke {
-	active := make([]aaveV4Spoke, 0, len(a.spokes))
-	for _, spoke := range a.spokes {
-		if block >= spoke.ActivationBlock {
-			active = append(active, spoke)
-		}
-	}
-	return active
-}
-
 func (a *AaveV4Adapter) reserveCatalog(
 	ctx context.Context,
 	client *RPCClient,
 	block BlockRef,
+	spokes []aaveV4Spoke,
 ) ([]aaveV4Reserve, error) {
-	spokes := a.activeSpokes(block.Number)
 	countCalls := make([]ContractCall, 0, len(spokes))
 	for _, spoke := range spokes {
 		countCalls = append(countCalls, ContractCall{Contract: spoke.Address, ABI: aaveV4SpokeABI, Method: "getReserveCount"})
 	}
-	counts, err := client.ParallelCalls(ctx, block, countCalls)
+	// The hubs list every authorized liquidity consumer, and only the lending market
+	// spokes implement getReserveCount (12 of 51 today) — a revert here classifies the
+	// entry as a non-market module, not as an error. Transport failures still fail.
+	counts, err := client.ParallelCallsAllowFailure(ctx, block, countCalls)
 	if err != nil {
 		return nil, fmt.Errorf("reserve counts: %w", err)
 	}
@@ -114,8 +230,14 @@ func (a *AaveV4Adapter) reserveCatalog(
 		id    *big.Int
 	}
 	refs := make([]reserveRef, 0)
-	for index, values := range counts {
-		count, decodeErr := BigIntAt(values, 0)
+	for index, row := range counts {
+		if row.Error != nil {
+			if executionReverted(row.Error) {
+				continue
+			}
+			return nil, fmt.Errorf("%s reserve count: %w", spokes[index].Label, row.Error)
+		}
+		count, decodeErr := BigIntAt(row.Values, 0)
 		if decodeErr != nil {
 			return nil, fmt.Errorf("%s reserve count: %w", spokes[index].Label, decodeErr)
 		}
@@ -166,10 +288,14 @@ func (a *AaveV4Adapter) Positions(
 	block BlockRef,
 	account common.Address,
 ) ([]Group, error) {
-	if block.ChainID != Ethereum {
+	if block.ChainID != Ethereum || block.Number < aaveV4HubActivationBlock {
 		return nil, nil
 	}
-	reserves, err := a.reserveCatalog(ctx, client, block)
+	spokes, err := a.enumerateSpokes(ctx, client, block)
+	if err != nil {
+		return nil, err
+	}
+	reserves, err := a.reserveCatalog(ctx, client, block, spokes)
 	if err != nil {
 		return nil, err
 	}
@@ -247,7 +373,7 @@ func (a *AaveV4Adapter) Positions(
 		}
 	}
 	groups := make([]Group, 0, len(components))
-	for _, spoke := range a.spokes {
+	for _, spoke := range spokes {
 		rows := components[spoke.Address]
 		if len(rows) == 0 {
 			continue
@@ -256,7 +382,7 @@ func (a *AaveV4Adapter) Positions(
 		groups = append(groups, Group{
 			ID: marketID, MarketID: marketID, Label: "Lending · " + spoke.Label,
 			Components: rows, NetValuePolicy: "floor-zero",
-			Metadata: map[string]any{"spoke": spoke.Address, "market": spoke.Label, "activationBlock": spoke.ActivationBlock},
+			Metadata: map[string]any{"spoke": spoke.Address, "market": spoke.Label},
 		})
 	}
 	return groups, nil
