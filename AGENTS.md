@@ -17,6 +17,24 @@ single processor:
   configuration — never an extra contract binding inside another protocol's
   processor.
 
+## Deployment windows
+
+Every contract address the kernel reads — hardcoded anchors, manifest entries, and
+registries alike — must be gated by the block that created it:
+
+- an `eth_call` against an address that has no code yet returns empty data, which
+  fails strict batch decoding and drops the protocol's whole surface for every
+  fixed-block scan inside the gap (an Aave v4 hub deployed late broke historical
+  scans across a 600k-block interval exactly this way);
+- carry a `deploymentWindow{ActivationBlock: …}` next to every static address and
+  skip the contract whenever the window is not active at the pinned block;
+- addresses enumerated on-chain at the pinned block (registry and factory getters)
+  are self-gating — a registry cannot return a contract that does not exist yet —
+  but the registry contract itself still needs its own window;
+- establish a creation block with an `eth_getCode` binary search rather than
+  trusting documentation or a first event, and treat it as closed history;
+- cover each new window with a boundary regression test.
+
 ## Sensitive data
 
 This is a public repository. Never commit secrets or environment-specific

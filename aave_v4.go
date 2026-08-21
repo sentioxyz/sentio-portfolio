@@ -13,8 +13,6 @@ import (
 const (
 	aaveV4MaximumReservesPerSpoke = 256
 	aaveV4MaximumSpokes           = 512
-	// The hubs went live with the first spokes; before this block the protocol does not exist.
-	aaveV4HubActivationBlock = 24_720_899
 )
 
 var aaveV4HubABI = MustABI(`[
@@ -54,7 +52,7 @@ type aaveV4Reserve struct {
 
 type AaveV4Adapter struct {
 	adapterBase
-	hubs        []common.Address
+	hubs        []aaveV4Hub
 	spokeLabels map[common.Address]string
 	allowedHubs map[common.Address]struct{}
 }
@@ -78,17 +76,36 @@ var aaveV4SpokeLabels = map[common.Address]string{
 	common.HexToAddress("0xe1900480ac69f0B296841Cd01cC37546d92F35Cd"): "Lido",
 }
 
-var aaveV4EthereumHubs = []common.Address{
-	common.HexToAddress("0xCca852Bc40e560adC3b1Cc58CA5b55638ce826c9"),
-	common.HexToAddress("0x06002e9c4412CB7814a791eA3666D905871E536A"),
-	common.HexToAddress("0x943827DCA022D0F354a8a8c332dA1e5Eb9f9F931"),
-	common.HexToAddress("0x62d63197660c080236193CA60b70E49A08E90368"),
+type aaveV4Hub struct {
+	Address common.Address
+	// The hub's deployment block: an eth_call against a hub that has no code yet
+	// returns empty data and fails the strict enumeration batch, so a fixed-block scan
+	// inside the gap would drop the whole Aave v4 surface. Deployment blocks are closed
+	// history, verified by eth_getCode binary search.
+	Window deploymentWindow
+}
+
+var aaveV4EthereumHubs = []aaveV4Hub{
+	{Address: common.HexToAddress("0xCca852Bc40e560adC3b1Cc58CA5b55638ce826c9"), Window: deploymentWindow{ActivationBlock: 24_720_891}},
+	{Address: common.HexToAddress("0x06002e9c4412CB7814a791eA3666D905871E536A"), Window: deploymentWindow{ActivationBlock: 24_720_895}},
+	{Address: common.HexToAddress("0x943827DCA022D0F354a8a8c332dA1e5Eb9f9F931"), Window: deploymentWindow{ActivationBlock: 24_720_887}},
+	{Address: common.HexToAddress("0x62d63197660c080236193CA60b70E49A08E90368"), Window: deploymentWindow{ActivationBlock: 25_318_132}},
+}
+
+func activeAaveV4Hubs(hubs []aaveV4Hub, block uint64) []common.Address {
+	active := make([]common.Address, 0, len(hubs))
+	for _, hub := range hubs {
+		if hub.Window.ActiveAt(block) {
+			active = append(active, hub.Address)
+		}
+	}
+	return active
 }
 
 func newAaveV4Adapter() Adapter {
 	allowed := make(map[common.Address]struct{}, len(aaveV4EthereumHubs))
 	for _, hub := range aaveV4EthereumHubs {
-		allowed[hub] = struct{}{}
+		allowed[hub.Address] = struct{}{}
 	}
 	return &AaveV4Adapter{
 		adapterBase: adapterBase{info: ProtocolInfo{ID: "aave-v4", Name: "Aave V4", Chains: []ChainID{Ethereum}}},
@@ -114,8 +131,12 @@ func (a *AaveV4Adapter) enumerateSpokes(
 	client *RPCClient,
 	block BlockRef,
 ) ([]aaveV4Spoke, error) {
-	countCalls := make([]ContractCall, len(a.hubs))
-	for index, hub := range a.hubs {
+	hubs := activeAaveV4Hubs(a.hubs, block.Number)
+	if len(hubs) == 0 {
+		return nil, nil
+	}
+	countCalls := make([]ContractCall, len(hubs))
+	for index, hub := range hubs {
 		countCalls[index] = ContractCall{Contract: hub, ABI: aaveV4HubABI, Method: "getAssetCount"}
 	}
 	countRows, err := client.ParallelCalls(ctx, block, countCalls)
@@ -130,13 +151,13 @@ func (a *AaveV4Adapter) enumerateSpokes(
 	for index, values := range countRows {
 		count, decodeErr := BigIntAt(values, 0)
 		if decodeErr != nil {
-			return nil, fmt.Errorf("hub %s asset count: %w", a.hubs[index], decodeErr)
+			return nil, fmt.Errorf("hub %s asset count: %w", hubs[index], decodeErr)
 		}
 		if !count.IsUint64() || count.Uint64() > aaveV4MaximumReservesPerSpoke {
-			return nil, fmt.Errorf("hub %s asset count %s exceeds maximum", a.hubs[index], count)
+			return nil, fmt.Errorf("hub %s asset count %s exceeds maximum", hubs[index], count)
 		}
 		for id := uint64(0); id < count.Uint64(); id++ {
-			assets = append(assets, hubAsset{hub: a.hubs[index], assetID: new(big.Int).SetUint64(id)})
+			assets = append(assets, hubAsset{hub: hubs[index], assetID: new(big.Int).SetUint64(id)})
 		}
 	}
 	spokeCountCalls := make([]ContractCall, len(assets))
@@ -288,7 +309,7 @@ func (a *AaveV4Adapter) Positions(
 	block BlockRef,
 	account common.Address,
 ) ([]Group, error) {
-	if block.ChainID != Ethereum || block.Number < aaveV4HubActivationBlock {
+	if block.ChainID != Ethereum {
 		return nil, nil
 	}
 	spokes, err := a.enumerateSpokes(ctx, client, block)
