@@ -28,6 +28,7 @@ go_library(
         "lido.go",
         "liquity_v1.go",
         "lista.go",
+        "lista_indexer.go",
         "lst.go",
         "makerdao.go",
         "maple.go",
