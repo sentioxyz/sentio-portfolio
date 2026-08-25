@@ -1129,3 +1129,70 @@ func TestMissingChainDeBankAPIReconciliation(t *testing.T) {
 		})
 	})
 }
+
+// TestSkyDeBankAPIReconciliation covers everything DeBank files under its `sky` project: the
+// sUSDS and stUSDS savings vaults, the two USDS staking farms it exposes as sky_proxy_staked,
+// and the lockstake engine it exposes as sky_lending. The corpus mixes all three and includes
+// multi-urn owners, owners carrying USDS debt, and owners whose urn farm pays SKY, SPK or
+// USDS, so urn enumeration, the art*rate/RAY conversion and the read-the-reward-token path are
+// exercised rather than assumed.
+//
+// The farm family is split across three DeBank projects and only two of the four belong here:
+// REWARDS_USDS_SKY and REWARDS_USDS_01 are `sky`, REWARDS_USDS_SPK is `spark`, and
+// REWARDS_USDS_GROVE is `makerdao`. Both halves of that split are pinned below —
+// 0x7bdc169e and 0x39d787fd hold the two included farms, and 0xaf9b98d2 holds 10.1M USDS in
+// the excluded GROVE farm alongside its sUSDS, so reading that one would fail this test.
+//
+// Accounts are chosen so every reported quantity clears DeBank's own dust floor. DeBank drops
+// sub-dollar reward balances from its response, so an urn earning a few SPK reads as a bare
+// zero on its side and would fail the comparison against a correct on-chain amount.
+//
+// The tolerance is 1e-3 rather than the usual 1e-5 because the lsSKY farm rewards accrue too
+// fast for a ppm bound to mean anything. Urn 0xb2a534a0 earns 6.83 USDS per minute, and its
+// reward is the bulk of its owner's USDS total, so 10 ppm of that total is 0.95 USDS — about
+// eight seconds of accrual. No alignment between DeBank's snapshot and a canonical block is
+// that tight, and at 10 ppm this corpus fails or passes on cache timing. The looser bound
+// still fails loudly on what this test exists to catch: a missing farm, urn or vault shows up
+// as a whole absent token or a multi-percent gap, not as ppm drift. 25 of these 28 accounts do
+// reconcile within 10 ppm; the exceptions are the two with large fast-accruing farm rewards.
+func TestSkyDeBankAPIReconciliation(t *testing.T) {
+	runDeBankAPIReconciliationRefreshedWithTolerance(t, "sky", sweepAdapterByID(t, "sky"), Ethereum, []string{
+		// USDS farms filed under `sky`, each alongside other Sky surfaces
+		"0x7bdc169e0dc8696dbe9348fb57f061135a4d2c92",
+		"0x39d787fdf7384597c7208644dbb6fda1cca4ebdf",
+		// lockstake owners carrying USDS debt
+		"0x37ef78e005ca4bef7ed8a31a2b5070c2dbf511ef",
+		"0xc18973a391b674ba884bf4e19a874621d4a1b1ca",
+		"0x0a05d37a686159e9436e6318bc03433f6882a464",
+		"0x5ab2907b820836092abc32afe2b9d8aa3223e131",
+		"0x430f09841d65beb3f27765503d0f850b8bce7713",
+		"0xb0d7b025bee8206d2b367ce11549b24313162d28",
+		// four urns that carry USDS debt and a USDS-denominated farm reward at once, so the
+		// same token appears as both a debt and a reward leg inside one group
+		"0xf65475e74c1ed6d004d5240b06e3088724dfda5d",
+		// lockstake owners whose urn farm pays a token other than SKY, so the reward token is
+		// read from the farm rather than assumed
+		"0xe1ad30971b83c17e2a24c0334cb45f808abebc87",
+		"0x28a55c4b4f9615fde3cdaddf6cc01fcf2e38a6b0",
+		// lockstake owners without debt, including multi-urn owners
+		"0xee2826453a4fd5afeb7ceffeef3ffa2320081268",
+		"0xfd841de3281fc9d419ebc67749520e74e6f92ccb",
+		"0x05adbafe18fcbf8c6671e094aadd9bcba4dd91e8",
+		// stUSDS holders
+		"0xc02dd10b401e01e0fb3bf497e46e6d6b51664ad7",
+		"0x961972a5c91e7237a3b02d2ee173ac3999e49480",
+		"0x31dba9b97faad27cb6ddf86c92815652098afa01",
+		"0xf75cbe67cabbd61782e3464ec1452da96b4da12d",
+		"0x9e309ca1b9fe7951cf59b84fe235380ab5d5090a",
+		"0x5f5a41b18aa28eb07c6aa8108329299d027767f5",
+		"0x440888714a6afed60ff44e9975a96e6a36f7fac4",
+		// sUSDS holders
+		"0x688cc76d3b009d805ab6b4d0a1cbd228131b5cbf",
+		"0x55ea3e38fa0aa495b205fe45641a44ccc1c3df26",
+		"0xc78234a241582841d4bb049217dbfe68abad1d3e",
+		"0x926d4d28f228f1e71cf087f50def6cb67aac7f8f",
+		"0x307ff02bf5e23a6f2edc080e8572a2c2862a9e25",
+		"0xf9bd82c83cf3b4759a68379e094c4af680175d99",
+		"0xaf9b98d2acde5f13eaeaeb0101273cdfa86dcc95",
+	}, 1e-3)
+}

@@ -106,6 +106,7 @@ func NewEngineWithConfig(
 	adapters = append(adapters, newFraxlendAdapter())
 	adapters = append(adapters, newAaveV4Adapter())
 	adapters = append(adapters, newMakerDAOAdapter())
+	adapters = append(adapters, newSkyAdapter())
 	adapters = append(adapters, newMapleAdapter())
 	adapters = append(adapters, newLiquityV1Adapter())
 	adapters = append(adapters, newCurveCrvUSDAdapter())

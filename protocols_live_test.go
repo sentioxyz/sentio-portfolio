@@ -262,6 +262,47 @@ func TestNewProtocolsLiveNonZeroPositions(t *testing.T) {
 			account:   "0xf5211d07b36a356fcc49684728121be6979433e3",
 			wantToken: "USDC",
 		},
+		{
+			name:        "Sky Ethereum stUSDS",
+			chainID:     Ethereum,
+			rpcEnv:      "PORTFOLIO_ETH_RPC_URL",
+			adapter:     sweepAdapterByID(t, "sky"),
+			account:     "0xc02dd10b401e01e0fb3bf497e46e6d6b51664ad7",
+			wantToken:   "USDS",
+			wantGroupID: "stusds",
+		},
+		{
+			name:      "Sky Ethereum USDS farm",
+			chainID:   Ethereum,
+			rpcEnv:    "PORTFOLIO_ETH_RPC_URL",
+			adapter:   sweepAdapterByID(t, "sky"),
+			account:   "0x7bdc169e0dc8696dbe9348fb57f061135a4d2c92",
+			wantToken: "USDS",
+			// The SKY-paying farm contributes a staked USDS leg plus a SKY reward; the lockstake
+			// urn adds its own locked SKY and SPK reward.
+			wantRoles: map[string]int{"staked-supply": 1, "locked": 1, "reward": 2},
+		},
+		{
+			name:      "Sky Ethereum lockstake",
+			chainID:   Ethereum,
+			rpcEnv:    "PORTFOLIO_ETH_RPC_URL",
+			adapter:   sweepAdapterByID(t, "sky"),
+			account:   "0xc7e0e9ace622da72d6ca7ea4d71ccd865c7b8f36",
+			wantToken: "SKY",
+			// Two urns: the first carries collateral, debt and a SKY reward; the second has no
+			// collateral left but still an unclaimed SPK reward, so a zero-ink urn must still
+			// produce a group.
+			wantRoles: map[string]int{"locked": 1, "borrow": 1, "reward": 2},
+		},
+		{
+			name:        "Sky Ethereum sUSDS",
+			chainID:     Ethereum,
+			rpcEnv:      "PORTFOLIO_ETH_RPC_URL",
+			adapter:     sweepAdapterByID(t, "sky"),
+			account:     "0x688cc76d3b009d805ab6b4d0a1cbd228131b5cbf",
+			wantToken:   "USDS",
+			wantGroupID: "susds",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
