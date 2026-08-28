@@ -17,6 +17,25 @@ single processor:
   configuration — never an extra contract binding inside another protocol's
   processor.
 
+## Wallet holdings
+
+`wallet-tokens.json` is the list of assets the `wallet` adapter reads, and it is
+generated rather than hand-edited. Two rules decide what belongs in it:
+
+- **every token must be quotable by the host's price provider.** The kernel has no
+  price service, so an unquotable token is not extra coverage — it reports an amount
+  the response cannot value and adds a pricing failure to every scan of every
+  account. Only the host can decide that, and it does: it runs the committed list
+  through the price provider production uses and prunes what cannot be quoted;
+- **never list a token an adapter already reads.** LSTs, vault shares, aTokens and
+  LP tokens are positions, not holdings. `suppressDuplicateHoldings` enforces this
+  at runtime from the `Source` each component records, so an adapter that reads a
+  wallet balance must keep the contract it read in `Source.Contract` — that field is
+  what stops the same balance being counted twice.
+
+Holdings do not chase the long tail: a curated list that can be priced beats a
+wider list of amounts with no value.
+
 ## Deployment windows
 
 Every contract address the kernel reads — hardcoded anchors, manifest entries, and

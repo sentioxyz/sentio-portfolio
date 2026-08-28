@@ -123,6 +123,7 @@ func NewEngineWithConfig(
 		config.sentioIndexer("uniswap-v3"),
 		config.sentioIndexer("uniswap-v4"),
 	)...)
+	adapters = append(adapters, newWalletAdapter())
 	return &Engine{
 		rpcURLs:       rpcURLs,
 		adapters:      adapters,
@@ -352,6 +353,9 @@ sendJobs:
 	}
 	close(jobs)
 	workers.Wait()
+	// Holdings are decided once every adapter has finished, so a token an adapter already
+	// counted is never reported twice — and never depends on which adapter finished first.
+	response.Snapshots = suppressDuplicateHoldings(response.Snapshots)
 	sort.Slice(response.Snapshots, func(left, right int) bool {
 		if response.Snapshots[left].ProtocolID != response.Snapshots[right].ProtocolID {
 			return response.Snapshots[left].ProtocolID < response.Snapshots[right].ProtocolID

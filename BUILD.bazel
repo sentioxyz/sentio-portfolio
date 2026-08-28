@@ -56,6 +56,7 @@ go_library(
         "valuation.go",
         "venus.go",
         "vesper.go",
+        "wallet.go",
         "yearn_v3.go",
     ],
     embedsrcs = [
@@ -64,6 +65,7 @@ go_library(
         "lista-markets.json",
         "stakewise-vaults.json",
         "vesper-pools.json",
+        "wallet-tokens.json",
         "yearn_v3_arbitrum_markets.json",
         "yearn_v3_base_markets.json",
         "yearn_v3_markets.json",
@@ -112,6 +114,7 @@ go_test(
         "uniswap_test.go",
         "valuation_test.go",
         "vesper_test.go",
+        "wallet_test.go",
         "yearn_v3_test.go",
     ],
     embed = [":portfolio"],

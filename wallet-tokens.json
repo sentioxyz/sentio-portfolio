@@ -1,0 +1,1370 @@
+{
+  "version": 1,
+  "generatedAt": "2026-08-28T11:31:01Z",
+  "source": "CoinGecko top-500 market caps resolved through CoinQuote identities, plus the wrapped and blue-chip assets a market-cap ranking hides; symbol and decimals read from each chain",
+  "scope": "plain holdings only - base assets an account holds outright, never a token an adapter already reads as a position",
+  "coinQuote": {
+    "method": "BatchGetLatestPrices with a ChainAddress selector per token",
+    "verifiedAt": ""
+  },
+  "tokens": [
+    {
+      "chainId": 1,
+      "address": "0x111111111117dc0aa78b770fa6a738034120c302",
+      "symbol": "1INCH",
+      "decimals": 18,
+      "coinGeckoId": "1inch"
+    },
+    {
+      "chainId": 1,
+      "address": "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9",
+      "symbol": "AAVE",
+      "decimals": 18,
+      "coinGeckoId": "aave"
+    },
+    {
+      "chainId": 1,
+      "address": "0xb50721bcf8d664c30412cfbc6cf7a15145234ad1",
+      "symbol": "ARB",
+      "decimals": 18,
+      "coinGeckoId": "arbitrum"
+    },
+    {
+      "chainId": 1,
+      "address": "0x8347fffb3abeb2fae5c21b09e983bdefa1a047dc",
+      "symbol": "BCAP",
+      "decimals": 2,
+      "coinGeckoId": "blockchain-capital"
+    },
+    {
+      "chainId": 1,
+      "address": "0x54d2252757e1672eead234d27b1270728ff90581",
+      "symbol": "BGB",
+      "decimals": 18,
+      "coinGeckoId": "bitget-token"
+    },
+    {
+      "chainId": 1,
+      "address": "0xb8c77482e45f1f44de1745f52c74426c631bdd52",
+      "symbol": "BNB",
+      "decimals": 18,
+      "coinGeckoId": "binancecoin"
+    },
+    {
+      "chainId": 1,
+      "address": "0x3a63de3572c69a1307ff08394f3ee7702c16d25d",
+      "symbol": "BTW",
+      "decimals": 18,
+      "coinGeckoId": "bitway"
+    },
+    {
+      "chainId": 1,
+      "address": "0x7712c34205737192402172409a8f7ccef8aa2aec",
+      "symbol": "BUIDL",
+      "decimals": 6,
+      "coinGeckoId": "blackrock-usd-institutional-digital-liquidity-fund"
+    },
+    {
+      "chainId": 1,
+      "address": "0x4fabb145d64652a948d72533023f6e7a623c7c53",
+      "symbol": "BUSD",
+      "decimals": 18,
+      "coinGeckoId": "binance-usd"
+    },
+    {
+      "chainId": 1,
+      "address": "0x152649ea73beab28c5b49b26eb48f7ead6d4c898",
+      "symbol": "Cake",
+      "decimals": 18,
+      "coinGeckoId": "pancakeswap-token"
+    },
+    {
+      "chainId": 1,
+      "address": "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf",
+      "symbol": "cbBTC",
+      "decimals": 8,
+      "coinGeckoId": "coinbase-wrapped-btc"
+    },
+    {
+      "chainId": 1,
+      "address": "0xc00e94cb662c3520282e6f5717214004a7f26888",
+      "symbol": "COMP",
+      "decimals": 18,
+      "coinGeckoId": "compound-governance-token"
+    },
+    {
+      "chainId": 1,
+      "address": "0xa0b73e1ff0b80914ab6fe0444e65848c4c34450b",
+      "symbol": "CRO",
+      "decimals": 8,
+      "coinGeckoId": "crypto-com-chain"
+    },
+    {
+      "chainId": 1,
+      "address": "0xd533a949740bb3306d119cc777fa900ba034cd52",
+      "symbol": "CRV",
+      "decimals": 18,
+      "coinGeckoId": "curve-dao-token"
+    },
+    {
+      "chainId": 1,
+      "address": "0xf939e0a03fb07f59a73314e73794be0e57ac1b4e",
+      "symbol": "crvUSD",
+      "decimals": 18,
+      "coinGeckoId": "crvusd"
+    },
+    {
+      "chainId": 1,
+      "address": "0x4e3fbd56cd56c3e72c1403e103b45db9da5b9d2b",
+      "symbol": "CVX",
+      "decimals": 18,
+      "coinGeckoId": "convex-finance"
+    },
+    {
+      "chainId": 1,
+      "address": "0x6b175474e89094c44da98b954eedeac495271d0f",
+      "symbol": "DAI",
+      "decimals": 18,
+      "coinGeckoId": "dai"
+    },
+    {
+      "chainId": 1,
+      "address": "0xec53bf9167f50cdeb3ae105f56099aaab9061f83",
+      "symbol": "EIGEN",
+      "decimals": 18,
+      "coinGeckoId": "eigenlayer"
+    },
+    {
+      "chainId": 1,
+      "address": "0x57e114b691db790c35207b2e685d4a43181e6061",
+      "symbol": "ENA",
+      "decimals": 18,
+      "coinGeckoId": "ethena"
+    },
+    {
+      "chainId": 1,
+      "address": "0xc18360217d8f7ab5e7c516566761ea12ce7f9d72",
+      "symbol": "ENS",
+      "decimals": 18,
+      "coinGeckoId": "ethereum-name-service"
+    },
+    {
+      "chainId": 1,
+      "address": "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb",
+      "symbol": "ETHFI",
+      "decimals": 18,
+      "coinGeckoId": "ether-fi"
+    },
+    {
+      "chainId": 1,
+      "address": "0x1abaea1f7c830bd89acc67ec4af516284b1bc33c",
+      "symbol": "EURC",
+      "decimals": 6,
+      "coinGeckoId": "euro-coin"
+    },
+    {
+      "chainId": 1,
+      "address": "0x0990b149e915cb08e2143a5c6f669c907eddc8b0",
+      "symbol": "eurSAFO",
+      "decimals": 5,
+      "coinGeckoId": "spiko-amundi-overnight-swap-fund-eur"
+    },
+    {
+      "chainId": 1,
+      "address": "0xa0769f7a8fc65e47de93797b4e21c073c117fc80",
+      "symbol": "EUTBL",
+      "decimals": 5,
+      "coinGeckoId": "eutbl"
+    },
+    {
+      "chainId": 1,
+      "address": "0xc5f0f7b66764f6ec8c8dff7ba683102295e16409",
+      "symbol": "FDUSD",
+      "decimals": 18,
+      "coinGeckoId": "first-digital-usd"
+    },
+    {
+      "chainId": 1,
+      "address": "0x853d955acef822db058eb8505911ed77f175b99e",
+      "symbol": "FRAX",
+      "decimals": 18,
+      "coinGeckoId": "frax"
+    },
+    {
+      "chainId": 1,
+      "address": "0x40d16fc0246ad3160ccc09b8d0d3a2cd28ae6c2f",
+      "symbol": "GHO",
+      "decimals": 18,
+      "coinGeckoId": "gho"
+    },
+    {
+      "chainId": 1,
+      "address": "0xc944e90c64b2c07662a292be6244bdf05cda44a7",
+      "symbol": "GRT",
+      "decimals": 18,
+      "coinGeckoId": "the-graph"
+    },
+    {
+      "chainId": 1,
+      "address": "0xe66747a101bff2dba3697199dcce5b743b454759",
+      "symbol": "GT",
+      "decimals": 18,
+      "coinGeckoId": "gatechain-token"
+    },
+    {
+      "chainId": 1,
+      "address": "0x61ec85ab89377db65762e234c946b5c25a56e99e",
+      "symbol": "HTX",
+      "decimals": 18,
+      "coinGeckoId": "htx-dao"
+    },
+    {
+      "chainId": 1,
+      "address": "0x00f3c42833c3170159af4e92dbb451fb3f708917",
+      "symbol": "ICP",
+      "decimals": 8,
+      "coinGeckoId": "internet-computer"
+    },
+    {
+      "chainId": 1,
+      "address": "0xf57e7e7c23978c3caec3c3548e3d615c346e79ff",
+      "symbol": "IMX",
+      "decimals": 18,
+      "coinGeckoId": "immutable-x"
+    },
+    {
+      "chainId": 1,
+      "address": "0x5a0f93d040de44e78f251b03c43be9cf317dcf64",
+      "symbol": "JAAA",
+      "decimals": 6,
+      "coinGeckoId": "janus-henderson-anemoy-aaa-clo-fund"
+    },
+    {
+      "chainId": 1,
+      "address": "0x8c213ee79581ff4984583c6a801e5263418c4b86",
+      "symbol": "JTRSY",
+      "decimals": 6,
+      "coinGeckoId": "janus-henderson-anemoy-treasury-fund"
+    },
+    {
+      "chainId": 1,
+      "address": "0x5a98fcbea516cf06857215779fd812ca3bef1b32",
+      "symbol": "LDO",
+      "decimals": 18,
+      "coinGeckoId": "lido-dao"
+    },
+    {
+      "chainId": 1,
+      "address": "0x2af5d2ad76741191d15dfe7bf6ac92d4bd912ca3",
+      "symbol": "LEO",
+      "decimals": 18,
+      "coinGeckoId": "leo-token"
+    },
+    {
+      "chainId": 1,
+      "address": "0x514910771af9ca656af840dff83e8264ecf986ca",
+      "symbol": "LINK",
+      "decimals": 18,
+      "coinGeckoId": "chainlink"
+    },
+    {
+      "chainId": 1,
+      "address": "0x232ce3bd40fcd6f80f3d55a522d03f25df784ee2",
+      "symbol": "LIT",
+      "decimals": 18,
+      "coinGeckoId": "lighter"
+    },
+    {
+      "chainId": 1,
+      "address": "0x5f98805a4e8be255a32880fdec7f6728c6568ba0",
+      "symbol": "LUSD",
+      "decimals": 18,
+      "coinGeckoId": "liquity-usd"
+    },
+    {
+      "chainId": 1,
+      "address": "0x9f8f72aa9304c8b593d555f12ef6589cc3a579a2",
+      "symbol": "MKR",
+      "decimals": 18,
+      "coinGeckoId": "maker"
+    },
+    {
+      "chainId": 1,
+      "address": "0x58d97b57bb95320f9a05dc918aef65434969c2b2",
+      "symbol": "MORPHO",
+      "decimals": 18,
+      "coinGeckoId": "morpho"
+    },
+    {
+      "chainId": 1,
+      "address": "0xb62132e35a6c13ee1ee0f84dc5d40bad8d815206",
+      "symbol": "NEXO",
+      "decimals": 18,
+      "coinGeckoId": "nexo"
+    },
+    {
+      "chainId": 1,
+      "address": "0x75231f58b43240c9718dd58b4967c5114342a86c",
+      "symbol": "OKB",
+      "decimals": 18,
+      "coinGeckoId": "okb"
+    },
+    {
+      "chainId": 1,
+      "address": "0xfaba6f8e4a5e8ab82f62fe7c39859fa577269be3",
+      "symbol": "ONDO",
+      "decimals": 18,
+      "coinGeckoId": "ondo-finance"
+    },
+    {
+      "chainId": 1,
+      "address": "0x45804880de22913dafe09f4980848ece6ecbaf78",
+      "symbol": "PAXG",
+      "decimals": 18,
+      "coinGeckoId": "pax-gold"
+    },
+    {
+      "chainId": 1,
+      "address": "0x808507121b80c02388fad14726482e061b8da827",
+      "symbol": "PENDLE",
+      "decimals": 18,
+      "coinGeckoId": "pendle"
+    },
+    {
+      "chainId": 1,
+      "address": "0x6982508145454ce325ddbe47a25d4ec3d2311933",
+      "symbol": "PEPE",
+      "decimals": 18,
+      "coinGeckoId": "pepe"
+    },
+    {
+      "chainId": 1,
+      "address": "0x6c3ea9036406852006290770bedfcaba0e23a0e8",
+      "symbol": "PYUSD",
+      "decimals": 6,
+      "coinGeckoId": "paypal-usd"
+    },
+    {
+      "chainId": 1,
+      "address": "0x4a220e6096b25eadb88358cb44068a3248254675",
+      "symbol": "QNT",
+      "decimals": 18,
+      "coinGeckoId": "quant-network"
+    },
+    {
+      "chainId": 1,
+      "address": "0x8292bb45bf1ee4d140127049757c2e0ff06317ed",
+      "symbol": "RLUSD",
+      "decimals": 18,
+      "coinGeckoId": "ripple-usd"
+    },
+    {
+      "chainId": 1,
+      "address": "0x6de037ef9ad2725eb40118bb1702ebb27e4aeb24",
+      "symbol": "RNDR",
+      "decimals": 18,
+      "coinGeckoId": "render-token"
+    },
+    {
+      "chainId": 1,
+      "address": "0xd33526068d116ce69f19a9ee46f0bd304f21a51f",
+      "symbol": "RPL",
+      "decimals": 18,
+      "coinGeckoId": "rocket-pool"
+    },
+    {
+      "chainId": 1,
+      "address": "0x95ad61b0a150d79219dcf64e1e6cc01f0b64c4ce",
+      "symbol": "SHIB",
+      "decimals": 18,
+      "coinGeckoId": "shiba-inu"
+    },
+    {
+      "chainId": 1,
+      "address": "0x56072c95faa701256059aa122697b133aded9279",
+      "symbol": "SKY",
+      "decimals": 18,
+      "coinGeckoId": "sky"
+    },
+    {
+      "chainId": 1,
+      "address": "0xc011a73ee8576fb46f5e1c5751ca3b9fe0af2a6f",
+      "symbol": "SNX",
+      "decimals": 18,
+      "coinGeckoId": "havven"
+    },
+    {
+      "chainId": 1,
+      "address": "0x582d872a1b094fc48f5de31d3b73f2d9be47def1",
+      "symbol": "TONCOIN",
+      "decimals": 9,
+      "coinGeckoId": "the-open-network"
+    },
+    {
+      "chainId": 1,
+      "address": "0x0000000000085d4780b73119b644ae5ecd22b376",
+      "symbol": "TUSD",
+      "decimals": 18,
+      "coinGeckoId": "true-usd"
+    },
+    {
+      "chainId": 1,
+      "address": "0xce24439f2d9c6a2289f741120fe202248b666666",
+      "symbol": "U",
+      "decimals": 18,
+      "coinGeckoId": "united-stables"
+    },
+    {
+      "chainId": 1,
+      "address": "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984",
+      "symbol": "UNI",
+      "decimals": 18,
+      "coinGeckoId": "uniswap"
+    },
+    {
+      "chainId": 1,
+      "address": "0x73a15fed60bf67631dc6cd7bc5b6e8da8190acf5",
+      "symbol": "USD0",
+      "decimals": 18,
+      "coinGeckoId": "usual-usd"
+    },
+    {
+      "chainId": 1,
+      "address": "0x8d0d000ee44948fc98c9b98a4fa4921476f08b0d",
+      "symbol": "USD1",
+      "decimals": 18,
+      "coinGeckoId": "usd1-wlfi"
+    },
+    {
+      "chainId": 1,
+      "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "symbol": "USDC",
+      "decimals": 6,
+      "coinGeckoId": "usd-coin"
+    },
+    {
+      "chainId": 1,
+      "address": "0x4f8e5de400de08b164e7421b3ee387f461becd1a",
+      "symbol": "USDD",
+      "decimals": 18,
+      "coinGeckoId": "usdd"
+    },
+    {
+      "chainId": 1,
+      "address": "0x4c9edd5852cd905f086c759e8383e09bff1e68b3",
+      "symbol": "USDe",
+      "decimals": 18,
+      "coinGeckoId": "ethena-usde"
+    },
+    {
+      "chainId": 1,
+      "address": "0xfa2b947eec368f42195f24f36d2af29f7c24cec2",
+      "symbol": "USDf",
+      "decimals": 18,
+      "coinGeckoId": "falcon-finance"
+    },
+    {
+      "chainId": 1,
+      "address": "0xe343167631d89b6ffc58b88d6b7fb0228795491d",
+      "symbol": "USDG",
+      "decimals": 6,
+      "coinGeckoId": "global-dollar"
+    },
+    {
+      "chainId": 1,
+      "address": "0xdc035d45d973e3ec169d2276ddab16f1e407384f",
+      "symbol": "USDS",
+      "decimals": 18,
+      "coinGeckoId": "usds"
+    },
+    {
+      "chainId": 1,
+      "address": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+      "symbol": "USDT",
+      "decimals": 6,
+      "coinGeckoId": "tether"
+    },
+    {
+      "chainId": 1,
+      "address": "0x96f6ef951840721adbf46ac996b59e0235cb985c",
+      "symbol": "USDY",
+      "decimals": 18,
+      "coinGeckoId": "ondo-us-dollar-yield"
+    },
+    {
+      "chainId": 1,
+      "address": "0x43415eb6ff9db7e26a15b704e7a3edce97d31c4e",
+      "symbol": "USTB",
+      "decimals": 6,
+      "coinGeckoId": "superstate-short-duration-us-government-securities-fund-ustb"
+    },
+    {
+      "chainId": 1,
+      "address": "0x136471a34f6ef19fe571effc1ca711fdb8e49f2b",
+      "symbol": "USYC",
+      "decimals": 6,
+      "coinGeckoId": "hashnote-usyc"
+    },
+    {
+      "chainId": 1,
+      "address": "0x925206b8a707096ed26ae47c84747fe0bb734f59",
+      "symbol": "WBT",
+      "decimals": 8,
+      "coinGeckoId": "whitebit"
+    },
+    {
+      "chainId": 1,
+      "address": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+      "symbol": "WBTC",
+      "decimals": 8,
+      "coinGeckoId": "wrapped-bitcoin"
+    },
+    {
+      "chainId": 1,
+      "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "symbol": "WETH",
+      "decimals": 18,
+      "coinGeckoId": "ethereum"
+    },
+    {
+      "chainId": 1,
+      "address": "0x163f8c2467924be0ae7b5347228cabf260318753",
+      "symbol": "WLD",
+      "decimals": 18,
+      "coinGeckoId": "worldcoin-wld"
+    },
+    {
+      "chainId": 1,
+      "address": "0xda5e1988097297dcdc1f90d4dfe7909e847cbef6",
+      "symbol": "WLFI",
+      "decimals": 18,
+      "coinGeckoId": "world-liberty-financial"
+    },
+    {
+      "chainId": 1,
+      "address": "0x68749665ff8d2d112fa859aa293f07a622782f38",
+      "symbol": "XAUt",
+      "decimals": 6,
+      "coinGeckoId": "tether-gold"
+    },
+    {
+      "chainId": 1,
+      "address": "0xd3cc9d8f3689b83c91b7b59cab4946b063eb894a",
+      "symbol": "XVS",
+      "decimals": 18,
+      "coinGeckoId": "venus"
+    },
+    {
+      "chainId": 56,
+      "address": "0x111111111117dc0aa78b770fa6a738034120c302",
+      "symbol": "1INCH",
+      "decimals": 18,
+      "coinGeckoId": "1inch"
+    },
+    {
+      "chainId": 56,
+      "address": "0xfb6115445bff7b52feb98650c87f44907e58f802",
+      "symbol": "AAVE",
+      "decimals": 18,
+      "coinGeckoId": "aave"
+    },
+    {
+      "chainId": 56,
+      "address": "0x000ae314e2a2172a039b26378814c252734f556a",
+      "symbol": "ASTER",
+      "decimals": 18,
+      "coinGeckoId": "aster-2"
+    },
+    {
+      "chainId": 56,
+      "address": "0x0eb3a705fc54725037cc9e008bdede697f62f335",
+      "symbol": "ATOM",
+      "decimals": 18,
+      "coinGeckoId": "cosmos"
+    },
+    {
+      "chainId": 56,
+      "address": "0x9d10a1ec41fe7878429bb457e31f9b050d38c633",
+      "symbol": "BDX",
+      "decimals": 9,
+      "coinGeckoId": "beldex"
+    },
+    {
+      "chainId": 56,
+      "address": "0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c",
+      "symbol": "BTCB",
+      "decimals": 18,
+      "coinGeckoId": "binance-bitcoin"
+    },
+    {
+      "chainId": 56,
+      "address": "0x444045b0ee1ee319a660a5e3d604ca0ffa35acaa",
+      "symbol": "BTW",
+      "decimals": 18,
+      "coinGeckoId": "bitway"
+    },
+    {
+      "chainId": 56,
+      "address": "0x2d5bdc96d9c8aabbdb38c9a27398513e7e5ef84f",
+      "symbol": "BUIDL",
+      "decimals": 6,
+      "coinGeckoId": "blackrock-usd-institutional-digital-liquidity-fund"
+    },
+    {
+      "chainId": 56,
+      "address": "0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82",
+      "symbol": "Cake",
+      "decimals": 18,
+      "coinGeckoId": "pancakeswap-token"
+    },
+    {
+      "chainId": 56,
+      "address": "0x52ce071bd9b1c4b00a0b92d298c512478cad67e8",
+      "symbol": "COMP",
+      "decimals": 18,
+      "coinGeckoId": "compound-governance-token"
+    },
+    {
+      "chainId": 56,
+      "address": "0xe2fb3f127f5450dee44afe054385d74c392bdef4",
+      "symbol": "crvUSD",
+      "decimals": 18,
+      "coinGeckoId": "crvusd"
+    },
+    {
+      "chainId": 56,
+      "address": "0x1af3f329e8be154074d8769d1ffa4ee058b1dbc3",
+      "symbol": "DAI",
+      "decimals": 18,
+      "coinGeckoId": "dai"
+    },
+    {
+      "chainId": 56,
+      "address": "0x2170ed0880ac9a755fd29b2688956bd959f933f8",
+      "symbol": "ETH",
+      "decimals": 18,
+      "coinGeckoId": "binance-peg-weth"
+    },
+    {
+      "chainId": 56,
+      "address": "0xc5f0f7b66764f6ec8c8dff7ba683102295e16409",
+      "symbol": "FDUSD",
+      "decimals": 18,
+      "coinGeckoId": "first-digital-usd"
+    },
+    {
+      "chainId": 56,
+      "address": "0x90c97f71e18723b0cf0dfa30ee176ab653e89f40",
+      "symbol": "FRAX",
+      "decimals": 18,
+      "coinGeckoId": "frax"
+    },
+    {
+      "chainId": 56,
+      "address": "0x61ec85ab89377db65762e234c946b5c25a56e99e",
+      "symbol": "HTX",
+      "decimals": 18,
+      "coinGeckoId": "htx-dao"
+    },
+    {
+      "chainId": 56,
+      "address": "0x58f93d6b1ef2f44ec379cb975657c132cbed3b6b",
+      "symbol": "JAAA",
+      "decimals": 6,
+      "coinGeckoId": "janus-henderson-anemoy-aaa-clo-fund"
+    },
+    {
+      "chainId": 56,
+      "address": "0xf8a0bf9cf54bb92f17374d9e9a321e6a111a51bd",
+      "symbol": "LINK",
+      "decimals": 18,
+      "coinGeckoId": "chainlink"
+    },
+    {
+      "chainId": 56,
+      "address": "0xfceb31a79f71ac9cbdcf853519c1b12d379edc46",
+      "symbol": "LISTA",
+      "decimals": 18,
+      "coinGeckoId": "lista"
+    },
+    {
+      "chainId": 56,
+      "address": "0x22b1458e780f8fa71e2f84502cee8b5a3cc731fa",
+      "symbol": "M",
+      "decimals": 18,
+      "coinGeckoId": "memecore"
+    },
+    {
+      "chainId": 56,
+      "address": "0xb3ed0a426155b79b898849803e3b36552f7ed507",
+      "symbol": "PENDLE",
+      "decimals": 18,
+      "coinGeckoId": "pendle"
+    },
+    {
+      "chainId": 56,
+      "address": "0x25d887ce7a35172c62febfd67a1856f20faebb00",
+      "symbol": "PEPE",
+      "decimals": 18,
+      "coinGeckoId": "pepe"
+    },
+    {
+      "chainId": 56,
+      "address": "0x2859e4544c4bb03966803b044a93563bd2d0dd4d",
+      "symbol": "SHIB",
+      "decimals": 18,
+      "coinGeckoId": "shiba-inu"
+    },
+    {
+      "chainId": 56,
+      "address": "0x011ebe7d75e2c9d1e0bd0be0bef5c36f0a90075f",
+      "symbol": "STABLE",
+      "decimals": 18,
+      "coinGeckoId": "stable-2"
+    },
+    {
+      "chainId": 56,
+      "address": "0x76a797a59ba2c17726896976b7b3747bfd1d220f",
+      "symbol": "TONCOIN",
+      "decimals": 9,
+      "coinGeckoId": "the-open-network"
+    },
+    {
+      "chainId": 56,
+      "address": "0x14016e85a25aeb13065688cafb43044c2ef86784",
+      "symbol": "TUSD",
+      "decimals": 18,
+      "coinGeckoId": "true-usd"
+    },
+    {
+      "chainId": 56,
+      "address": "0x40af3827f39d0eacbf4a168f8d4ee67c121d11c9",
+      "symbol": "TUSD",
+      "decimals": 18,
+      "coinGeckoId": "true-usd"
+    },
+    {
+      "chainId": 56,
+      "address": "0xce24439f2d9c6a2289f741120fe202248b666666",
+      "symbol": "U",
+      "decimals": 18,
+      "coinGeckoId": "united-stables"
+    },
+    {
+      "chainId": 56,
+      "address": "0xbf5140a22578168fd562dccf235e5d43a02ce9b1",
+      "symbol": "UNI",
+      "decimals": 18,
+      "coinGeckoId": "uniswap"
+    },
+    {
+      "chainId": 56,
+      "address": "0x758a3e0b1f842c9306b783f8a4078c6c8c03a270",
+      "symbol": "USD0",
+      "decimals": 18,
+      "coinGeckoId": "usual-usd"
+    },
+    {
+      "chainId": 56,
+      "address": "0x8d0d000ee44948fc98c9b98a4fa4921476f08b0d",
+      "symbol": "USD1",
+      "decimals": 18,
+      "coinGeckoId": "usd1-wlfi"
+    },
+    {
+      "chainId": 56,
+      "address": "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d",
+      "symbol": "USDC",
+      "decimals": 18,
+      "coinGeckoId": "usd-coin"
+    },
+    {
+      "chainId": 56,
+      "address": "0x45e51bc23d592eb2dba86da3985299f7895d66ba",
+      "symbol": "USDD",
+      "decimals": 18,
+      "coinGeckoId": "usdd"
+    },
+    {
+      "chainId": 56,
+      "address": "0x5d3a1ff2b6bab83b63cd9ad0787074081a52ef34",
+      "symbol": "USDe",
+      "decimals": 18,
+      "coinGeckoId": "ethena-usde"
+    },
+    {
+      "chainId": 56,
+      "address": "0xb3b02e4a9fb2bd28cc2ff97b0ab3f6b3ec1ee9d2",
+      "symbol": "USDf",
+      "decimals": 18,
+      "coinGeckoId": "falcon-finance"
+    },
+    {
+      "chainId": 56,
+      "address": "0x55d398326f99059ff775485246999027b3197955",
+      "symbol": "USDT",
+      "decimals": 18,
+      "coinGeckoId": "tether"
+    },
+    {
+      "chainId": 56,
+      "address": "0x608593d17a2decbbc4399e4185be4922f97ed32e",
+      "symbol": "USDY",
+      "decimals": 18,
+      "coinGeckoId": "ondo-us-dollar-yield"
+    },
+    {
+      "chainId": 56,
+      "address": "0x8d0fa28f221eb5735bc71d3a0da67ee5bc821311",
+      "symbol": "USYC",
+      "decimals": 6,
+      "coinGeckoId": "hashnote-usyc"
+    },
+    {
+      "chainId": 56,
+      "address": "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c",
+      "symbol": "WBNB",
+      "decimals": 18,
+      "coinGeckoId": "binancecoin"
+    },
+    {
+      "chainId": 56,
+      "address": "0x0555e30da8f98308edb960aa94c0db47230d2b9c",
+      "symbol": "WBTC",
+      "decimals": 8,
+      "coinGeckoId": "wrapped-bitcoin"
+    },
+    {
+      "chainId": 56,
+      "address": "0x47474747477b199288bf72a1d702f7fe0fb1deea",
+      "symbol": "WLFI",
+      "decimals": 18,
+      "coinGeckoId": "world-liberty-financial"
+    },
+    {
+      "chainId": 56,
+      "address": "0xcf6bb5389c92bdda8a3747ddb454cb7a64626c63",
+      "symbol": "XVS",
+      "decimals": 18,
+      "coinGeckoId": "venus"
+    },
+    {
+      "chainId": 56,
+      "address": "0x924fa68a0fc644485b8df8abfa0a41c2e7744444",
+      "symbol": "币安人生",
+      "decimals": 18,
+      "coinGeckoId": "bianrensheng"
+    },
+    {
+      "chainId": 8453,
+      "address": "0xc5fecc3a29fb57b5024eec8a2239d4621e111cbe",
+      "symbol": "1INCH",
+      "decimals": 18,
+      "coinGeckoId": "1inch"
+    },
+    {
+      "chainId": 8453,
+      "address": "0x63706e401c06ac8513145b7687a14804d17f814b",
+      "symbol": "AAVE",
+      "decimals": 18,
+      "coinGeckoId": "aave"
+    },
+    {
+      "chainId": 8453,
+      "address": "0x940181a94a35a4569e4529a3cdfb74e38fd98631",
+      "symbol": "AERO",
+      "decimals": 18,
+      "coinGeckoId": "aerodrome-finance"
+    },
+    {
+      "chainId": 8453,
+      "address": "0x3055913c90fcc1a6ce9a358911721eeb942013a1",
+      "symbol": "Cake",
+      "decimals": 18,
+      "coinGeckoId": "pancakeswap-token"
+    },
+    {
+      "chainId": 8453,
+      "address": "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf",
+      "symbol": "cbBTC",
+      "decimals": 8,
+      "coinGeckoId": "coinbase-wrapped-btc"
+    },
+    {
+      "chainId": 8453,
+      "address": "0x9e1028f5f1d5ede59748ffcee5532509976840e0",
+      "symbol": "COMP",
+      "decimals": 18,
+      "coinGeckoId": "compound-governance-token"
+    },
+    {
+      "chainId": 8453,
+      "address": "0x8ee73c484a26e0a5df2ee2a4960b789967dd0415",
+      "symbol": "CRV",
+      "decimals": 18,
+      "coinGeckoId": "curve-dao-token"
+    },
+    {
+      "chainId": 8453,
+      "address": "0x417ac0e078398c154edfadd9ef675d30be60af93",
+      "symbol": "crvUSD",
+      "decimals": 18,
+      "coinGeckoId": "crvusd"
+    },
+    {
+      "chainId": 8453,
+      "address": "0x50c5725949a6f0c72e6c4a641f24049a917db0cb",
+      "symbol": "DAI",
+      "decimals": 18,
+      "coinGeckoId": "dai"
+    },
+    {
+      "chainId": 8453,
+      "address": "0x2081ab0d9ec9e4303234ab26d86b20b3367946ee",
+      "symbol": "EIGEN",
+      "decimals": 18,
+      "coinGeckoId": "eigenlayer"
+    },
+    {
+      "chainId": 8453,
+      "address": "0x58538e6a46e07434d7e7375bc268d3cb839c0133",
+      "symbol": "ENA",
+      "decimals": 18,
+      "coinGeckoId": "ethena"
+    },
+    {
+      "chainId": 8453,
+      "address": "0x6c240dda6b5c336df09a4d011139beaaa1ea2aa2",
+      "symbol": "ETHFI",
+      "decimals": 18,
+      "coinGeckoId": "ether-fi"
+    },
+    {
+      "chainId": 8453,
+      "address": "0x60a3e35cc302bfa44cb288bc5a4f316fdb1adb42",
+      "symbol": "EURC",
+      "decimals": 6,
+      "coinGeckoId": "euro-coin"
+    },
+    {
+      "chainId": 8453,
+      "address": "0xd879846cbe20751bde8a9342a3cca00a3e56ca47",
+      "symbol": "eurSAFO",
+      "decimals": 5,
+      "coinGeckoId": "spiko-amundi-overnight-swap-fund-eur"
+    },
+    {
+      "chainId": 8453,
+      "address": "0xa0769f7a8fc65e47de93797b4e21c073c117fc80",
+      "symbol": "EUTBL",
+      "decimals": 5,
+      "coinGeckoId": "eutbl"
+    },
+    {
+      "chainId": 8453,
+      "address": "0x6bb7a212910682dcfdbd5bcbb3e28fb4e8da10ee",
+      "symbol": "GHO",
+      "decimals": 18,
+      "coinGeckoId": "gho"
+    },
+    {
+      "chainId": 8453,
+      "address": "0x00f3c42833c3170159af4e92dbb451fb3f708917",
+      "symbol": "ICP",
+      "decimals": 8,
+      "coinGeckoId": "internet-computer"
+    },
+    {
+      "chainId": 8453,
+      "address": "0x5a0f93d040de44e78f251b03c43be9cf317dcf64",
+      "symbol": "JAAA",
+      "decimals": 6,
+      "coinGeckoId": "janus-henderson-anemoy-aaa-clo-fund"
+    },
+    {
+      "chainId": 8453,
+      "address": "0x8c213ee79581ff4984583c6a801e5263418c4b86",
+      "symbol": "JTRSY",
+      "decimals": 6,
+      "coinGeckoId": "janus-henderson-anemoy-treasury-fund"
+    },
+    {
+      "chainId": 8453,
+      "address": "0x88fb150bdc53a65fe94dea0c9ba0a6daf8c6e196",
+      "symbol": "LINK",
+      "decimals": 18,
+      "coinGeckoId": "chainlink"
+    },
+    {
+      "chainId": 8453,
+      "address": "0x368181499736d0c0cc614dbb145e2ec1ac86b8c6",
+      "symbol": "LUSD",
+      "decimals": 18,
+      "coinGeckoId": "liquity-usd"
+    },
+    {
+      "chainId": 8453,
+      "address": "0xbaa5cc21fd487b8fcc2f632f3f4e8d37262a0842",
+      "symbol": "MORPHO",
+      "decimals": 18,
+      "coinGeckoId": "morpho"
+    },
+    {
+      "chainId": 8453,
+      "address": "0xa99f6e6785da0f5d6fb42495fe424bce029eeb3e",
+      "symbol": "PENDLE",
+      "decimals": 18,
+      "coinGeckoId": "pendle"
+    },
+    {
+      "chainId": 8453,
+      "address": "0x8d58c0c60b8d6b88fa98b291a646db34d0f98258",
+      "symbol": "RLUSD",
+      "decimals": 18,
+      "coinGeckoId": "ripple-usd"
+    },
+    {
+      "chainId": 8453,
+      "address": "0x22e6966b799c4d5b13be962e1d117b56327fda66",
+      "symbol": "SNX",
+      "decimals": 18,
+      "coinGeckoId": "havven"
+    },
+    {
+      "chainId": 8453,
+      "address": "0x758a3e0b1f842c9306b783f8a4078c6c8c03a270",
+      "symbol": "USD0",
+      "decimals": 18,
+      "coinGeckoId": "usual-usd"
+    },
+    {
+      "chainId": 8453,
+      "address": "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca",
+      "symbol": "USDbC",
+      "decimals": 6,
+      "coinGeckoId": "bridged-usd-coin-base"
+    },
+    {
+      "chainId": 8453,
+      "address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "symbol": "USDC",
+      "decimals": 6,
+      "coinGeckoId": "usd-coin"
+    },
+    {
+      "chainId": 8453,
+      "address": "0x5d3a1ff2b6bab83b63cd9ad0787074081a52ef34",
+      "symbol": "USDe",
+      "decimals": 18,
+      "coinGeckoId": "ethena-usde"
+    },
+    {
+      "chainId": 8453,
+      "address": "0x820c137fa70c8691f0e44dc420a5e53c168921dc",
+      "symbol": "USDS",
+      "decimals": 18,
+      "coinGeckoId": "usds"
+    },
+    {
+      "chainId": 8453,
+      "address": "0x102d758f688a4c1c5a80b116bd945d4455460282",
+      "symbol": "USDT",
+      "decimals": 6,
+      "coinGeckoId": "tether"
+    },
+    {
+      "chainId": 8453,
+      "address": "0xacfe6019ed1a7dc6f7b508c02d1b04ec88cc21bf",
+      "symbol": "VVV",
+      "decimals": 18,
+      "coinGeckoId": "venice-token"
+    },
+    {
+      "chainId": 8453,
+      "address": "0x0555e30da8f98308edb960aa94c0db47230d2b9c",
+      "symbol": "WBTC",
+      "decimals": 8,
+      "coinGeckoId": "wrapped-bitcoin"
+    },
+    {
+      "chainId": 8453,
+      "address": "0x4200000000000000000000000000000000000006",
+      "symbol": "WETH",
+      "decimals": 18,
+      "coinGeckoId": "ethereum"
+    },
+    {
+      "chainId": 8453,
+      "address": "0xebb7873213c8d1d9913d8ea39aa12d74cb107995",
+      "symbol": "XVS",
+      "decimals": 18,
+      "coinGeckoId": "venus"
+    },
+    {
+      "chainId": 42161,
+      "address": "0x6314c31a7a1652ce482cffe247e9cb7c3f4bb9af",
+      "symbol": "1INCH",
+      "decimals": 18,
+      "coinGeckoId": "1inch"
+    },
+    {
+      "chainId": 42161,
+      "address": "0xba5ddd1f9d7f570dc94a51479a000e3bce967196",
+      "symbol": "AAVE",
+      "decimals": 18,
+      "coinGeckoId": "aave"
+    },
+    {
+      "chainId": 42161,
+      "address": "0x912ce59144191c1204e64559fe8253a0e49e6548",
+      "symbol": "ARB",
+      "decimals": 18,
+      "coinGeckoId": "arbitrum"
+    },
+    {
+      "chainId": 42161,
+      "address": "0xa6525ae43edcd03dc08e775774dcabd3bb925872",
+      "symbol": "BUIDL",
+      "decimals": 6,
+      "coinGeckoId": "blackrock-usd-institutional-digital-liquidity-fund"
+    },
+    {
+      "chainId": 42161,
+      "address": "0x1b896893dfc86bb67cf57767298b9073d2c1ba2c",
+      "symbol": "Cake",
+      "decimals": 18,
+      "coinGeckoId": "pancakeswap-token"
+    },
+    {
+      "chainId": 42161,
+      "address": "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf",
+      "symbol": "cbBTC",
+      "decimals": 8,
+      "coinGeckoId": "coinbase-wrapped-btc"
+    },
+    {
+      "chainId": 42161,
+      "address": "0x354a6da3fcde098f8389cad84b0182725c6c91de",
+      "symbol": "COMP",
+      "decimals": 18,
+      "coinGeckoId": "compound-governance-token"
+    },
+    {
+      "chainId": 42161,
+      "address": "0x11cdb42b0eb46d95f990bedd4695a6e3fa034978",
+      "symbol": "CRV",
+      "decimals": 18,
+      "coinGeckoId": "curve-dao-token"
+    },
+    {
+      "chainId": 42161,
+      "address": "0x498bf2b1e120fed3ad3d42ea2165e9b73f99c1e5",
+      "symbol": "crvUSD",
+      "decimals": 18,
+      "coinGeckoId": "crvusd"
+    },
+    {
+      "chainId": 42161,
+      "address": "0xda10009cbd5d07dd0cecc66161fc93d7c9000da1",
+      "symbol": "DAI",
+      "decimals": 18,
+      "coinGeckoId": "dai"
+    },
+    {
+      "chainId": 42161,
+      "address": "0x58538e6a46e07434d7e7375bc268d3cb839c0133",
+      "symbol": "ENA",
+      "decimals": 18,
+      "coinGeckoId": "ethena"
+    },
+    {
+      "chainId": 42161,
+      "address": "0x7189fb5b6504bbff6a852b13b7b82a3c118fdc27",
+      "symbol": "ETHFI",
+      "decimals": 18,
+      "coinGeckoId": "ether-fi"
+    },
+    {
+      "chainId": 42161,
+      "address": "0x1412632f2b89e87bfa20c1318a43ced25f1d7b76",
+      "symbol": "eurSAFO",
+      "decimals": 5,
+      "coinGeckoId": "spiko-amundi-overnight-swap-fund-eur"
+    },
+    {
+      "chainId": 42161,
+      "address": "0xcbeb19549054cc0a6257a77736fc78c367216ce7",
+      "symbol": "EUTBL",
+      "decimals": 5,
+      "coinGeckoId": "eutbl"
+    },
+    {
+      "chainId": 42161,
+      "address": "0x93c9932e4afa59201f0b5e63f7d816516f1669fe",
+      "symbol": "FDUSD",
+      "decimals": 18,
+      "coinGeckoId": "first-digital-usd"
+    },
+    {
+      "chainId": 42161,
+      "address": "0x17fc002b466eec40dae837fc4be5c67993ddbd6f",
+      "symbol": "FRAX",
+      "decimals": 18,
+      "coinGeckoId": "frax"
+    },
+    {
+      "chainId": 42161,
+      "address": "0x7dff72693f6a4149b17e7c6314655f6a9f7c8b33",
+      "symbol": "GHO",
+      "decimals": 18,
+      "coinGeckoId": "gho"
+    },
+    {
+      "chainId": 42161,
+      "address": "0xfc5a1a6eb076a2c7ad06ed22c90d7e710e35ad0a",
+      "symbol": "GMX",
+      "decimals": 18,
+      "coinGeckoId": "gmx"
+    },
+    {
+      "chainId": 42161,
+      "address": "0x9623063377ad1b27544c965ccd7342f7ea7e88c7",
+      "symbol": "GRT",
+      "decimals": 18,
+      "coinGeckoId": "the-graph"
+    },
+    {
+      "chainId": 42161,
+      "address": "0x13ad51ed4f1b7e9dc168d8a00cb3f4ddd85efa60",
+      "symbol": "LDO",
+      "decimals": 18,
+      "coinGeckoId": "lido-dao"
+    },
+    {
+      "chainId": 42161,
+      "address": "0xf97f4df75117a78c1a5a0dbb814af92458539fb4",
+      "symbol": "LINK",
+      "decimals": 18,
+      "coinGeckoId": "chainlink"
+    },
+    {
+      "chainId": 42161,
+      "address": "0x93b346b6bc2548da6a1e7d98e9a421b42541425b",
+      "symbol": "LUSD",
+      "decimals": 18,
+      "coinGeckoId": "liquity-usd"
+    },
+    {
+      "chainId": 42161,
+      "address": "0x40bd670a58238e6e230c430bbb5ce6ec0d40df48",
+      "symbol": "MORPHO",
+      "decimals": 18,
+      "coinGeckoId": "morpho"
+    },
+    {
+      "chainId": 42161,
+      "address": "0x0c880f6761f1af8d9aa9c466984b80dab9a8c9e8",
+      "symbol": "PENDLE",
+      "decimals": 18,
+      "coinGeckoId": "pendle"
+    },
+    {
+      "chainId": 42161,
+      "address": "0x25d887ce7a35172c62febfd67a1856f20faebb00",
+      "symbol": "PEPE",
+      "decimals": 18,
+      "coinGeckoId": "pepe"
+    },
+    {
+      "chainId": 42161,
+      "address": "0x46850ad61c2b7d64d08c9c754f45254596696984",
+      "symbol": "PYUSD",
+      "decimals": 6,
+      "coinGeckoId": "paypal-usd"
+    },
+    {
+      "chainId": 42161,
+      "address": "0x25118290e6a5f4139381d072181157035864099d",
+      "symbol": "RAIN",
+      "decimals": 18,
+      "coinGeckoId": "rain"
+    },
+    {
+      "chainId": 42161,
+      "address": "0xb766039cc6db368759c1e56b79affe831d0cc507",
+      "symbol": "RPL",
+      "decimals": 18,
+      "coinGeckoId": "rocket-pool"
+    },
+    {
+      "chainId": 42161,
+      "address": "0x4d15a3a2286d883af0aa1b3f21367843fac63e07",
+      "symbol": "TUSD",
+      "decimals": 18,
+      "coinGeckoId": "true-usd"
+    },
+    {
+      "chainId": 42161,
+      "address": "0xfa7f8980b0f1e64a2062791cc3b0871572f1f7f0",
+      "symbol": "UNI",
+      "decimals": 18,
+      "coinGeckoId": "uniswap"
+    },
+    {
+      "chainId": 42161,
+      "address": "0x35f1c5cb7fb977e669fd244c567da99d8a3a6850",
+      "symbol": "USD0",
+      "decimals": 18,
+      "coinGeckoId": "usual-usd"
+    },
+    {
+      "chainId": 42161,
+      "address": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+      "symbol": "USDC",
+      "decimals": 6,
+      "coinGeckoId": "usd-coin"
+    },
+    {
+      "chainId": 42161,
+      "address": "0x5d3a1ff2b6bab83b63cd9ad0787074081a52ef34",
+      "symbol": "USDe",
+      "decimals": 18,
+      "coinGeckoId": "ethena-usde"
+    },
+    {
+      "chainId": 42161,
+      "address": "0x6491c05a82219b8d1479057361ff1654749b876b",
+      "symbol": "USDS",
+      "decimals": 18,
+      "coinGeckoId": "usds"
+    },
+    {
+      "chainId": 42161,
+      "address": "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9",
+      "symbol": "USDT",
+      "decimals": 6,
+      "coinGeckoId": "tether"
+    },
+    {
+      "chainId": 42161,
+      "address": "0x35e050d3c0ec2d29d269a8ecea763a183bdf9a9d",
+      "symbol": "USDY",
+      "decimals": 18,
+      "coinGeckoId": "ondo-us-dollar-yield"
+    },
+    {
+      "chainId": 42161,
+      "address": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+      "symbol": "WETH",
+      "decimals": 18,
+      "coinGeckoId": "ethereum"
+    },
+    {
+      "chainId": 42161,
+      "address": "0xc1eb7689147c81ac840d4ff0d298489fc7986d52",
+      "symbol": "XVS",
+      "decimals": 18,
+      "coinGeckoId": "venus"
+    }
+  ]
+}
