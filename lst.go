@@ -106,8 +106,11 @@ func readConvertedBalancePositions(
 			if err != nil {
 				return nil, fmt.Errorf("%s conversion: %w", position.Label, err)
 			}
+			// The contract stays the one whose wallet balance was read rather than the
+			// converter: that is the provenance a reader wants, and it is what tells the
+			// holdings adapter this token is already counted.
 			source = Source{
-				Contract: position.Converter,
+				Contract: position.BalanceContract,
 				Method:   position.Method + "(balanceOf)",
 			}
 		}

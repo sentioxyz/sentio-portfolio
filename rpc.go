@@ -234,6 +234,68 @@ func (c *RPCClient) blockByTag(ctx context.Context, tag string) (BlockRef, error
 	}, nil
 }
 
+// NativeBalance reports the account's native coin balance at the pinned block. It is the one
+// portfolio read that no contract can answer: a native balance lives in account state rather
+// than in an ERC-20 ledger, so eth_call cannot reach it.
+func (c *RPCClient) NativeBalance(
+	ctx context.Context,
+	block BlockRef,
+	account common.Address,
+) (*big.Int, error) {
+	var raw hexutil.Big
+	if err := c.call(
+		ctx,
+		&raw,
+		"eth_getBalance",
+		account,
+		hexutil.EncodeUint64(block.Number),
+	); err != nil {
+		return nil, err
+	}
+	return (*big.Int)(&raw), nil
+}
+
+// DeployedAt reports which of the addresses already had contract code at the pinned block.
+//
+// A token that does not exist yet answers eth_call with empty data, which fails to decode and
+// would otherwise be indistinguishable from an RPC failure. Probing the code first keeps the
+// deployment gap a fact about the chain rather than an error the caller has to guess at, and it
+// is the same eth_getCode evidence a committed activation block is established from.
+func (c *RPCClient) DeployedAt(
+	ctx context.Context,
+	block BlockRef,
+	addresses []common.Address,
+) ([]bool, error) {
+	deployed := make([]bool, len(addresses))
+	const batchSize = 16
+	for start := 0; start < len(addresses); start += batchSize {
+		end := min(start+batchSize, len(addresses))
+		raw := make([]hexutil.Bytes, end-start)
+		batch := make([]rpc.BatchElem, end-start)
+		for offset, address := range addresses[start:end] {
+			batch[offset] = rpc.BatchElem{
+				Method: "eth_getCode",
+				Args:   []any{address, hexutil.EncodeUint64(block.Number)},
+				Result: &raw[offset],
+			}
+		}
+		if err := c.batchCall(ctx, batch); err != nil {
+			return nil, fmt.Errorf("code %d-%d: %w", start, end-1, err)
+		}
+		for offset := range batch {
+			if batch[offset].Error != nil {
+				return nil, fmt.Errorf(
+					"code %s: %w",
+					addresses[start+offset],
+					redactEndpoints(batch[offset].Error),
+				)
+			}
+			deployed[start+offset] = len(raw[offset]) > 0
+		}
+	}
+	return deployed, nil
+}
+
 func (c *RPCClient) Call(
 	ctx context.Context,
 	block BlockRef,
