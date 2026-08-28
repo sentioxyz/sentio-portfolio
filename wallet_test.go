@@ -464,3 +464,69 @@ func TestSuppressDuplicateHoldingsIgnoresOtherChains(t *testing.T) {
 		}
 	}
 }
+
+// A scan aggregates the address it was asked for and the accounts attributed to it. Those hold
+// their tokens independently: a DSA proxy staking a token says nothing about the same token
+// sitting in the root wallet, so suppressing one must never suppress the other.
+func TestSuppressDuplicateHoldingsScopesToTheAccountThatHoldsTheToken(t *testing.T) {
+	root := common.HexToAddress("0xR00T")
+	proxy := common.HexToAddress("0xDSA")
+	staked := common.HexToAddress("0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0")
+
+	attributed := func(group Group) Group {
+		group.ID = "attributed:instadapp:" + strings.ToLower(proxy.Hex()) + ":" + group.ID
+		metadata := map[string]any{"attributedAccount": proxy}
+		for key, value := range group.Metadata {
+			metadata[key] = value
+		}
+		group.Metadata = metadata
+		return group
+	}
+
+	snapshots := suppressDuplicateHoldings([]Snapshot{
+		{
+			ProtocolID: "lido",
+			ChainID:    Ethereum,
+			Account:    root,
+			Groups: []Group{attributed(Group{
+				ID: "lido:wsteth",
+				Components: []Component{NewComponent(
+					"asset",
+					Token{ChainID: Ethereum, Address: staked, Decimals: 18},
+					big.NewInt(5),
+					Source{Contract: staked, Method: "balanceOf"},
+				)},
+			})},
+		},
+		{
+			ProtocolID:   walletProtocolID,
+			ProtocolName: "Wallet",
+			ChainID:      Ethereum,
+			Account:      root,
+			Groups: []Group{
+				holdingGroup("token", staked, "7"),
+				attributed(holdingGroup("token", staked, "5")),
+			},
+		},
+	})
+
+	var wallet Snapshot
+	for _, snapshot := range snapshots {
+		if snapshot.ProtocolID == walletProtocolID {
+			wallet = snapshot
+		}
+	}
+	if len(wallet.Groups) != 1 {
+		t.Fatalf("holdings = %+v, want the root balance only", wallet.Groups)
+	}
+	if _, exists := wallet.Groups[0].Metadata["attributedAccount"]; exists {
+		t.Fatal("the proxy's holding survived even though Lido already counts it")
+	}
+	if wallet.Groups[0].Components[0].AmountRaw != "7" {
+		t.Fatalf(
+			"surviving holding = %s, want the root's 7: a position held by an attributed "+
+				"account must not suppress the root wallet's own balance",
+			wallet.Groups[0].Components[0].AmountRaw,
+		)
+	}
+}

@@ -313,30 +313,58 @@ func (a *WalletAdapter) readableTokens(
 	return entries, nil
 }
 
+// holdingScope identifies whose balance an observation is about. A scan covers the address it
+// was asked for plus the accounts attributed to it, and each holds its tokens independently, so
+// a position one of them opened says nothing about what the others hold.
+type holdingScope struct {
+	ChainID ChainID
+	Account common.Address
+}
+
+// groupAccount reports the account a group belongs to. Snapshot.Account is always the address
+// the scan was asked for; an attributed account is named in the group metadata engine.go
+// stamps.
+func groupAccount(snapshot Snapshot, group Group) common.Address {
+	if raw, exists := group.Metadata["attributedAccount"]; exists {
+		if account, isAddress := raw.(common.Address); isAddress {
+			return account
+		}
+	}
+	return snapshot.Account
+}
+
 // walletHeldContracts collects the ERC-20s whose wallet balance a protocol adapter already
-// counted, keyed by chain.
+// counted, keyed by chain and by the account that holds them.
 //
 // Every adapter that reads a token an account holds — an LST, a vault share, an aToken, an LP
 // token — records the contract it read in Source. Collecting those is what lets the holdings
 // manifest stay a plain list of assets: the same token can never be reported twice, and the
 // guarantee survives a new adapter rather than depending on someone remembering to prune a list.
-func walletHeldContracts(snapshots []Snapshot) map[ChainID]map[common.Address]struct{} {
-	held := make(map[ChainID]map[common.Address]struct{})
+//
+// The account is part of the key because a scan aggregates several of them. A DSA proxy staking
+// a token says nothing about the same token sitting in the root wallet: those are two balances
+// that happen to share a contract.
+func walletHeldContracts(snapshots []Snapshot) map[holdingScope]map[common.Address]struct{} {
+	held := make(map[holdingScope]map[common.Address]struct{})
 	for _, snapshot := range snapshots {
 		if snapshot.ProtocolID == walletProtocolID {
 			continue
 		}
 		for _, group := range snapshot.Groups {
+			scope := holdingScope{
+				ChainID: snapshot.ChainID,
+				Account: groupAccount(snapshot, group),
+			}
 			for _, component := range group.Components {
 				contract := component.Source.Contract
 				if contract == (common.Address{}) ||
 					!strings.Contains(component.Source.Method, "balanceOf") {
 					continue
 				}
-				if held[snapshot.ChainID] == nil {
-					held[snapshot.ChainID] = make(map[common.Address]struct{})
+				if held[scope] == nil {
+					held[scope] = make(map[common.Address]struct{})
 				}
-				held[snapshot.ChainID][contract] = struct{}{}
+				held[scope][contract] = struct{}{}
 			}
 		}
 	}
@@ -350,14 +378,18 @@ func suppressDuplicateHoldings(snapshots []Snapshot) []Snapshot {
 	held := walletHeldContracts(snapshots)
 	result := make([]Snapshot, 0, len(snapshots))
 	for _, snapshot := range snapshots {
-		if snapshot.ProtocolID != walletProtocolID || len(held[snapshot.ChainID]) == 0 {
+		if snapshot.ProtocolID != walletProtocolID || len(held) == 0 {
 			result = append(result, snapshot)
 			continue
 		}
 		groups := make([]Group, 0, len(snapshot.Groups))
 		for _, group := range snapshot.Groups {
 			if len(group.Components) == 1 && group.Metadata["holding"] == "token" {
-				if _, duplicate := held[snapshot.ChainID][group.Components[0].Token.Address]; duplicate {
+				scope := holdingScope{
+					ChainID: snapshot.ChainID,
+					Account: groupAccount(snapshot, group),
+				}
+				if _, duplicate := held[scope][group.Components[0].Token.Address]; duplicate {
 					continue
 				}
 			}
