@@ -5,7 +5,7 @@
   "scope": "plain holdings only - base assets an account holds outright, never a token an adapter already reads as a position",
   "coinQuote": {
     "method": "BatchGetLatestPrices with a ChainAddress selector per token",
-    "verifiedAt": ""
+    "verifiedAt": "2026-08-28T13:52:23Z"
   },
   "tokens": [
     {
