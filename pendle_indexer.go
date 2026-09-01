@@ -14,7 +14,10 @@ import (
 )
 
 const (
-	pendleIndexerPageSize       = 500
+	pendleIndexerPageSize = 500
+	// pendleMarketLookupBatch bounds the PTs named in one market lookup. An account holding
+	// hundreds of PTs would otherwise build a single query longer than the endpoint accepts.
+	pendleMarketLookupBatch     = 100
 	pendleMaxPositionRefs       = 4_096
 	pendleMaxTailContracts      = 256
 	pendleMaxRPCTailBlocks      = 2_048
@@ -84,6 +87,47 @@ query PendleTokens($ids: [ID!]!, $first: Int!, $block: BigInt!) {
     createdBlock
   }
 }`
+
+// pendleMarketsQuery finds the markets created for a set of PTs. A directly held PT points at no
+// market on-chain and Pendle allows several per PT, so the index — which records the PT each
+// market was created for — is the only way to reach the market that publishes its implied rate.
+const pendleMarketsQuery = `
+query PendleMarketsForPT(
+  $pts: [String!]!
+  $chainId: Int!
+  $after: ID!
+  $first: Int!
+  $block: BigInt!
+) {
+  pendleTokens(
+    first: $first
+    orderBy: id
+    orderDirection: asc
+    block: { number: $block }
+    where: { chainId: $chainId, kind: "lp", pt_in: $pts, id_gt: $after }
+  ) {
+    id
+    chainId
+    address
+    kind
+    pt
+  }
+}`
+
+type pendleMarketsResponse struct {
+	Data struct {
+		Markets []struct {
+			ID      string `json:"id"`
+			ChainID int    `json:"chainId"`
+			Address string `json:"address"`
+			Kind    string `json:"kind"`
+			PT      string `json:"pt"`
+		} `json:"pendleTokens"`
+	} `json:"data"`
+	Errors []struct {
+		Message string `json:"message"`
+	} `json:"errors"`
+}
 
 type pendleWalletResponse struct {
 	Data struct {
@@ -279,6 +323,94 @@ func (i *pendleIndexer) graphqlTokens(
 		}
 	}
 	return registered, nil
+}
+
+// MarketsForPT groups the markets the index recorded for each of the given PTs, in the index's
+// own id order so a caller choosing between them chooses deterministically.
+//
+// Every row is checked back against the PTs that were asked for. A GraphQL endpoint drops a
+// filter it does not understand and answers as if it had not been given, which for this query
+// would be every market on the chain rather than an empty page — the failure mode that made the
+// Euler schema mismatch silent. Rejecting a foreign row turns that into a loud error.
+func (i *pendleIndexer) MarketsForPT(
+	ctx context.Context,
+	block BlockRef,
+	pts []common.Address,
+) (map[common.Address][]common.Address, error) {
+	if len(pts) == 0 {
+		return nil, nil
+	}
+	requested := make(map[string]common.Address, len(pts))
+	for _, pt := range pts {
+		requested[strings.ToLower(pt.Hex())] = pt
+	}
+	keys := make([]string, 0, len(requested))
+	for key := range requested {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	markets := make(map[common.Address][]common.Address, len(keys))
+	total := 0
+	for start := 0; start < len(keys); start += pendleMarketLookupBatch {
+		end := min(start+pendleMarketLookupBatch, len(keys))
+		batch := keys[start:end]
+		after := ""
+		for {
+			var payload pendleMarketsResponse
+			err := i.api.doJSON(
+				ctx,
+				http.MethodPost,
+				i.config.GraphQLURL,
+				map[string]any{
+					"query": pendleMarketsQuery,
+					"variables": map[string]any{
+						"pts": batch, "chainId": int(block.ChainID), "after": after,
+						"first": pendleIndexerPageSize,
+						"block": strconv.FormatUint(block.Number, 10),
+					},
+				},
+				&payload,
+			)
+			if err != nil {
+				return nil, err
+			}
+			if len(payload.Errors) > 0 {
+				messages := make([]string, 0, len(payload.Errors))
+				for _, graphQLError := range payload.Errors {
+					messages = append(messages, graphQLError.Message)
+				}
+				return nil, pendleGraphQLError(messages)
+			}
+			rows := payload.Data.Markets
+			for _, row := range rows {
+				if row.ChainID != int(block.ChainID) || pendleTokenKind(row.Kind) != pendleLP ||
+					!common.IsHexAddress(row.Address) || !common.IsHexAddress(row.PT) ||
+					row.ID <= after {
+					return nil, fmt.Errorf("GraphQL returned malformed Pendle market row %q", row.ID)
+				}
+				market := common.HexToAddress(row.Address)
+				if row.ID != pendleTokenRowID(block.ChainID, market) {
+					return nil, fmt.Errorf("GraphQL returned foreign Pendle market row %q", row.ID)
+				}
+				pt, wanted := requested[strings.ToLower(row.PT)]
+				if !wanted {
+					return nil, fmt.Errorf(
+						"GraphQL returned a Pendle market for unrequested PT %q", row.PT,
+					)
+				}
+				markets[pt] = append(markets[pt], market)
+				total++
+				if total > pendleMaxPositionRefs {
+					return nil, fmt.Errorf("GraphQL returned more than %d Pendle markets", pendleMaxPositionRefs)
+				}
+			}
+			if len(rows) < pendleIndexerPageSize {
+				break
+			}
+			after = rows[len(rows)-1].ID
+		}
+	}
+	return markets, nil
 }
 
 func validatePendleCheckpoint(block BlockRef, page pendleWalletPage) error {

@@ -36,6 +36,31 @@ generated rather than hand-edited. Two rules decide what belongs in it:
 Holdings do not chase the long tail: a curated list that can be priced beats a
 wider list of amounts with no value.
 
+## Pricing a token nothing quotes
+
+An adapter that reads a token no price provider knows has two honest options, and
+which one applies depends on whether the account holds that token.
+
+- **A position that decomposes** reports the tokens it decomposes into. A Pendle
+  liquidity position is the holder's share of the market's reserves, so it reports
+  those reserves; the account does not hold an LP token's worth of anything else.
+- **A token held outright** keeps its own identity and sets `Component.PriceBasis`:
+  the quoted token to value it through, plus the price ratio between the two in 1e18
+  fixed point. Converting the amount instead would report an asset the account does
+  not hold, and would key an external comparison on a different token than the source
+  uses — the DeBank harness keys on `Component.Token.Address`.
+
+`PriceBasis` redirects valuation only. `PriceUSD` still ends up being the price of the
+component's own token, so consumers never need to know a basis was involved. The
+response's `prices` map stays what the provider actually quoted, which is why a
+consumer must read a component's own `priceUsd` rather than looking its token up
+there.
+
+A basis is not licence to invent a number. Every input must be read, not assumed: if
+the ratio cannot be established the component keeps its unquoted token and no basis,
+because an unpriced component is a gap the response reports whereas a guessed one is a
+wrong number nobody can see is wrong.
+
 ## Deployment windows
 
 Every contract address the kernel reads — hardcoded anchors, manifest entries, and
