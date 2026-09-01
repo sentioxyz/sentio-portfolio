@@ -36,7 +36,8 @@ var (
       {"type":"function","name":"factory","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]}
     ]`)
 	pendleYieldTokenABI = MustABI(`[
-      {"type":"function","name":"PT","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]}
+      {"type":"function","name":"PT","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
+      {"type":"function","name":"pyIndexStored","stateMutability":"view","inputs":[],"outputs":[{"type":"uint256"}]}
     ]`)
 	pendleMarketABI = MustABI(`[
       {"type":"function","name":"readTokens","stateMutability":"view","inputs":[],"outputs":[{"name":"_SY","type":"address"},{"name":"_PT","type":"address"},{"name":"_YT","type":"address"}]},
@@ -57,7 +58,49 @@ var pendleExchangeRateOne = new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil
 // Pendle's own market math uses 365 days, so anything else here would misprice every PT.
 const pendleImpliedRateYear = 365 * 24 * 60 * 60
 
-// pendlePTToAssetRatio prices one PT in units of the SY's accounting asset.
+// pendleSolvencyFactor is how much of its claim a PY pair can actually redeem.
+//
+// A PT redeems for 1/pyIndex of SY, and that SY is worth syIndex of the asset, so the pair is
+// only whole while the SY exchange rate has kept up with the index it ratcheted to. When the
+// underlying loses value — a slashing, a depeg, socialised bad debt — the rate falls below the
+// index and every claim on it is impaired by exactly syIndex/pyIndex.
+//
+// Pendle applies this to both the PT and the YT rate its oracle publishes, and it does not stop
+// at expiry: an expired PT still redeems through the same index, so parity is a property of a
+// solvent SY rather than of expiry.
+//
+// PendlePYOracleLib derives pyIndex from three reads, taking pyIndexStored inside the block the
+// yield token last cached it and max(syIndex, pyIndexStored) otherwise. Only pyIndexStored is
+// read here because the two branches provably agree on this factor: where syIndex >= stored the
+// cached branch gives pyIndex = stored <= syIndex and the fresh branch gives pyIndex = syIndex,
+// so both clamp to one; where syIndex < stored both branches give pyIndex = stored. The
+// distinction governs Pendle's own accrual, not the ratio of a claim to its asset, so paying two
+// more calls per yield token for it would buy nothing.
+func pendleSolvencyFactor(syIndex, pyIndexStored *big.Int) (*big.Int, error) {
+	if syIndex == nil || pyIndexStored == nil ||
+		syIndex.Sign() <= 0 || pyIndexStored.Sign() <= 0 {
+		return nil, fmt.Errorf("Pendle SY and PY indices are not both positive")
+	}
+	if syIndex.Cmp(pyIndexStored) >= 0 {
+		return new(big.Int).Set(priceBasisRatioOne), nil
+	}
+	factor := new(big.Int).Mul(syIndex, priceBasisRatioOne)
+	factor.Div(factor, pyIndexStored)
+	if factor.Sign() <= 0 {
+		return nil, fmt.Errorf("Pendle solvency factor underflowed to zero")
+	}
+	return factor, nil
+}
+
+// pendleApplySolvency scales a raw PT or YT ratio by the factor. Rounding is down, so an impaired
+// claim is never reported as worth more than it can redeem.
+func pendleApplySolvency(ratio, factor *big.Int) *big.Int {
+	scaled := new(big.Int).Mul(ratio, factor)
+	return scaled.Div(scaled, priceBasisRatioOne)
+}
+
+// pendlePTToAssetRatio prices one PT in units of the SY's accounting asset, before the
+// SY-solvency factor its caller applies.
 //
 // PT is a zero-coupon claim on that asset: it redeems one for one at expiry and trades below
 // that beforehand, discounted at the market's implied rate. Pendle carries the rate as a natural
@@ -76,8 +119,9 @@ func pendlePTToAssetRatio(lnImpliedRate *big.Int, expiry, timestamp uint64) (*bi
 		return nil, fmt.Errorf("Pendle PT has no expiry")
 	}
 	if timestamp >= expiry {
-		// Past expiry a PT redeems for the asset one for one and the market's last implied rate
-		// has stopped describing anything, so no market is consulted at all.
+		// Past expiry the market's last implied rate has stopped describing anything, so no
+		// market is consulted at all. Parity here is the raw rate only: what an expired PT
+		// actually redeems still depends on the SY being solvent.
 		return new(big.Int).Set(priceBasisRatioOne), nil
 	}
 	if lnImpliedRate == nil || lnImpliedRate.Sign() < 0 {
@@ -101,7 +145,7 @@ func pendlePTToAssetRatio(lnImpliedRate *big.Int, expiry, timestamp uint64) (*bi
 	return scaled, nil
 }
 
-// pendleYTToAssetRatio prices one YT in the same accounting asset. Minting and redeeming PY is
+// pendleYTToAssetRatio is the raw YT rate, in the same accounting asset. Minting and redeeming PY is
 // permissionless in both directions before expiry, which holds one PT plus one YT at exactly one
 // unit of the asset, so the YT is whatever the PT's discount leaves behind.
 //
@@ -488,14 +532,39 @@ func (a *PendleAdapter) tokenPriceBases(
 	if err != nil {
 		return nil, err
 	}
-	assets, err := pendleSYAccountingAssets(ctx, client, block, syAddresses)
+	syStates, err := pendleSYStates(ctx, client, block, syAddresses)
+	if err != nil {
+		return nil, err
+	}
+	yieldTokens, err := pendleYieldTokensFor(ctx, client, block, held)
+	if err != nil {
+		return nil, err
+	}
+	distinct := make([]common.Address, 0, len(yieldTokens))
+	seenYT := make(map[common.Address]struct{}, len(yieldTokens))
+	for _, yieldToken := range yieldTokens {
+		if _, exists := seenYT[yieldToken]; exists {
+			continue
+		}
+		seenYT[yieldToken] = struct{}{}
+		distinct = append(distinct, yieldToken)
+	}
+	pyIndices, err := pendlePYIndices(ctx, client, block, distinct)
 	if err != nil {
 		return nil, err
 	}
 	bases := make(map[common.Address]pendleTokenBasis, len(held))
 	for _, holding := range held {
-		asset, known := assets[holding.ref.SY]
+		sy, known := syStates[holding.ref.SY]
 		if !known {
+			continue
+		}
+		pyIndexStored, indexed := pyIndices[yieldTokens[holding.ref.Token]]
+		if !indexed {
+			continue
+		}
+		factor, factorErr := pendleSolvencyFactor(sy.exchangeRate, pyIndexStored)
+		if factorErr != nil {
 			continue
 		}
 		ptRatio, ratioErr := pendlePTToAssetRatio(
@@ -504,17 +573,65 @@ func (a *PendleAdapter) tokenPriceBases(
 		if ratioErr != nil {
 			continue
 		}
-		ratio := ptRatio
+		raw := ptRatio
 		if holding.ref.Kind == pendleYT {
 			ytRatio, usable := pendleYTToAssetRatio(ptRatio)
 			if !usable {
 				continue
 			}
-			ratio = ytRatio
+			raw = ytRatio
 		}
-		bases[holding.ref.Token] = pendleTokenBasis{asset: asset, ratio: ratio}
+		ratio := pendleApplySolvency(raw, factor)
+		if ratio.Sign() <= 0 {
+			continue
+		}
+		bases[holding.ref.Token] = pendleTokenBasis{asset: sy.asset, ratio: ratio}
 	}
 	return bases, nil
+}
+
+// pendleYieldTokensFor maps each directly held token to the yield token that carries its PY
+// index. A held YT is its own; a held PT names its sibling through PT.YT(), which is the only
+// place the pairing is available — the index records the PT a token belongs to, never the YT.
+func pendleYieldTokensFor(
+	ctx context.Context,
+	client *RPCClient,
+	block BlockRef,
+	held []pendleHolding,
+) (map[common.Address]common.Address, error) {
+	yieldTokens := make(map[common.Address]common.Address, len(held))
+	principals := make([]common.Address, 0, len(held))
+	for _, holding := range held {
+		if holding.ref.Kind == pendleYT {
+			yieldTokens[holding.ref.Token] = holding.ref.Token
+			continue
+		}
+		principals = append(principals, holding.ref.Token)
+	}
+	if len(principals) == 0 {
+		return yieldTokens, nil
+	}
+	calls := make([]ContractCall, len(principals))
+	for index, principal := range principals {
+		calls[index] = ContractCall{
+			Contract: principal, ABI: pendlePrincipalTokenABI, Method: "YT",
+		}
+	}
+	rows, err := client.ParallelCallsAllowFailure(ctx, block, calls)
+	if err != nil {
+		return nil, fmt.Errorf("Pendle yield token: %w", err)
+	}
+	for index, row := range rows {
+		if row.Error != nil {
+			continue
+		}
+		yieldToken, decodeErr := AddressAt(row.Values, 0)
+		if decodeErr != nil || yieldToken == (common.Address{}) {
+			continue
+		}
+		yieldTokens[principals[index]] = yieldToken
+	}
+	return yieldTokens, nil
 }
 
 // marketImpliedRates picks one market per PT and returns the implied rate it publishes.
@@ -596,43 +713,90 @@ func (a *PendleAdapter) marketImpliedRates(
 	return rates, nil
 }
 
-// pendleSYAccountingAssets reads the asset each SY denominates itself in: the token a PT redeems
-// for and, unlike the PT, one a price registry quotes. An SY that does not answer leaves its
-// tokens unpriced instead of failing the scan.
-func pendleSYAccountingAssets(
+// pendleSYState is what one SY contributes to pricing its PT and YT: the asset it denominates
+// itself in — the token they redeem for and, unlike them, one a price registry quotes — and the
+// exchange rate that decides whether those claims are still whole.
+type pendleSYState struct {
+	asset        common.Address
+	exchangeRate *big.Int
+}
+
+// pendleSYStates reads both per SY. An SY that does not answer either call leaves its tokens
+// unpriced instead of failing the scan.
+func pendleSYStates(
 	ctx context.Context,
 	client *RPCClient,
 	block BlockRef,
 	syAddresses []common.Address,
-) (map[common.Address]common.Address, error) {
-	calls := make([]ContractCall, len(syAddresses))
+) (map[common.Address]pendleSYState, error) {
+	calls := make([]ContractCall, 0, len(syAddresses)*2)
+	for _, sy := range syAddresses {
+		calls = append(calls,
+			ContractCall{Contract: sy, ABI: pendleStandardizedYieldABI, Method: "assetInfo"},
+			ContractCall{Contract: sy, ABI: pendleStandardizedYieldABI, Method: "exchangeRate"},
+		)
+	}
+	rows, err := client.ParallelCallsAllowFailure(ctx, block, calls)
+	if err != nil {
+		return nil, fmt.Errorf("Pendle SY state: %w", err)
+	}
+	states := make(map[common.Address]pendleSYState, len(syAddresses))
 	for index, sy := range syAddresses {
+		assetRow, rateRow := rows[index*2], rows[index*2+1]
+		if assetRow.Error != nil || rateRow.Error != nil {
+			continue
+		}
+		asset, decodeErr := AddressAt(assetRow.Values, 1)
+		if decodeErr != nil || asset == (common.Address{}) {
+			continue
+		}
+		rate, decodeErr := BigIntAt(rateRow.Values, 0)
+		if decodeErr != nil || rate.Sign() <= 0 {
+			continue
+		}
+		states[sy] = pendleSYState{asset: asset, exchangeRate: rate}
+	}
+	return states, nil
+}
+
+// pendlePYIndices reads the index each yield token has ratcheted to. A yield token that does not
+// answer leaves its pair unpriced: assuming a solvent SY is the one assumption that would
+// overstate exactly the positions whose value has fallen.
+func pendlePYIndices(
+	ctx context.Context,
+	client *RPCClient,
+	block BlockRef,
+	yieldTokens []common.Address,
+) (map[common.Address]*big.Int, error) {
+	calls := make([]ContractCall, len(yieldTokens))
+	for index, yieldToken := range yieldTokens {
 		calls[index] = ContractCall{
-			Contract: sy, ABI: pendleStandardizedYieldABI, Method: "assetInfo",
+			Contract: yieldToken, ABI: pendleYieldTokenABI, Method: "pyIndexStored",
 		}
 	}
 	rows, err := client.ParallelCallsAllowFailure(ctx, block, calls)
 	if err != nil {
-		return nil, fmt.Errorf("Pendle SY asset: %w", err)
+		return nil, fmt.Errorf("Pendle PY index: %w", err)
 	}
-	assets := make(map[common.Address]common.Address, len(syAddresses))
+	indices := make(map[common.Address]*big.Int, len(yieldTokens))
 	for index, row := range rows {
 		if row.Error != nil {
 			continue
 		}
-		asset, decodeErr := AddressAt(row.Values, 1)
-		if decodeErr != nil || asset == (common.Address{}) {
+		stored, decodeErr := BigIntAt(row.Values, 0)
+		if decodeErr != nil || stored.Sign() <= 0 {
 			continue
 		}
-		assets[syAddresses[index]] = asset
+		indices[yieldTokens[index]] = stored
 	}
-	return assets, nil
+	return indices, nil
 }
 
 type pendleMarketState struct {
 	holding      pendleHolding
 	sy           common.Address
 	pt           common.Address
+	yt           common.Address
 	totalPt      *big.Int
 	totalSy      *big.Int
 	totalLp      *big.Int
@@ -641,7 +805,10 @@ type pendleMarketState struct {
 	// discount the PT leg to its accounting asset, so the LP path needs no extra round trip.
 	expiry        uint64
 	lnImpliedRate *big.Int
-	asset         common.Address
+	// solvency is the SY-solvency factor for this market's PY pair, nil when it could not be
+	// established. It discounts the PT reserve leg exactly as it discounts a directly held PT.
+	solvency *big.Int
+	asset    common.Address
 	// assetDecimals is what the SY itself declares its accounting asset to be. exchangeRate
 	// converts SY units to asset units at the same decimal base, so a SY whose own decimals
 	// disagree with it would silently scale the result.
@@ -683,6 +850,10 @@ func (a *PendleAdapter) readMarketStates(
 		if decodeErr != nil {
 			return nil, fmt.Errorf("Pendle market %s tokens: %w", market, decodeErr)
 		}
+		yieldToken, decodeErr := AddressAt(rows[index*3], 2)
+		if decodeErr != nil {
+			return nil, fmt.Errorf("Pendle market %s tokens: %w", market, decodeErr)
+		}
 		totalPt, decodeErr := BigIntAt(rows[index*3+1], 0)
 		if decodeErr != nil {
 			return nil, fmt.Errorf("Pendle market %s state: %w", market, decodeErr)
@@ -714,7 +885,7 @@ func (a *PendleAdapter) readMarketStates(
 			return nil, fmt.Errorf("Pendle market %s reward tokens: %w", market, decodeErr)
 		}
 		states = append(states, pendleMarketState{
-			holding: holding, sy: sy, pt: pt,
+			holding: holding, sy: sy, pt: pt, yt: yieldToken,
 			totalPt: totalPt, totalSy: totalSy, totalLp: totalLp,
 			expiry: expiry.Uint64(), lnImpliedRate: lnImpliedRate,
 			rewardTokens: rewardTokens,
@@ -759,6 +930,49 @@ func (a *PendleAdapter) readMarketSY(
 		states[index].exchangeRate = rate
 		states[index].asset = asset
 		states[index].assetDecimals = decimals
+	}
+	return a.readMarketSolvency(ctx, client, block, states)
+}
+
+// readMarketSolvency establishes each market's SY-solvency factor from its yield token's PY
+// index. readTokens already named the yield token, so one call per market is the only extra read
+// a liquidity position needs, and a market whose yield token does not answer simply loses the
+// basis on its PT leg — the reserve amounts and the SY leg are unaffected.
+func (a *PendleAdapter) readMarketSolvency(
+	ctx context.Context,
+	client *RPCClient,
+	block BlockRef,
+	states []pendleMarketState,
+) ([]pendleMarketState, error) {
+	yieldTokens := make([]common.Address, 0, len(states))
+	seen := make(map[common.Address]struct{}, len(states))
+	for _, state := range states {
+		if state.yt == (common.Address{}) {
+			continue
+		}
+		if _, exists := seen[state.yt]; exists {
+			continue
+		}
+		seen[state.yt] = struct{}{}
+		yieldTokens = append(yieldTokens, state.yt)
+	}
+	if len(yieldTokens) == 0 {
+		return a.readMarketRewards(ctx, client, block, states)
+	}
+	pyIndices, err := pendlePYIndices(ctx, client, block, yieldTokens)
+	if err != nil {
+		return nil, err
+	}
+	for index := range states {
+		pyIndexStored, indexed := pyIndices[states[index].yt]
+		if !indexed {
+			continue
+		}
+		factor, factorErr := pendleSolvencyFactor(states[index].exchangeRate, pyIndexStored)
+		if factorErr != nil {
+			continue
+		}
+		states[index].solvency = factor
 	}
 	return a.readMarketRewards(ctx, client, block, states)
 }
@@ -883,10 +1097,14 @@ func (a *PendleAdapter) marketGroups(
 			// The reserve is reported as the PT itself, the way DeBank reports it, and priced
 			// through the same accounting asset as the SY leg. Both legs of a liquidity position
 			// therefore value, where before only the SY leg did.
-			if ratio, ratioErr := pendlePTToAssetRatio(
+			if raw, ratioErr := pendlePTToAssetRatio(
 				state.lnImpliedRate, state.expiry, block.Timestamp,
-			); ratioErr == nil {
-				ptComponent.PriceBasis = &PriceBasis{Token: assetToken, RatioRaw: ratio.String()}
+			); ratioErr == nil && state.solvency != nil {
+				if ratio := pendleApplySolvency(raw, state.solvency); ratio.Sign() > 0 {
+					ptComponent.PriceBasis = &PriceBasis{
+						Token: assetToken, RatioRaw: ratio.String(),
+					}
+				}
 			}
 			components = append(components, ptComponent)
 		}

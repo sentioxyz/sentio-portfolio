@@ -61,6 +61,12 @@ the ratio cannot be established the component keeps its unquoted token and no ba
 because an unpriced component is a gap the response reports whereas a guessed one is a
 wrong number nobody can see is wrong.
 
+That includes solvency. A wrapper's claim on its underlying is only whole while the
+underlying has held its value, and the impaired case is exactly the one where an
+overstatement matters, so the factor is read rather than defaulted to one. Pendle's
+PT/YT ratios carry `syIndex / pyIndexStored` for this reason, and a pair whose index
+cannot be read stays unpriced.
+
 ## Deployment windows
 
 Every contract address the kernel reads — hardcoded anchors, manifest entries, and
