@@ -6,6 +6,37 @@ import (
 	"math/big"
 )
 
+// priceBasisRatioOne is the fixed-point one that PriceBasis.RatioRaw is scaled by.
+var priceBasisRatioOne = new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+
+// componentPrice resolves the USD price of one component, following its PriceBasis when its own
+// token is quoted nowhere. The result is the price of the component's own token, so PriceUSD
+// stays the price of what the account holds and callers need not know a basis was involved.
+func componentPrice(component Component, prices map[string]float64) (float64, bool, error) {
+	price, exists := prices[PriceKey(component.priceToken())]
+	if !exists {
+		return 0, false, nil
+	}
+	if component.PriceBasis == nil {
+		return price, true, nil
+	}
+	ratio, ok := new(big.Int).SetString(component.PriceBasis.RatioRaw, 10)
+	if !ok || ratio.Sign() <= 0 {
+		return 0, false, fmt.Errorf("invalid price basis ratio %q", component.PriceBasis.RatioRaw)
+	}
+	basisPrice := new(big.Rat).SetFloat64(price)
+	if basisPrice == nil {
+		return 0, false, fmt.Errorf("basis price %v cannot be represented", price)
+	}
+	derived := new(big.Rat).SetInt(ratio)
+	derived.Quo(derived, new(big.Rat).SetInt(priceBasisRatioOne))
+	derivedPrice, _ := derived.Mul(derived, basisPrice).Float64()
+	if derivedPrice <= 0 || math.IsInf(derivedPrice, 0) || math.IsNaN(derivedPrice) {
+		return 0, false, fmt.Errorf("derived price %v is not usable", derivedPrice)
+	}
+	return derivedPrice, true, nil
+}
+
 func componentValueUSD(component Component, price float64) (float64, error) {
 	if price <= 0 || math.IsInf(price, 0) || math.IsNaN(price) {
 		return 0, fmt.Errorf("invalid price %v", price)
@@ -81,8 +112,16 @@ func applyValuations(
 			for componentIndex := range group.Components {
 				component := &group.Components[componentIndex]
 				state.summary.ComponentCount++
-				price, exists := prices[PriceKey(component.Token)]
-				if !exists {
+				price, priced, err := componentPrice(*component, prices)
+				if err != nil {
+					return nil, fmt.Errorf(
+						"%s %s: %w",
+						snapshot.ProtocolID,
+						component.Token.Symbol,
+						err,
+					)
+				}
+				if !priced {
 					continue
 				}
 				value, err := componentValueUSD(*component, price)

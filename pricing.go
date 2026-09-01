@@ -63,9 +63,12 @@ func collectPriceTokens(snapshots []Snapshot) []Token {
 				if component.AmountRaw == "0" {
 					continue
 				}
-				asset := AssetForToken(component.Token)
+				// A component with a price basis is quoted through that token, so asking the
+				// provider for its own would only add a guaranteed failure to every scan.
+				token := component.priceToken()
+				asset := AssetForToken(token)
 				if _, exists := unique[asset]; !exists {
-					unique[asset] = component.Token
+					unique[asset] = token
 				}
 			}
 		}

@@ -1,8 +1,10 @@
 package portfolio
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"math"
 	"math/big"
 	"sort"
 	"strconv"
@@ -50,6 +52,73 @@ var (
 
 // pendleExchangeRateOne is the fixed-point one that IStandardizedYield.exchangeRate is scaled by.
 var pendleExchangeRateOne = new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+
+// pendleImpliedRateYear is the year PendleMarket.readState annualises lastLnImpliedRate over.
+// Pendle's own market math uses 365 days, so anything else here would misprice every PT.
+const pendleImpliedRateYear = 365 * 24 * 60 * 60
+
+// pendlePTToAssetRatio prices one PT in units of the SY's accounting asset.
+//
+// PT is a zero-coupon claim on that asset: it redeems one for one at expiry and trades below
+// that beforehand, discounted at the market's implied rate. Pendle carries the rate as a natural
+// log compounded continuously over a 365-day year, so the discount is
+// exp(-lnImpliedRate * timeToExpiry / year) — the inverse of the exchange rate the AMM itself
+// derives from the same two numbers.
+//
+// The underlying asset price alone will not do: it is the undiscounted redemption value, so it
+// overstates a PT by exactly the yield still to accrue.
+//
+// float64 carries the exponential because the result only ever multiplies a float64 USD price.
+// Its ~1e-16 of relative error on a discount factor is orders of magnitude below the agreement
+// any price feed offers.
+func pendlePTToAssetRatio(lnImpliedRate *big.Int, expiry, timestamp uint64) (*big.Int, error) {
+	if expiry == 0 {
+		return nil, fmt.Errorf("Pendle PT has no expiry")
+	}
+	if timestamp >= expiry {
+		// Past expiry a PT redeems for the asset one for one and the market's last implied rate
+		// has stopped describing anything, so no market is consulted at all.
+		return new(big.Int).Set(priceBasisRatioOne), nil
+	}
+	if lnImpliedRate == nil || lnImpliedRate.Sign() < 0 {
+		return nil, fmt.Errorf("Pendle market reported no usable implied rate")
+	}
+	rate, _ := new(big.Float).SetInt(lnImpliedRate).Float64()
+	rate /= 1e18
+	years := float64(expiry-timestamp) / float64(pendleImpliedRateYear)
+	ratio := math.Exp(-rate * years)
+	if ratio <= 0 || ratio > 1 || math.IsNaN(ratio) {
+		return nil, fmt.Errorf(
+			"Pendle implied rate discounts PT to an impossible %v of its asset", ratio,
+		)
+	}
+	scaled, _ := new(big.Float).Mul(
+		big.NewFloat(ratio), new(big.Float).SetInt(priceBasisRatioOne),
+	).Int(nil)
+	if scaled.Sign() <= 0 {
+		return nil, fmt.Errorf("Pendle PT discount underflowed to zero")
+	}
+	return scaled, nil
+}
+
+// pendleYTToAssetRatio prices one YT in the same accounting asset. Minting and redeeming PY is
+// permissionless in both directions before expiry, which holds one PT plus one YT at exactly one
+// unit of the asset, so the YT is whatever the PT's discount leaves behind.
+//
+// At expiry that identity values a YT at nothing, which is not the same as knowing what it is
+// worth: an expired YT can still hold interest that accrued before expiry and was never
+// redeemed, and this adapter does not read it. Reporting zero would assert a fact we do not
+// have, so such a YT gets no basis and stays unpriced.
+func pendleYTToAssetRatio(ptRatio *big.Int) (*big.Int, bool) {
+	if ptRatio == nil {
+		return nil, false
+	}
+	ratio := new(big.Int).Sub(priceBasisRatioOne, ptRatio)
+	if ratio.Sign() <= 0 {
+		return nil, false
+	}
+	return ratio, true
+}
 
 type pendleTokenKind string
 
@@ -161,6 +230,14 @@ type pendlePositionIndexer interface {
 		BlockRef,
 		common.Address,
 	) ([]pendlePositionRef, error)
+	// MarketsForPT groups the markets the index recorded for each of the given PTs. A PT names
+	// no market on-chain, and Pendle allows more than one, so this is the only way to reach the
+	// market whose implied rate discounts it.
+	MarketsForPT(
+		context.Context,
+		BlockRef,
+		[]common.Address,
+	) (map[common.Address][]common.Address, error)
 }
 
 type PendleAdapter struct {
@@ -315,9 +392,16 @@ func (a *PendleAdapter) tokenGroups(
 	if len(held) == 0 {
 		return nil, nil
 	}
-	addresses := make([]common.Address, 0, len(held))
+	bases, err := a.tokenPriceBases(ctx, client, block, held)
+	if err != nil {
+		return nil, err
+	}
+	addresses := make([]common.Address, 0, len(held)+len(bases))
 	for _, holding := range held {
 		addresses = append(addresses, holding.ref.Token)
+	}
+	for _, basis := range bases {
+		addresses = append(addresses, basis.asset)
 	}
 	tokens, err := tokenMetadataAt(ctx, client, block, addresses)
 	if err != nil {
@@ -331,6 +415,15 @@ func (a *PendleAdapter) tokenGroups(
 		}
 		component := NewComponent("asset", token, holding.balance,
 			Source{Contract: holding.ref.Token, Method: "balanceOf"})
+		if basis, priced := bases[holding.ref.Token]; priced {
+			assetToken, known := tokens[basis.asset]
+			if !known {
+				return nil, fmt.Errorf("Pendle asset %s metadata is absent", basis.asset)
+			}
+			component.PriceBasis = &PriceBasis{
+				Token: assetToken, RatioRaw: basis.ratio.String(),
+			}
+		}
 		groups = append(groups, Group{
 			ID:         string(holding.ref.Kind) + ":" + strings.ToLower(holding.ref.Token.Hex()),
 			MarketID:   strings.ToLower(holding.ref.PT.Hex()),
@@ -342,6 +435,200 @@ func (a *PendleAdapter) tokenGroups(
 	return groups, nil
 }
 
+// pendleTokenBasis is the accounting asset one directly held PT or YT prices through, with the
+// ratio between a unit of that token and a unit of the asset.
+type pendleTokenBasis struct {
+	asset common.Address
+	ratio *big.Int
+}
+
+// tokenPriceBases resolves what discounts each directly held PT and YT to a quoted asset.
+//
+// Neither is quoted anywhere. A new PT/YT pair appears whenever anyone calls the permissionless
+// createYieldContract, so no price registry keeps up, and the same reason a curated token list
+// would rot is the reason one cannot be priced by listing it. Both are claims on the SY's
+// accounting asset, which is quoted, at a ratio the PT's market publishes.
+//
+// Anything that cannot be established leaves the token with its own unquoted identity and no
+// basis. That is the behaviour that shipped: an unpriced component is a gap the response reports,
+// whereas a guessed one is a wrong number nobody can see is wrong.
+func (a *PendleAdapter) tokenPriceBases(
+	ctx context.Context,
+	client *RPCClient,
+	block BlockRef,
+	held []pendleHolding,
+) (map[common.Address]pendleTokenBasis, error) {
+	seenSY := make(map[common.Address]struct{}, len(held))
+	seenPT := make(map[common.Address]struct{}, len(held))
+	syAddresses := make([]common.Address, 0, len(held))
+	unexpired := make([]common.Address, 0, len(held))
+	for _, holding := range held {
+		if holding.ref.SY == (common.Address{}) || holding.ref.PT == (common.Address{}) {
+			continue
+		}
+		if _, exists := seenSY[holding.ref.SY]; !exists {
+			seenSY[holding.ref.SY] = struct{}{}
+			syAddresses = append(syAddresses, holding.ref.SY)
+		}
+		// An expired PT needs no market: it redeems for the asset one for one, so asking the
+		// index for markets it no longer prices would only add a round trip.
+		if holding.ref.Expiry == 0 || holding.ref.Expiry <= block.Timestamp {
+			continue
+		}
+		if _, exists := seenPT[holding.ref.PT]; exists {
+			continue
+		}
+		seenPT[holding.ref.PT] = struct{}{}
+		unexpired = append(unexpired, holding.ref.PT)
+	}
+	if len(syAddresses) == 0 {
+		return nil, nil
+	}
+	rates, err := a.marketImpliedRates(ctx, client, block, unexpired)
+	if err != nil {
+		return nil, err
+	}
+	assets, err := pendleSYAccountingAssets(ctx, client, block, syAddresses)
+	if err != nil {
+		return nil, err
+	}
+	bases := make(map[common.Address]pendleTokenBasis, len(held))
+	for _, holding := range held {
+		asset, known := assets[holding.ref.SY]
+		if !known {
+			continue
+		}
+		ptRatio, ratioErr := pendlePTToAssetRatio(
+			rates[holding.ref.PT], holding.ref.Expiry, block.Timestamp,
+		)
+		if ratioErr != nil {
+			continue
+		}
+		ratio := ptRatio
+		if holding.ref.Kind == pendleYT {
+			ytRatio, usable := pendleYTToAssetRatio(ptRatio)
+			if !usable {
+				continue
+			}
+			ratio = ytRatio
+		}
+		bases[holding.ref.Token] = pendleTokenBasis{asset: asset, ratio: ratio}
+	}
+	return bases, nil
+}
+
+// marketImpliedRates picks one market per PT and returns the implied rate it publishes.
+//
+// A PT can have several markets — 32 of the 874 the index knows do, up to three for one PT — and
+// none of them is canonical on-chain, so the deepest by SY reserve wins: that is the rate the
+// most capital has agreed to. Ties break on the lowest address, so the choice never depends on
+// map iteration order. A market that reverts, holds no liquidity or reports no rate is skipped
+// rather than failing the scan, because the PT it prices is only one component of one group.
+func (a *PendleAdapter) marketImpliedRates(
+	ctx context.Context,
+	client *RPCClient,
+	block BlockRef,
+	pts []common.Address,
+) (map[common.Address]*big.Int, error) {
+	if len(pts) == 0 {
+		return nil, nil
+	}
+	markets, err := a.indexer.MarketsForPT(ctx, block, pts)
+	if err != nil {
+		return nil, fmt.Errorf("Pendle market lookup: %w", err)
+	}
+	type marketCandidate struct {
+		pt     common.Address
+		market common.Address
+	}
+	candidates := make([]marketCandidate, 0, len(pts))
+	for _, pt := range pts {
+		for _, market := range markets[pt] {
+			candidates = append(candidates, marketCandidate{pt: pt, market: market})
+		}
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	calls := make([]ContractCall, len(candidates))
+	for index, candidate := range candidates {
+		calls[index] = ContractCall{
+			Contract: candidate.market, ABI: pendleMarketABI, Method: "readState",
+			Args: []any{common.Address{}},
+		}
+	}
+	rows, err := client.ParallelCallsAllowFailure(ctx, block, calls)
+	if err != nil {
+		return nil, fmt.Errorf("Pendle market rates: %w", err)
+	}
+	rates := make(map[common.Address]*big.Int, len(pts))
+	depths := make(map[common.Address]*big.Int, len(pts))
+	chosen := make(map[common.Address]common.Address, len(pts))
+	for index, row := range rows {
+		if row.Error != nil {
+			continue
+		}
+		totalSy, decodeErr := BigIntAt(row.Values, 1)
+		if decodeErr != nil || totalSy.Sign() <= 0 {
+			continue
+		}
+		totalLp, decodeErr := BigIntAt(row.Values, 2)
+		if decodeErr != nil || totalLp.Sign() <= 0 {
+			continue
+		}
+		lnImpliedRate, decodeErr := BigIntAt(row.Values, 8)
+		if decodeErr != nil || lnImpliedRate.Sign() <= 0 {
+			continue
+		}
+		candidate := candidates[index]
+		if deepest, exists := depths[candidate.pt]; exists {
+			comparison := totalSy.Cmp(deepest)
+			if comparison < 0 || (comparison == 0 && bytes.Compare(
+				candidate.market.Bytes(), chosen[candidate.pt].Bytes(),
+			) >= 0) {
+				continue
+			}
+		}
+		depths[candidate.pt] = totalSy
+		chosen[candidate.pt] = candidate.market
+		rates[candidate.pt] = lnImpliedRate
+	}
+	return rates, nil
+}
+
+// pendleSYAccountingAssets reads the asset each SY denominates itself in: the token a PT redeems
+// for and, unlike the PT, one a price registry quotes. An SY that does not answer leaves its
+// tokens unpriced instead of failing the scan.
+func pendleSYAccountingAssets(
+	ctx context.Context,
+	client *RPCClient,
+	block BlockRef,
+	syAddresses []common.Address,
+) (map[common.Address]common.Address, error) {
+	calls := make([]ContractCall, len(syAddresses))
+	for index, sy := range syAddresses {
+		calls[index] = ContractCall{
+			Contract: sy, ABI: pendleStandardizedYieldABI, Method: "assetInfo",
+		}
+	}
+	rows, err := client.ParallelCallsAllowFailure(ctx, block, calls)
+	if err != nil {
+		return nil, fmt.Errorf("Pendle SY asset: %w", err)
+	}
+	assets := make(map[common.Address]common.Address, len(syAddresses))
+	for index, row := range rows {
+		if row.Error != nil {
+			continue
+		}
+		asset, decodeErr := AddressAt(row.Values, 1)
+		if decodeErr != nil || asset == (common.Address{}) {
+			continue
+		}
+		assets[syAddresses[index]] = asset
+	}
+	return assets, nil
+}
+
 type pendleMarketState struct {
 	holding      pendleHolding
 	sy           common.Address
@@ -350,7 +637,11 @@ type pendleMarketState struct {
 	totalSy      *big.Int
 	totalLp      *big.Int
 	exchangeRate *big.Int
-	asset        common.Address
+	// expiry and lnImpliedRate come from the same readState call as the reserves and are what
+	// discount the PT leg to its accounting asset, so the LP path needs no extra round trip.
+	expiry        uint64
+	lnImpliedRate *big.Int
+	asset         common.Address
 	// assetDecimals is what the SY itself declares its accounting asset to be. exchangeRate
 	// converts SY units to asset units at the same decimal base, so a SY whose own decimals
 	// disagree with it would silently scale the result.
@@ -407,6 +698,17 @@ func (a *PendleAdapter) readMarketStates(
 		if totalLp.Sign() <= 0 || totalPt.Sign() < 0 || totalSy.Sign() < 0 {
 			return nil, fmt.Errorf("Pendle market %s reported a non-positive reserve state", market)
 		}
+		expiry, decodeErr := BigIntAt(rows[index*3+1], 5)
+		if decodeErr != nil {
+			return nil, fmt.Errorf("Pendle market %s expiry: %w", market, decodeErr)
+		}
+		if !expiry.IsUint64() {
+			return nil, fmt.Errorf("Pendle market %s reported an out-of-range expiry", market)
+		}
+		lnImpliedRate, decodeErr := BigIntAt(rows[index*3+1], 8)
+		if decodeErr != nil {
+			return nil, fmt.Errorf("Pendle market %s implied rate: %w", market, decodeErr)
+		}
 		rewardTokens, decodeErr := AddressSliceAt(rows[index*3+2], 0)
 		if decodeErr != nil {
 			return nil, fmt.Errorf("Pendle market %s reward tokens: %w", market, decodeErr)
@@ -414,6 +716,7 @@ func (a *PendleAdapter) readMarketStates(
 		states = append(states, pendleMarketState{
 			holding: holding, sy: sy, pt: pt,
 			totalPt: totalPt, totalSy: totalSy, totalLp: totalLp,
+			expiry: expiry.Uint64(), lnImpliedRate: lnImpliedRate,
 			rewardTokens: rewardTokens,
 		})
 	}
@@ -575,8 +878,17 @@ func (a *PendleAdapter) marketGroups(
 				Source{Contract: market, Method: "readState(totalSy)*exchangeRate"}))
 		}
 		if ptAmount.Sign() > 0 {
-			components = append(components, NewComponent("asset", ptToken, ptAmount,
-				Source{Contract: market, Method: "readState(totalPt)"}))
+			ptComponent := NewComponent("asset", ptToken, ptAmount,
+				Source{Contract: market, Method: "readState(totalPt)"})
+			// The reserve is reported as the PT itself, the way DeBank reports it, and priced
+			// through the same accounting asset as the SY leg. Both legs of a liquidity position
+			// therefore value, where before only the SY leg did.
+			if ratio, ratioErr := pendlePTToAssetRatio(
+				state.lnImpliedRate, state.expiry, block.Timestamp,
+			); ratioErr == nil {
+				ptComponent.PriceBasis = &PriceBasis{Token: assetToken, RatioRaw: ratio.String()}
+			}
+			components = append(components, ptComponent)
 		}
 		for index, rewardToken := range state.rewardTokens {
 			if index >= len(state.rewards) || state.rewards[index].Sign() == 0 {
