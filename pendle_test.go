@@ -475,6 +475,8 @@ type pendleStubRPC struct {
 	markets       map[common.Address]pendleStubMarket
 	marketTokens  map[common.Address][3]common.Address
 	exchangeRates map[common.Address]*big.Int
+	pyIndices     map[common.Address]*big.Int
+	siblingYT     map[common.Address]common.Address
 	assets        map[common.Address]common.Address
 	symbols       map[common.Address]string
 	decimals      map[common.Address]uint8
@@ -520,6 +522,20 @@ func (s *pendleStubRPC) dispatch(to common.Address, data []byte) (string, map[st
 			big.NewInt(0), new(big.Int).SetUint64(market.expiry), big.NewInt(0),
 			big.NewInt(0), market.lnImpliedRate,
 		)
+		return "0x" + common.Bytes2Hex(out), nil
+	case string(pendlePrincipalTokenABI.Methods["YT"].ID):
+		yieldToken, known := s.siblingYT[to]
+		if !known {
+			return "", fail
+		}
+		out, _ := pendlePrincipalTokenABI.Methods["YT"].Outputs.Pack(yieldToken)
+		return "0x" + common.Bytes2Hex(out), nil
+	case string(pendleYieldTokenABI.Methods["pyIndexStored"].ID):
+		stored, known := s.pyIndices[to]
+		if !known {
+			return "", fail
+		}
+		out, _ := pendleYieldTokenABI.Methods["pyIndexStored"].Outputs.Pack(stored)
 		return "0x" + common.Bytes2Hex(out), nil
 	case string(pendleMarketABI.Methods["readTokens"].ID):
 		tokens, known := s.marketTokens[to]
@@ -658,10 +674,14 @@ func newPendlePricingFixture(t *testing.T) pendlePricingFixture {
 			fixture.market: {fixture.sy, fixture.principal, fixture.yieldT},
 		},
 		exchangeRates: map[common.Address]*big.Int{fixture.sy: pendleExchangeRateOne},
-		assets:        map[common.Address]common.Address{fixture.sy: fixture.asset},
-		symbols:       map[common.Address]string{},
-		decimals:      map[common.Address]uint8{},
-		stateCalls:    map[common.Address]int{},
+		// A solvent SY: the exchange rate has kept up with the index the pair ratcheted to, so
+		// the solvency factor is one and the discount is the implied rate alone.
+		pyIndices:  map[common.Address]*big.Int{fixture.yieldT: pendleExchangeRateOne},
+		siblingYT:  map[common.Address]common.Address{fixture.principal: fixture.yieldT},
+		assets:     map[common.Address]common.Address{fixture.sy: fixture.asset},
+		symbols:    map[common.Address]string{},
+		decimals:   map[common.Address]uint8{},
+		stateCalls: map[common.Address]int{},
 	}
 	for address, symbol := range map[common.Address]string{
 		fixture.principal: "PT-sUSDS-26NOV2026",
@@ -900,5 +920,160 @@ func TestPendleLiquidityPTLegPricesThroughTheSameAsset(t *testing.T) {
 	}
 	if indexer.marketsCalled {
 		t.Fatal("a liquidity position already reads its market and must not look one up")
+	}
+}
+
+// The factor is what a PY pair can actually redeem, so it is exercised at the boundary rather
+// than only in the happy case. Both of PendlePYOracleLib's pyIndex branches agree on it — the
+// cached branch takes pyIndexStored, the fresh one max(syIndex, pyIndexStored), and the clamp at
+// one collapses the difference — which is why only pyIndexStored is read.
+func TestPendleSolvencyFactorImpairsOnlyWhenTheSYHasFallenBehind(t *testing.T) {
+	one := priceBasisRatioOne
+	for _, test := range []struct {
+		name    string
+		syIndex *big.Int
+		stored  *big.Int
+		want    string
+	}{
+		{name: "accrued past the index", syIndex: big.NewInt(11e17), stored: one, want: one.String()},
+		{name: "exactly at the index", syIndex: one, stored: one, want: one.String()},
+		{name: "ten percent behind", syIndex: big.NewInt(9e17), stored: one, want: "900000000000000000"},
+		{name: "index ratcheted above", syIndex: one, stored: big.NewInt(125e16), want: "800000000000000000"},
+	} {
+		factor, err := pendleSolvencyFactor(test.syIndex, test.stored)
+		if err != nil {
+			t.Fatalf("%s: %v", test.name, err)
+		}
+		if factor.String() != test.want {
+			t.Fatalf("%s: factor = %s, want %s", test.name, factor, test.want)
+		}
+		if factor.Cmp(one) > 0 {
+			t.Fatalf("%s: a claim can never redeem more than its asset", test.name)
+		}
+	}
+	for _, test := range [][2]*big.Int{
+		{nil, one}, {one, nil}, {big.NewInt(0), one}, {one, big.NewInt(0)},
+	} {
+		if _, err := pendleSolvencyFactor(test[0], test[1]); err == nil {
+			t.Fatalf("missing indices were accepted: %v", test)
+		}
+	}
+}
+
+// The regression for the review that caught this: an SY whose exchange rate has fallen below the
+// index its pair ratcheted to cannot redeem the pair whole, and reporting the raw implied-rate
+// discount would overstate every PT and YT written against it.
+func TestPendleInsolventSYImpairsEveryPendleBasis(t *testing.T) {
+	insolvent := func(t *testing.T) pendlePricingFixture {
+		t.Helper()
+		fixture := newPendlePricingFixture(t)
+		// The SY has lost 10% against the index the pair ratcheted to.
+		fixture.stub.exchangeRates[fixture.sy] = big.NewInt(9e17)
+		fixture.stub.pyIndices[fixture.yieldT] = priceBasisRatioOne
+		return fixture
+	}
+	principalRef := func(fixture pendlePricingFixture, expiry uint64) pendlePositionRef {
+		return pendlePositionRef{
+			Token: fixture.principal, Kind: pendlePT, PT: fixture.principal,
+			SY: fixture.sy, Expiry: expiry, CreatedBlock: 25_098_960,
+		}
+	}
+
+	t.Run("unexpired PT", func(t *testing.T) {
+		fixture := insolvent(t)
+		component := fixture.onlyComponent(t, fixture.run(t, &stubPendleIndexer{
+			refs:    []pendlePositionRef{principalRef(fixture, 1_795_651_200)},
+			markets: map[common.Address][]common.Address{fixture.principal: {fixture.market}},
+		}))
+		if component.PriceBasis == nil {
+			t.Fatal("the PT was left unpriced")
+		}
+		// 0.989030473175155466 of the asset, then 90% of that.
+		if component.PriceBasis.RatioRaw != "890127425857639919" {
+			t.Fatalf("basis ratio = %s, want the discount impaired by solvency",
+				component.PriceBasis.RatioRaw)
+		}
+	})
+
+	// The case the review called out explicitly: parity at expiry is a property of a solvent SY,
+	// not of expiry, so an expired PT against an impaired SY is worth the factor and not one.
+	t.Run("expired PT", func(t *testing.T) {
+		fixture := insolvent(t)
+		component := fixture.onlyComponent(t, fixture.run(t, &stubPendleIndexer{
+			refs: []pendlePositionRef{principalRef(fixture, fixture.block.Timestamp-1)},
+		}))
+		if component.PriceBasis == nil {
+			t.Fatal("the expired PT was left unpriced")
+		}
+		if component.PriceBasis.RatioRaw != "900000000000000000" {
+			t.Fatalf("basis ratio = %s, want parity impaired by solvency",
+				component.PriceBasis.RatioRaw)
+		}
+	})
+
+	t.Run("YT", func(t *testing.T) {
+		fixture := insolvent(t)
+		component := fixture.onlyComponent(t, fixture.run(t, &stubPendleIndexer{
+			refs: []pendlePositionRef{{
+				Token: fixture.yieldT, Kind: pendleYT, PT: fixture.principal,
+				SY: fixture.sy, Expiry: 1_795_651_200, CreatedBlock: 25_098_960,
+			}},
+			markets: map[common.Address][]common.Address{fixture.principal: {fixture.market}},
+		}))
+		if component.PriceBasis == nil {
+			t.Fatal("the YT was left unpriced")
+		}
+		if component.PriceBasis.RatioRaw != "9872574142360080" {
+			t.Fatalf("basis ratio = %s, want the complement impaired by solvency",
+				component.PriceBasis.RatioRaw)
+		}
+	})
+
+	t.Run("liquidity PT leg", func(t *testing.T) {
+		fixture := insolvent(t)
+		fixture.stub.balances[fixture.market] = big.NewInt(111_565)
+		groups := fixture.run(t, &stubPendleIndexer{
+			refs: []pendlePositionRef{{
+				Token: fixture.market, Kind: pendleLP, PT: fixture.principal,
+				CreatedBlock: 25_098_960,
+			}},
+		})
+		if len(groups) != 1 {
+			t.Fatalf("groups = %#v, want one liquidity group", groups)
+		}
+		var principalLeg *Component
+		for index := range groups[0].Components {
+			if groups[0].Components[index].Token.Address == fixture.principal {
+				principalLeg = &groups[0].Components[index]
+			}
+		}
+		if principalLeg == nil || principalLeg.PriceBasis == nil {
+			t.Fatalf("components = %#v, want a priced PT reserve leg", groups[0].Components)
+		}
+		if principalLeg.PriceBasis.RatioRaw != "890127425857639919" {
+			t.Fatalf("PT leg basis ratio = %s, want the discount impaired by solvency",
+				principalLeg.PriceBasis.RatioRaw)
+		}
+	})
+}
+
+// A yield token that will not report its index leaves the pair unpriced. Defaulting the factor to
+// one would silently assume solvency, which is the assumption that overstates precisely the
+// positions this factor exists to correct.
+func TestPendleUnreadablePYIndexLeavesThePairUnpriced(t *testing.T) {
+	fixture := newPendlePricingFixture(t)
+	delete(fixture.stub.pyIndices, fixture.yieldT)
+	component := fixture.onlyComponent(t, fixture.run(t, &stubPendleIndexer{
+		refs: []pendlePositionRef{{
+			Token: fixture.principal, Kind: pendlePT, PT: fixture.principal,
+			SY: fixture.sy, Expiry: 1_795_651_200, CreatedBlock: 25_098_960,
+		}},
+		markets: map[common.Address][]common.Address{fixture.principal: {fixture.market}},
+	}))
+	if component.Token.Address != fixture.principal {
+		t.Fatalf("component token = %s, want the PT still reported", component.Token.Address)
+	}
+	if component.PriceBasis != nil {
+		t.Fatalf("basis = %#v, want none without a PY index", component.PriceBasis)
 	}
 }
