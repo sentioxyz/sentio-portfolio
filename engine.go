@@ -2,6 +2,7 @@ package portfolio
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -13,10 +14,11 @@ import (
 )
 
 type Engine struct {
-	rpcURLs       map[ChainID]string
-	adapters      []Adapter
-	priceProvider PriceProvider
-	headLagBlocks uint64
+	rpcURLs               map[ChainID]string
+	adapters              []Adapter
+	priceProvider         PriceProvider
+	walletBalanceProvider WalletBalanceProvider
+	headLagBlocks         uint64
 }
 
 // defaultHeadLagBlocks is how far behind the advertised head a live scan pins itself. Four blocks
@@ -28,6 +30,10 @@ const defaultHeadLagBlocks = 4
 // Public source must not provide defaults for private indexer projects.
 type EngineConfig struct {
 	SentioIndexers map[string]SentioIndexerConfig
+	// WalletBalanceProvider discovers live holdings. Amounts from another block are re-read at
+	// the engine's settled RPC pin; fixed-block requests always use the manifest RPC path because
+	// a live discovery service cannot prove historical coverage.
+	WalletBalanceProvider WalletBalanceProvider
 	// HeadLagBlocks overrides how far behind the advertised head a live scan pins itself. Zero
 	// selects defaultHeadLagBlocks; a deployment whose RPC pool is in lockstep may set it to 1.
 	HeadLagBlocks uint64
@@ -126,10 +132,11 @@ func NewEngineWithConfig(
 	)...)
 	adapters = append(adapters, newWalletAdapter())
 	return &Engine{
-		rpcURLs:       rpcURLs,
-		adapters:      adapters,
-		priceProvider: priceProvider,
-		headLagBlocks: config.headLagBlocks(),
+		rpcURLs:               rpcURLs,
+		adapters:              adapters,
+		priceProvider:         priceProvider,
+		walletBalanceProvider: config.WalletBalanceProvider,
+		headLagBlocks:         config.headLagBlocks(),
 	}
 }
 
@@ -142,9 +149,11 @@ func (e *Engine) Protocols() []ProtocolInfo {
 }
 
 type chainScan struct {
-	client   *RPCClient
-	block    BlockRef
-	accounts []attributedAccount
+	client                 *RPCClient
+	block                  BlockRef
+	accounts               []attributedAccount
+	walletProviderAccounts map[common.Address]walletProviderAccount
+	walletProviderErrors   []error
 }
 
 func attributedGroups(
@@ -261,6 +270,9 @@ func (e *Engine) ScanWithOptions(
 		}(chainID)
 	}
 	wait.Wait()
+	if options.includesProtocol(walletProtocolID) {
+		configureLiveWalletBalances(ctx, e.walletBalanceProvider, address, chains)
+	}
 	defer func() {
 		for _, chain := range chains {
 			chain.client.Close()
@@ -300,15 +312,34 @@ func (e *Engine) ScanWithOptions(
 				groups := make([]Group, 0)
 				var positionErr error
 				for _, account := range chain.accounts {
-					accountGroups, err := job.adapter.Positions(
-						ctx,
-						chain.client,
-						chain.block,
-						account.Address,
-					)
+					var accountGroups []Group
+					var err error
+					providerAccount, useProvider := chain.walletProviderAccounts[account.Address]
+					if info.ID == walletProtocolID && useProvider {
+						accountGroups, err = providerWalletGroups(
+							ctx,
+							chain.client,
+							chain.block,
+							job.chainID,
+							account.Address,
+							providerAccount,
+						)
+					} else {
+						accountGroups, err = job.adapter.Positions(
+							ctx,
+							chain.client,
+							chain.block,
+							account.Address,
+						)
+					}
 					groups = append(groups, attributedGroups(accountGroups, account, address)...)
 					if err != nil {
-						positionErr = err
+						positionErr = errors.Join(positionErr, err)
+						// Wallet holdings are independent per account, so one malformed or failed
+						// account must not discard holdings attributed to the remaining accounts.
+						if info.ID == walletProtocolID {
+							continue
+						}
 						break
 					}
 				}
@@ -321,6 +352,20 @@ func (e *Engine) ScanWithOptions(
 						ProtocolName: info.Name,
 						Message:      PublicError(positionErr),
 					})
+				}
+				if info.ID == walletProtocolID {
+					// Provider partial failures are independent observations. Keep each one as a
+					// separate scan error instead of errors.Join, whose newline-delimited tail is
+					// intentionally removed by PublicError at the service boundary.
+					for _, providerErr := range chain.walletProviderErrors {
+						response.Errors = append(response.Errors, ScanError{
+							Scope:        "protocol",
+							ChainID:      job.chainID,
+							ProtocolID:   info.ID,
+							ProtocolName: info.Name,
+							Message:      PublicError(providerErr),
+						})
+					}
 				}
 				if len(groups) > 0 {
 					response.Snapshots = append(response.Snapshots, Snapshot{

@@ -5,16 +5,29 @@ positions on Ethereum, BSC, Base, and Arbitrum. It owns protocol adapters,
 latest/fixed-block RPC reads, account attribution, index-backed position reads,
 and valuation aggregation.
 
-Plain holdings — the native coin and the listed ERC-20s an account holds outside
-any protocol — are reported by the `wallet` adapter from `wallet-tokens.json`.
-A token an adapter already reads as a position is never counted twice.
+Plain holdings — the native coin and ERC-20s an account holds outside any
+protocol — are reported by the `wallet` adapter. For live scans a host-injected,
+provider-neutral `WalletBalanceProvider` discovers tokens and supplies metadata.
+The RPC-settled block remains authoritative: provider amounts are used directly
+only when their block number and hash match it; otherwise every discovered
+balance is re-read at that settled block and discovery is unioned with the
+generated `wallet-tokens.json` manifest. Fixed-block scans and missing provider
+results also use that manifest. This pins every reported quantity and preserves
+the previous curated coverage baseline, but a live discovery API without a
+historical selector cannot prove the complete long-tail token universe at an
+earlier settled block: a token cleared before the live sample and absent from
+the manifest may be omitted. A token an adapter already reads as a position is
+never counted twice, and final USD valuation always comes from the host's
+`PriceProvider`.
 
 The repository deliberately does not own an HTTP or gRPC API, protobufs,
 deployment configuration, authentication, or a concrete price service. A host
 constructs `Engine` with chain RPC URLs and a `PriceProvider` implementation.
 
 ```go
-engine := portfolio.NewEngine(rpcURLs, priceProvider)
+engine := portfolio.NewEngineWithConfig(rpcURLs, priceProvider, portfolio.EngineConfig{
+    WalletBalanceProvider: walletBalanceProvider,
+})
 result := engine.Scan(ctx, account)
 ```
 

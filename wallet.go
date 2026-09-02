@@ -108,11 +108,13 @@ func mustWalletTokenManifest() walletTokenManifest {
 	return manifest
 }
 
-// WalletAdapter reports the coins an account simply holds: the native coin and the listed
-// ERC-20s, none of which belongs to a protocol position.
+// WalletAdapter reports the coins an account simply holds: the native coin and ERC-20s, none of
+// which belongs to a protocol position.
 //
-// Holdings deliberately do not chase the long tail. The manifest is the set of tokens CoinQuote
-// prices, so a scan returns balances it can value instead of a wider list of amounts it cannot.
+// tokens is the generated baseline manifest used by fixed-block scans, whenever the live holding
+// provider has no result for an account or chain, and as a coverage-preserving union when provider
+// discovery is newer than the settled pin. Live provider discovery is orchestrated by engine.go
+// because its block relationship decides whether amounts can be used or must be re-read.
 type WalletAdapter struct {
 	adapterBase
 	tokens map[ChainID][]walletTokenEntry
@@ -139,9 +141,9 @@ func newWalletAdapter() *WalletAdapter {
 	}
 }
 
-// Positions reads the native balance and the listed token balances. The two surfaces are
-// independent: a failure in one keeps whatever the other verified, which is the behaviour
-// adapter.go documents and engine.go relies on.
+// Positions is the exact RPC fallback: it reads the native balance and the listed manifest token
+// balances at block. The two surfaces are independent: a failure in one keeps whatever the other
+// verified, which is the behaviour adapter.go documents and engine.go relies on.
 func (a *WalletAdapter) Positions(
 	ctx context.Context,
 	client *RPCClient,
