@@ -19,8 +19,19 @@ single processor:
 
 ## Wallet holdings
 
-`wallet-tokens.json` is the list of assets the `wallet` adapter reads, and it is
-generated rather than hand-edited. Two rules decide what belongs in it:
+For live scans, a host-injected `WalletBalanceProvider` discovers holdings and
+supplies token metadata. It is a discovery layer, not the source of the scan's
+block: the existing RPC-settled block remains authoritative. Provider amounts
+may be used only when the provider block number and hash exactly match that
+settled pin. A newer provider block is expected; in that case re-read native and
+every discovered ERC-20 `balanceOf` at the settled block, including provider
+rows whose reported amount is zero, and union those addresses with the chain's
+manifest tokens. Never label a latest provider amount with the earlier settled
+`BlockRef`.
+
+`wallet-tokens.json` is the generated fallback list used by fixed-block scans and
+for accounts or networks the live provider did not return. It is generated rather
+than hand-edited. Two rules decide what belongs in it:
 
 - **every token must be quotable by the host's price provider.** The kernel has no
   price service, so an unquotable token is not extra coverage — it reports an amount
@@ -33,8 +44,23 @@ generated rather than hand-edited. Two rules decide what belongs in it:
   wallet balance must keep the contract it read in `Source.Contract` — that field is
   what stops the same balance being counted twice.
 
-Holdings do not chase the long tail: a curated list that can be priced beats a
-wider list of amounts with no value.
+Provider token metadata can be absent even on a successful row. Filter zero
+amounts before enrichment when blocks match. When blocks differ, first re-read
+the discovered balance at the settled pin, then enrich only non-zero results:
+prefer committed manifest metadata by chain and address, otherwise read
+`symbol` and `decimals` at that same block (including the bytes32 symbol fallback).
+Never guess either field.
+
+The holdings provider is not a price source for the kernel. The host may need to
+accept or ignore prices present in its transport response, but `PriceProvider`
+remains the only input to `Response.Prices`, `Component.PriceUSD`, and valuation.
+
+Pinned quantities do not prove a historically complete token universe. A live
+discovery service without a historical selector cannot reveal a long-tail token
+that was held at the settled pin but cleared before the provider's newer sample.
+The manifest union preserves the old curated baseline; any additional discovered
+tokens extend it, but the response must not claim complete historical long-tail
+coverage.
 
 ## Pricing a token nothing quotes
 

@@ -59,6 +59,7 @@ go_library(
         "venus.go",
         "vesper.go",
         "wallet.go",
+        "wallet_provider.go",
         "yearn_v3.go",
     ],
     embedsrcs = [
@@ -119,6 +120,7 @@ go_test(
         "valuation_test.go",
         "vesper_test.go",
         "wallet_test.go",
+        "wallet_provider_test.go",
         "yearn_v3_test.go",
     ],
     embed = [":portfolio"],
