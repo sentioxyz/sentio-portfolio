@@ -13,6 +13,12 @@ var instadappListABI = MustABI(`[
   {"type":"function","name":"accountAddr","stateMutability":"view","inputs":[{"name":"accountId","type":"uint64"}],"outputs":[{"type":"address"}]}
 ]`)
 
+var (
+	instadappList = common.HexToAddress("0x4c8a1BEb8a87765788946D6B19C6C6355194AbEb")
+	// First canonical block with code, established by archive eth_getCode binary search.
+	instadappListDeployment = deploymentWindow{ActivationBlock: 9_747_258}
+)
+
 type attributedAccount struct {
 	Address     common.Address
 	Attribution string
@@ -26,11 +32,10 @@ func resolveAccountScope(
 	owner common.Address,
 ) ([]attributedAccount, error) {
 	direct := attributedAccount{Address: owner, Attribution: "wallet", Source: "direct"}
-	if block.ChainID != Ethereum {
+	if block.ChainID != Ethereum || !instadappListDeployment.ActiveAt(block.Number) {
 		return []attributedAccount{direct}, nil
 	}
-	list := common.HexToAddress("0x4c8a1BEb8a87765788946D6B19C6C6355194AbEb")
-	header, err := client.Call(ctx, block, list, instadappListABI, "userLink", owner)
+	header, err := client.Call(ctx, block, instadappList, instadappListABI, "userLink", owner)
 	if err != nil {
 		return nil, fmt.Errorf("enumerate Instadapp accounts: %w", err)
 	}
@@ -74,13 +79,13 @@ func resolveAccountScope(
 		seenIDs[current] = struct{}{}
 		rows, err := client.ParallelCalls(ctx, block, []ContractCall{
 			{
-				Contract: list,
+				Contract: instadappList,
 				ABI:      instadappListABI,
 				Method:   "accountAddr",
 				Args:     []any{current},
 			},
 			{
-				Contract: list,
+				Contract: instadappList,
 				ABI:      instadappListABI,
 				Method:   "userList",
 				Args:     []any{owner, current},
