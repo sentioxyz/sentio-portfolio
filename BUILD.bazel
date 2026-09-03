@@ -42,6 +42,7 @@ go_library(
         "pendle.go",
         "pendle_indexer.go",
         "pricing.go",
+        "protocol_availability.go",
         "receipt.go",
         "renzo.go",
         "request_indexer.go",
@@ -94,6 +95,8 @@ go_test(
         "beefy_test.go",
         "curve_test.go",
         "debank_sweep_reconciliation_live_test.go",
+        "deployment_live_test.go",
+        "deployment_registry_test.go",
         "deployment_test.go",
         "engine_test.go",
         "euler_v2_deployment_window_test.go",
@@ -130,5 +133,6 @@ go_test(
         "@com_github_ethereum_go_ethereum//accounts/abi",
         "@com_github_ethereum_go_ethereum//common",
         "@com_github_ethereum_go_ethereum//common/hexutil",
+        "@com_github_ethereum_go_ethereum//rpc",
     ],
 )

@@ -137,13 +137,17 @@ type venusRewardSummary struct {
 }
 
 type venusDeployment struct {
-	PoolRegistry    common.Address
-	PoolLens        common.Address
-	XVSVault        common.Address
-	WrappedNative   Token
-	Core            *compoundV2Deployment
-	CoreRewardsLens common.Address
-	VAI             *Token
+	PoolRegistry       common.Address
+	PoolRegistryWindow availabilityWindow
+	PoolLens           common.Address
+	PoolLensWindow     availabilityWindow
+	XVSVault           common.Address
+	XVSVaultWindow     availabilityWindow
+	WrappedNative      Token
+	Core               *compoundV2Deployment
+	CoreRewardsLens    common.Address
+	CoreRewardsWindow  availabilityWindow
+	VAI                *Token
 }
 
 type VenusAdapter struct {
@@ -159,7 +163,8 @@ func newVenusAdapter() Adapter {
 		18,
 	)
 	bscCore := compoundV2Deployment{
-		Comptroller: common.HexToAddress("0xfD36E2c2a6789Db23113685031d7F16329158384"),
+		Comptroller:       common.HexToAddress("0xfD36E2c2a6789Db23113685031d7F16329158384"),
+		ComptrollerWindow: availableFrom(2_471_694),
 		WrappedNative: token(
 			BSC,
 			"0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
@@ -176,31 +181,44 @@ func newVenusAdapter() Adapter {
 		}},
 		deployments: map[ChainID]venusDeployment{
 			Ethereum: {
-				PoolRegistry:  common.HexToAddress("0x61CAff113CCaf05FFc6540302c37adcf077C5179"),
-				PoolLens:      common.HexToAddress("0x277950603178BDD223eB53B9b7cF5D0053aa3473"),
-				XVSVault:      common.HexToAddress("0xA0882C2D5DF29233A092d2887A258C2b90e9b994"),
-				WrappedNative: token(Ethereum, "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", "ETH", 18),
+				PoolRegistry:       common.HexToAddress("0x61CAff113CCaf05FFc6540302c37adcf077C5179"),
+				PoolRegistryWindow: availableFrom(18_968_019),
+				PoolLens:           common.HexToAddress("0x277950603178BDD223eB53B9b7cF5D0053aa3473"),
+				PoolLensWindow:     availableFrom(22_886_599),
+				XVSVault:           common.HexToAddress("0xA0882C2D5DF29233A092d2887A258C2b90e9b994"),
+				XVSVaultWindow:     availableFrom(18_890_246),
+				WrappedNative:      token(Ethereum, "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", "ETH", 18),
 			},
 			BSC: {
-				PoolRegistry:    common.HexToAddress("0x9F7b01A536aFA00EF10310A162877fd792cD0666"),
-				PoolLens:        common.HexToAddress("0x9459a33c0a4EAd7794497Da85867859CdB06aCc5"),
-				XVSVault:        common.HexToAddress("0x051100480289e704d20e9DB4804837068f3f9204"),
-				WrappedNative:   bscCore.WrappedNative,
-				Core:            &bscCore,
-				CoreRewardsLens: common.HexToAddress("0xe797804c5d4410777c70EF8769c4eB9C39BEF662"),
-				VAI:             &bscVAI,
+				PoolRegistry:       common.HexToAddress("0x9F7b01A536aFA00EF10310A162877fd792cD0666"),
+				PoolRegistryWindow: availableFrom(29_335_016),
+				PoolLens:           common.HexToAddress("0x9459a33c0a4EAd7794497Da85867859CdB06aCc5"),
+				PoolLensWindow:     availableFrom(70_345_534),
+				XVSVault:           common.HexToAddress("0x051100480289e704d20e9DB4804837068f3f9204"),
+				XVSVaultWindow:     availableFrom(13_019_089),
+				WrappedNative:      bscCore.WrappedNative,
+				Core:               &bscCore,
+				CoreRewardsLens:    common.HexToAddress("0xe797804c5d4410777c70EF8769c4eB9C39BEF662"),
+				CoreRewardsWindow:  availableFrom(105_725_871),
+				VAI:                &bscVAI,
 			},
 			Base: {
-				PoolRegistry:  common.HexToAddress("0xeef902918DdeCD773D4B422aa1C6e1673EB9136F"),
-				PoolLens:      common.HexToAddress("0x89825677fb4845f5Fc0B227e387455ECa1200058"),
-				XVSVault:      common.HexToAddress("0x708B54F2C3f3606ea48a8d94dab88D9Ab22D7fCd"),
-				WrappedNative: token(Base, "0x4200000000000000000000000000000000000006", "ETH", 18),
+				PoolRegistry:       common.HexToAddress("0xeef902918DdeCD773D4B422aa1C6e1673EB9136F"),
+				PoolRegistryWindow: availableFrom(23_344_365),
+				PoolLens:           common.HexToAddress("0x89825677fb4845f5Fc0B227e387455ECa1200058"),
+				PoolLensWindow:     availableFrom(23_344_435),
+				XVSVault:           common.HexToAddress("0x708B54F2C3f3606ea48a8d94dab88D9Ab22D7fCd"),
+				XVSVaultWindow:     availableFrom(23_341_263),
+				WrappedNative:      token(Base, "0x4200000000000000000000000000000000000006", "ETH", 18),
 			},
 			Arbitrum: {
-				PoolRegistry:  common.HexToAddress("0x382238f07Bc4Fe4aA99e561adE8A4164b5f815DA"),
-				PoolLens:      common.HexToAddress("0x53F34FF95367B2A4542461a6A63fD321F8da22AD"),
-				XVSVault:      common.HexToAddress("0x8b79692AAB2822Be30a6382Eb04763A74752d5B4"),
-				WrappedNative: token(Arbitrum, "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1", "ETH", 18),
+				PoolRegistry:       common.HexToAddress("0x382238f07Bc4Fe4aA99e561adE8A4164b5f815DA"),
+				PoolRegistryWindow: availableFrom(216_184_381),
+				PoolLens:           common.HexToAddress("0x53F34FF95367B2A4542461a6A63fD321F8da22AD"),
+				PoolLensWindow:     availableFrom(216_184_982),
+				XVSVault:           common.HexToAddress("0x8b79692AAB2822Be30a6382Eb04763A74752d5B4"),
+				XVSVaultWindow:     availableFrom(215_551_349),
+				WrappedNative:      token(Arbitrum, "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1", "ETH", 18),
 			},
 		},
 	}
@@ -491,31 +509,35 @@ func (a *VenusAdapter) Positions(
 		return nil, nil
 	}
 
-	poolResult, err := client.Call(
-		ctx,
-		block,
-		deployment.PoolRegistry,
-		venusPoolRegistryABI,
-		"getAllPools",
-	)
-	if err != nil {
-		return nil, fmt.Errorf("enumerate isolated pools: %w", err)
-	}
-	if len(poolResult) != 1 {
-		return nil, fmt.Errorf("getAllPools returned %d fields", len(poolResult))
-	}
-	converted := abi.ConvertType(poolResult[0], new([]venusPool))
-	pools, ok := converted.(*[]venusPool)
-	if !ok || pools == nil {
-		return nil, fmt.Errorf("unexpected pool registry type %T", poolResult[0])
-	}
-	if len(*pools) > 128 {
-		return nil, fmt.Errorf("isolated pool count %d exceeds safety bound", len(*pools))
+	pools := make([]venusPool, 0)
+	if deployment.PoolRegistryWindow.ActiveAt(block.Number) {
+		poolResult, err := client.Call(
+			ctx,
+			block,
+			deployment.PoolRegistry,
+			venusPoolRegistryABI,
+			"getAllPools",
+		)
+		if err != nil {
+			return nil, fmt.Errorf("enumerate isolated pools: %w", err)
+		}
+		if len(poolResult) != 1 {
+			return nil, fmt.Errorf("getAllPools returned %d fields", len(poolResult))
+		}
+		converted := abi.ConvertType(poolResult[0], new([]venusPool))
+		decoded, decodedOK := converted.(*[]venusPool)
+		if !decodedOK || decoded == nil {
+			return nil, fmt.Errorf("unexpected pool registry type %T", poolResult[0])
+		}
+		pools = *decoded
+		if len(pools) > 128 {
+			return nil, fmt.Errorf("isolated pool count %d exceeds safety bound", len(pools))
+		}
 	}
 
-	comptrollers := make([]common.Address, 0, len(*pools))
-	marketCalls := make([]ContractCall, 0, len(*pools))
-	for _, pool := range *pools {
+	comptrollers := make([]common.Address, 0, len(pools))
+	marketCalls := make([]ContractCall, 0, len(pools))
+	for _, pool := range pools {
 		comptrollers = append(comptrollers, pool.Comptroller)
 		marketCalls = append(marketCalls, ContractCall{
 			Contract: pool.Comptroller,
@@ -547,7 +569,7 @@ func (a *VenusAdapter) Positions(
 	}
 
 	groups := make([]Group, 0)
-	if deployment.Core != nil {
+	if deployment.Core != nil && deployment.Core.ComptrollerWindow.ActiveAt(block.Number) {
 		coreMarketResult, coreErr := client.Call(
 			ctx,
 			block,
@@ -599,7 +621,9 @@ func (a *VenusAdapter) Positions(
 		groups = append(groups, *isolatedGroup)
 	}
 
-	if deployment.Core != nil && deployment.CoreRewardsLens != (common.Address{}) {
+	if deployment.Core != nil && deployment.Core.ComptrollerWindow.ActiveAt(block.Number) &&
+		deployment.CoreRewardsLens != (common.Address{}) &&
+		deployment.CoreRewardsWindow.ActiveAt(block.Number) {
 		coreReward, rewardErr := venusCoreRewardGroup(
 			ctx,
 			client,
@@ -615,34 +639,39 @@ func (a *VenusAdapter) Positions(
 			groups = append(groups, *coreReward)
 		}
 	}
-	isolatedReward, err := venusIsolatedRewardGroup(
-		ctx,
-		client,
-		block,
-		deployment.PoolLens,
-		comptrollers,
-		account,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("isolated rewards: %w", err)
-	}
-	if isolatedReward != nil {
-		groups = append(groups, *isolatedReward)
+	if deployment.PoolLensWindow.ActiveAt(block.Number) {
+		isolatedReward, err := venusIsolatedRewardGroup(
+			ctx,
+			client,
+			block,
+			deployment.PoolLens,
+			comptrollers,
+			account,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("isolated rewards: %w", err)
+		}
+		if isolatedReward != nil {
+			groups = append(groups, *isolatedReward)
+		}
 	}
 
-	vaultGroups, err := venusVaultGroups(
-		ctx,
-		client,
-		block,
-		deployment.XVSVault,
-		account,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("XVS vault: %w", err)
+	if deployment.XVSVaultWindow.ActiveAt(block.Number) {
+		vaultGroups, err := venusVaultGroups(
+			ctx,
+			client,
+			block,
+			deployment.XVSVault,
+			account,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("XVS vault: %w", err)
+		}
+		groups = append(groups, vaultGroups...)
 	}
-	groups = append(groups, vaultGroups...)
 
-	if deployment.Core != nil && deployment.VAI != nil {
+	if deployment.Core != nil && deployment.Core.ComptrollerWindow.ActiveAt(block.Number) &&
+		deployment.VAI != nil {
 		vaiResult, vaiErr := client.Call(
 			ctx,
 			block,

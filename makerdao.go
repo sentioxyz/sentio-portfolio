@@ -67,6 +67,13 @@ var makerDeployment = struct {
 	MaximumVaultsPerOwner: 1_024,
 }
 
+var (
+	// Savings became safely queryable once both Pot and DSRManager exposed the
+	// views used below. Vault collateral metadata depends on the later IlkRegistry.
+	makerSavingsWindow = availableFrom(10_091_068)
+	makerVaultWindow   = availableFrom(12_251_955)
+)
+
 type MakerDAOAdapter struct{ adapterBase }
 
 type makerVault struct {
@@ -441,24 +448,33 @@ func (a *MakerDAOAdapter) Positions(
 	if block.ChainID != Ethereum {
 		return nil, nil
 	}
+	if !makerSavingsWindow.ActiveAt(block.Number) && !makerVaultWindow.ActiveAt(block.Number) {
+		return nil, nil
+	}
 	owners, err := makerPositionOwners(ctx, client, block, account)
 	if err != nil {
 		return nil, err
 	}
-	vaults, err := makerVaults(ctx, client, block, owners)
-	if err != nil {
-		return nil, err
+	groups := make([]Group, 0)
+	if makerVaultWindow.ActiveAt(block.Number) {
+		vaults, vaultErr := makerVaults(ctx, client, block, owners)
+		if vaultErr != nil {
+			return nil, vaultErr
+		}
+		vaultGroups, vaultErr := makerVaultGroups(ctx, client, block, vaults)
+		if vaultErr != nil {
+			return nil, vaultErr
+		}
+		groups = append(groups, vaultGroups...)
 	}
-	groups, err := makerVaultGroups(ctx, client, block, vaults)
-	if err != nil {
-		return nil, err
-	}
-	savings, err := makerSavingsGroup(ctx, client, block, owners)
-	if err != nil {
-		return nil, err
-	}
-	if savings != nil {
-		groups = append(groups, *savings)
+	if makerSavingsWindow.ActiveAt(block.Number) {
+		savings, savingsErr := makerSavingsGroup(ctx, client, block, owners)
+		if savingsErr != nil {
+			return nil, savingsErr
+		}
+		if savings != nil {
+			groups = append(groups, *savings)
+		}
 	}
 	return groups, nil
 }

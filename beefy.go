@@ -18,15 +18,19 @@ var beefyVaultABI = MustABI(`[
 ]`)
 
 type beefyManifestVault struct {
-	ChainID   ChainID        `json:"chainId"`
-	ID        string         `json:"id"`
-	Name      string         `json:"name"`
-	Vault     common.Address `json:"vault"`
-	Asset     common.Address `json:"asset"`
-	Symbol    string         `json:"symbol"`
-	Decimals  uint8          `json:"decimals"`
-	CreatedAt uint64         `json:"createdAt"`
-	Status    string         `json:"status"`
+	ChainID  ChainID        `json:"chainId"`
+	ID       string         `json:"id"`
+	Name     string         `json:"name"`
+	Vault    common.Address `json:"vault"`
+	Asset    common.Address `json:"asset"`
+	Symbol   string         `json:"symbol"`
+	Decimals uint8          `json:"decimals"`
+	// CreatedAt is upstream provenance metadata, not a deployment boundary.
+	CreatedAt uint64 `json:"createdAt"`
+	// ActivationBlock is the first block where balanceOf and
+	// getPricePerFullShare are both safe for this adapter.
+	ActivationBlock uint64 `json:"activationBlock"`
+	Status          string `json:"status"`
 }
 
 type beefyManifest struct {
@@ -47,14 +51,15 @@ func mustBeefyManifest() beefyManifest {
 	if err := json.Unmarshal(beefyManifestJSON, &manifest); err != nil {
 		panic(fmt.Errorf("decode Beefy manifest: %w", err))
 	}
-	if manifest.Version != 1 || manifest.GeneratedAt == "" || manifest.Source == "" || manifest.Scope == "" || len(manifest.Vaults) == 0 {
+	if manifest.Version != 2 || manifest.GeneratedAt == "" || manifest.Source == "" || manifest.Scope == "" || len(manifest.Vaults) == 0 {
 		panic(fmt.Errorf("invalid Beefy manifest version=%d vaults=%d", manifest.Version, len(manifest.Vaults)))
 	}
 	seen := make(map[ChainID]map[common.Address]struct{})
 	for _, vault := range manifest.Vaults {
 		if !supportsChain(SupportedChainIDs, vault.ChainID) || vault.ID == "" || vault.Name == "" ||
 			vault.Vault == (common.Address{}) || vault.Asset == (common.Address{}) || vault.Symbol == "" ||
-			vault.CreatedAt == 0 || (vault.Status != "active" && vault.Status != "eol") {
+			vault.CreatedAt == 0 || vault.ActivationBlock == 0 ||
+			(vault.Status != "active" && vault.Status != "eol") {
 			panic(fmt.Sprintf("invalid Beefy vault entry %q on chain %d", vault.ID, vault.ChainID))
 		}
 		if seen[vault.ChainID] == nil {
@@ -89,10 +94,10 @@ func newBeefyAdapter() Adapter {
 	}
 }
 
-func activeBeefyVaults(vaults []beefyManifestVault, timestamp uint64) []beefyManifestVault {
+func activeBeefyVaults(vaults []beefyManifestVault, block uint64) []beefyManifestVault {
 	active := make([]beefyManifestVault, 0, len(vaults))
 	for _, vault := range vaults {
-		if vault.CreatedAt <= timestamp {
+		if vault.ActivationBlock <= block {
 			active = append(active, vault)
 		}
 	}
@@ -109,7 +114,7 @@ func (a *BeefyAdapter) Positions(
 	block BlockRef,
 	account common.Address,
 ) ([]Group, error) {
-	vaults := activeBeefyVaults(a.vaults[block.ChainID], block.Timestamp)
+	vaults := activeBeefyVaults(a.vaults[block.ChainID], block.Number)
 	if len(vaults) == 0 {
 		return nil, nil
 	}

@@ -16,6 +16,7 @@ import (
 type Engine struct {
 	rpcURLs               map[ChainID]string
 	adapters              []Adapter
+	registrations         map[string]registeredAdapter
 	priceProvider         PriceProvider
 	walletBalanceProvider WalletBalanceProvider
 	headLagBlocks         uint64
@@ -131,9 +132,11 @@ func NewEngineWithConfig(
 		config.sentioIndexer("uniswap-v4"),
 	)...)
 	adapters = append(adapters, newWalletAdapter())
+	registrations := mustRegisterAdapters(adapters, protocolAvailabilityByID)
 	return &Engine{
 		rpcURLs:               rpcURLs,
 		adapters:              adapters,
+		registrations:         registrations,
 		priceProvider:         priceProvider,
 		walletBalanceProvider: config.WalletBalanceProvider,
 		headLagBlocks:         config.headLagBlocks(),
@@ -280,7 +283,7 @@ func (e *Engine) ScanWithOptions(
 	}()
 
 	type deployment struct {
-		adapter Adapter
+		registeredAdapter
 		chainID ChainID
 	}
 	deployments := make([]deployment, 0)
@@ -289,11 +292,18 @@ func (e *Engine) ScanWithOptions(
 		if !options.includesProtocol(info.ID) {
 			continue
 		}
+		registration, exists := e.registrations[info.ID]
+		if !exists {
+			panic(fmt.Sprintf("adapter %q is missing its validated availability", info.ID))
+		}
 		for _, chainID := range info.Chains {
 			if !options.includesChain(chainID) {
 				continue
 			}
-			deployments = append(deployments, deployment{adapter: adapter, chainID: chainID})
+			deployments = append(deployments, deployment{
+				registeredAdapter: registration,
+				chainID:           chainID,
+			})
 		}
 	}
 	jobs := make(chan deployment)
@@ -307,7 +317,10 @@ func (e *Engine) ScanWithOptions(
 				if chain == nil {
 					continue
 				}
-				info := job.adapter.Info()
+				info := job.Info()
+				if !job.ActiveAt(job.chainID, chain.block.Number) {
+					continue
+				}
 				startedAt := time.Now()
 				groups := make([]Group, 0)
 				var positionErr error
@@ -325,7 +338,7 @@ func (e *Engine) ScanWithOptions(
 							providerAccount,
 						)
 					} else {
-						accountGroups, err = job.adapter.Positions(
+						accountGroups, err = job.Positions(
 							ctx,
 							chain.client,
 							chain.block,
