@@ -19,6 +19,10 @@ var (
 		18,
 	)
 	rocketRPLToken = token(Ethereum, rocketRPLAddress.Hex(), "RPL", 18)
+	// The token registry and rETH conversion views were initialized before the
+	// node-staking view used by this adapter's current ABI.
+	rocketTokenWindow = availableFrom(13_325_532)
+	rocketNodeWindow  = availableFrom(24_479_994)
 )
 
 var rocketStorageABI = MustABI(`[
@@ -57,12 +61,14 @@ func resolveRocketPoolContracts(
 	ctx context.Context,
 	client *RPCClient,
 	block BlockRef,
+	includeNodeContracts bool,
 ) (common.Address, common.Address, error) {
 	names := []string{
 		"rocketTokenRETH",
 		"rocketTokenRPL",
-		"rocketNodeManager",
-		"rocketNodeStaking",
+	}
+	if includeNodeContracts {
+		names = append(names, "rocketNodeManager", "rocketNodeStaking")
 	}
 	calls := make([]ContractCall, len(names))
 	for index, name := range names {
@@ -97,6 +103,9 @@ func resolveRocketPoolContracts(
 			addresses[1],
 		)
 	}
+	if !includeNodeContracts {
+		return common.Address{}, common.Address{}, nil
+	}
 	return addresses[2], addresses[3], nil
 }
 
@@ -106,32 +115,33 @@ func (a *RocketPoolAdapter) Positions(
 	block BlockRef,
 	account common.Address,
 ) ([]Group, error) {
-	nodeManager, nodeStaking, err := resolveRocketPoolContracts(ctx, client, block)
+	if block.ChainID != Ethereum || !rocketTokenWindow.ActiveAt(block.Number) {
+		return nil, nil
+	}
+	nodeActive := rocketNodeWindow.ActiveAt(block.Number)
+	nodeManager, nodeStaking, err := resolveRocketPoolContracts(ctx, client, block, nodeActive)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := client.ParallelCalls(ctx, block, []ContractCall{
-		{
-			Contract: rocketRETHAddress,
-			ABI:      rocketRETHABI,
-			Method:   "balanceOf",
-			Args:     []any{account},
-		},
-		{
+	calls := []ContractCall{{
+		Contract: rocketRETHAddress,
+		ABI:      rocketRETHABI,
+		Method:   "balanceOf",
+		Args:     []any{account},
+	}}
+	if nodeActive {
+		calls = append(calls, ContractCall{
 			Contract: nodeManager,
 			ABI:      rocketNodeManagerABI,
 			Method:   "getNodeExists",
 			Args:     []any{account},
-		},
-	})
+		})
+	}
+	rows, err := client.ParallelCalls(ctx, block, calls)
 	if err != nil {
 		return nil, err
 	}
 	rethBalance, err := BigIntAt(rows[0], 0)
-	if err != nil {
-		return nil, err
-	}
-	nodeExists, err := BoolAt(rows[1], 0)
 	if err != nil {
 		return nil, err
 	}
@@ -165,6 +175,13 @@ func (a *RocketPoolAdapter) Positions(
 			Label:      "Rocket Pool rETH",
 			Components: []Component{component},
 		})
+	}
+	if !nodeActive {
+		return groups, nil
+	}
+	nodeExists, err := BoolAt(rows[1], 0)
+	if err != nil {
+		return nil, err
 	}
 	if !nodeExists {
 		return groups, nil

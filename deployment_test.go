@@ -1,6 +1,7 @@
 package portfolio
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -23,6 +24,83 @@ func TestDeploymentWindowBoundaries(t *testing.T) {
 	}
 	if !(deploymentWindow{ActivationBlock: 100}).ActiveAt(1_000_000) {
 		t.Fatal("open-ended deployment is not active after activation")
+	}
+}
+
+func requireAvailabilityBoundary(t *testing.T, name string, window availabilityWindow) {
+	t.Helper()
+	if !window.configured {
+		t.Fatalf("%s availability is not configured", name)
+	}
+	start := window.deploymentWindow.ActivationBlock
+	if start == 0 {
+		t.Fatalf("%s unexpectedly starts at genesis", name)
+	}
+	if window.ActiveAt(start - 1) {
+		t.Fatalf("%s is active before block %d", name, start)
+	}
+	if !window.ActiveAt(start) {
+		t.Fatalf("%s is inactive at block %d", name, start)
+	}
+}
+
+func TestCompoundV2ComponentAvailabilityIsExplicit(t *testing.T) {
+	for _, candidate := range compoundV2Adapters() {
+		adapter := candidate.(*CompoundV2Adapter)
+		for chainID, deployment := range adapter.deployments {
+			prefix := fmt.Sprintf("%s chain %d", adapter.Info().ID, chainID)
+			requireAvailabilityBoundary(t, prefix+" comptroller", deployment.ComptrollerWindow)
+			if deployment.RewardLens != (common.Address{}) {
+				requireAvailabilityBoundary(t, prefix+" reward lens", deployment.RewardLensWindow)
+			}
+			if deployment.MultiRewardDistributor != (common.Address{}) {
+				requireAvailabilityBoundary(t, prefix+" multi reward distributor", deployment.MultiRewardWindow)
+			}
+			for index, module := range deployment.StakingModules {
+				requireAvailabilityBoundary(
+					t,
+					fmt.Sprintf("%s staking module %d", prefix, index),
+					module.Window,
+				)
+			}
+		}
+	}
+}
+
+func TestVenusComponentAvailabilityIsExplicit(t *testing.T) {
+	adapter := newVenusAdapter().(*VenusAdapter)
+	for chainID, deployment := range adapter.deployments {
+		prefix := fmt.Sprintf("Venus chain %d", chainID)
+		requireAvailabilityBoundary(t, prefix+" pool registry", deployment.PoolRegistryWindow)
+		requireAvailabilityBoundary(t, prefix+" pool lens", deployment.PoolLensWindow)
+		requireAvailabilityBoundary(t, prefix+" XVS vault", deployment.XVSVaultWindow)
+		if deployment.Core != nil {
+			requireAvailabilityBoundary(t, prefix+" core", deployment.Core.ComptrollerWindow)
+		}
+		if deployment.CoreRewardsLens != (common.Address{}) {
+			requireAvailabilityBoundary(t, prefix+" core rewards", deployment.CoreRewardsWindow)
+		}
+	}
+}
+
+func TestNewlyGatedProtocolComponentBoundaries(t *testing.T) {
+	for name, window := range map[string]availabilityWindow{
+		"Fraxlend registry":  fraxlendRegistryWindow,
+		"Maker savings":      makerSavingsWindow,
+		"Maker vaults":       makerVaultWindow,
+		"Rocket Pool tokens": rocketTokenWindow,
+		"Rocket Pool nodes":  rocketNodeWindow,
+	} {
+		requireAvailabilityBoundary(t, name, window)
+	}
+
+	adapter := lstAdapters()[0].(*ConvertedBalanceAdapter)
+	position := adapter.positions[Ethereum][0]
+	if position.ActivationBlock != 15_676_402 {
+		t.Fatalf(
+			"Liquid Collective activation block = %d, want 15676402",
+			position.ActivationBlock,
+		)
 	}
 }
 

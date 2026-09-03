@@ -146,6 +146,7 @@ func lstAdapters() []Adapter {
 					Converter:       common.HexToAddress("0x8c1BEd5b9a0928467c9B1341Da1D7BD5e10b6549"),
 					Method:          "underlyingBalanceFromShares",
 					Token:           eth,
+					ActivationBlock: 15_676_402,
 				}},
 			},
 		),

@@ -87,15 +87,19 @@ type compoundOutstandingMarketRewards struct {
 type compoundStakingModule struct {
 	Module         common.Address
 	IncludeRewards bool
+	Window         availabilityWindow
 }
 
 type compoundV2Deployment struct {
 	Comptroller            common.Address
+	ComptrollerWindow      availabilityWindow
 	WrappedNative          Token
 	NativeMarkets          map[common.Address]struct{}
 	RewardLens             common.Address
+	RewardLensWindow       availabilityWindow
 	RewardToken            Token
 	MultiRewardDistributor common.Address
+	MultiRewardWindow      availabilityWindow
 	StakingModules         []compoundStakingModule
 }
 
@@ -210,6 +214,9 @@ func compoundStakingGroups(
 ) ([]Group, error) {
 	groups := make([]Group, 0, len(modules))
 	for _, module := range modules {
+		if !module.Window.ActiveAt(block.Number) {
+			continue
+		}
 		balanceResult, err := client.Call(
 			ctx,
 			block,
@@ -441,7 +448,7 @@ func (a *CompoundV2Adapter) Positions(
 	account common.Address,
 ) ([]Group, error) {
 	deployment, ok := a.deployments[block.ChainID]
-	if !ok {
+	if !ok || !deployment.ComptrollerWindow.ActiveAt(block.Number) {
 		return nil, nil
 	}
 	marketResult, err := client.Call(
@@ -480,7 +487,8 @@ func (a *CompoundV2Adapter) Positions(
 		return nil, fmt.Errorf("staking: %w", err)
 	}
 	groups = append(groups, stakingGroups...)
-	if deployment.RewardLens != (common.Address{}) {
+	if account != (common.Address{}) && deployment.RewardLens != (common.Address{}) &&
+		deployment.RewardLensWindow.ActiveAt(block.Number) {
 		rewardResult, rewardErr := client.Call(
 			ctx,
 			block,
@@ -515,7 +523,8 @@ func (a *CompoundV2Adapter) Positions(
 			})
 		}
 	}
-	if deployment.MultiRewardDistributor != (common.Address{}) {
+	if deployment.MultiRewardDistributor != (common.Address{}) &&
+		deployment.MultiRewardWindow.ActiveAt(block.Number) {
 		rewardGroup, rewardErr := compoundMultiRewardGroup(
 			ctx,
 			client,
@@ -554,15 +563,17 @@ func compoundV2Adapters() []Adapter {
 	return []Adapter{
 		NewCompoundV2Adapter("compound-v2", "Compound v2", map[ChainID]compoundV2Deployment{
 			Ethereum: {
-				Comptroller: common.HexToAddress("0x3d9819210A31b4961b30EF54bE2aeD79B9c9Cd3B"),
+				Comptroller:       common.HexToAddress("0x3d9819210A31b4961b30EF54bE2aeD79B9c9Cd3B"),
+				ComptrollerWindow: availableFrom(10_271_924),
 				WrappedNative: token(
 					Ethereum,
 					"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
 					"ETH",
 					18,
 				),
-				NativeMarkets: addressSet("0x4Ddc2D193948926D02f9B1fE9e1daa0718270ED5"),
-				RewardLens:    common.HexToAddress("0xdCbDb7306c6Ff46f77B349188dC18cEd9DF30299"),
+				NativeMarkets:    addressSet("0x4Ddc2D193948926D02f9B1fE9e1daa0718270ED5"),
+				RewardLens:       common.HexToAddress("0xdCbDb7306c6Ff46f77B349188dC18cEd9DF30299"),
+				RewardLensWindow: availableFrom(13_468_648),
 				RewardToken: token(
 					Ethereum,
 					"0xc00e94Cb662C3520282E6f5717214004A7f26888",
@@ -573,7 +584,8 @@ func compoundV2Adapters() []Adapter {
 		}),
 		NewCompoundV2Adapter("moonwell", "Moonwell", map[ChainID]compoundV2Deployment{
 			Base: {
-				Comptroller: common.HexToAddress("0xfBb21d0380beE3312B33c4353c8936a0F13EF26C"),
+				Comptroller:       common.HexToAddress("0xfBb21d0380beE3312B33c4353c8936a0F13EF26C"),
+				ComptrollerWindow: availableFrom(2_162_402),
 				WrappedNative: token(
 					Base,
 					"0x4200000000000000000000000000000000000006",
@@ -582,16 +594,19 @@ func compoundV2Adapters() []Adapter {
 				),
 				NativeMarkets:          addressSet(),
 				MultiRewardDistributor: common.HexToAddress("0xe9005b078701e2A0948D2EaC43010D35870Ad9d2"),
+				MultiRewardWindow:      availableFrom(2_162_417),
 				StakingModules: []compoundStakingModule{
 					{
 						Module: common.HexToAddress("0xe66e3a37c3274ac24fe8590f7d84a2427194dc17"),
+						Window: availableFrom(12_187_715),
 					},
 				},
 			},
 		}),
 		NewCompoundV2Adapter("flux-finance", "Flux Finance", map[ChainID]compoundV2Deployment{
 			Ethereum: {
-				Comptroller: common.HexToAddress("0x95Af143a021DF745bc78e845b54591C53a8B3A51"),
+				Comptroller:       common.HexToAddress("0x95Af143a021DF745bc78e845b54591C53a8B3A51"),
+				ComptrollerWindow: availableFrom(16_520_940),
 				WrappedNative: token(
 					Ethereum,
 					"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
@@ -603,7 +618,8 @@ func compoundV2Adapters() []Adapter {
 		}),
 		NewCompoundV2Adapter("sonne", "Sonne", map[ChainID]compoundV2Deployment{
 			Base: {
-				Comptroller: common.HexToAddress("0x1DB2466d9F5e10D7090E7152B68d62703a2245F0"),
+				Comptroller:       common.HexToAddress("0x1DB2466d9F5e10D7090E7152B68d62703a2245F0"),
+				ComptrollerWindow: availableFrom(2_492_954),
 				WrappedNative: token(
 					Base,
 					"0x4200000000000000000000000000000000000006",
@@ -615,7 +631,8 @@ func compoundV2Adapters() []Adapter {
 		}),
 		NewCompoundV2Adapter("lodestar", "Lodestar", map[ChainID]compoundV2Deployment{
 			Arbitrum: {
-				Comptroller: common.HexToAddress("0xa86DD95c210dd186Fa7639F93E4177E97d057576"),
+				Comptroller:       common.HexToAddress("0xa86DD95c210dd186Fa7639F93E4177E97d057576"),
+				ComptrollerWindow: availableFrom(111_013_008),
 				WrappedNative: token(
 					Arbitrum,
 					"0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",

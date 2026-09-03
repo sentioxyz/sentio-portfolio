@@ -76,7 +76,10 @@ var fraxlendLegacyPairABI = MustABI(`[
   }
 ]`)
 
-var fraxlendRegistry = common.HexToAddress("0xD6E9D27C75Afd88ad24Cd5EdccdC76fd2fc3A751")
+var (
+	fraxlendRegistry       = common.HexToAddress("0xD6E9D27C75Afd88ad24Cd5EdccdC76fd2fc3A751")
+	fraxlendRegistryWindow = availableFrom(15_993_000)
+)
 
 type fraxlendPairPosition struct {
 	pair              common.Address
@@ -190,7 +193,7 @@ func (a *FraxlendAdapter) Positions(
 	block BlockRef,
 	account common.Address,
 ) ([]Group, error) {
-	if block.ChainID != Ethereum {
+	if block.ChainID != Ethereum || !fraxlendRegistryWindow.ActiveAt(block.Number) {
 		return nil, nil
 	}
 

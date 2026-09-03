@@ -35,6 +35,13 @@ Indexer-backed adapters receive their deployment-specific GraphQL/status
 endpoints and processor versions through `EngineConfig`. Public source must not
 contain project names or owner namespaces.
 
+Historical scans use a fail-closed availability registry in
+`protocol_availability.go`. Every adapter must declare an explicit outer window
+for every advertised chain before the engine can start; genesis support is
+spelled out rather than inferred from a zero value. Adapters continue to gate
+later markets, vaults, rewards, and replacement contracts with their narrower
+component deployment windows.
+
 Run the local test suites with:
 
 ```sh
