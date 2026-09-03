@@ -90,6 +90,7 @@ go_test(
         "aave_test.go",
         "aave_v4_test.go",
         "account_indexer_reconciliation_live_test.go",
+        "accounts_test.go",
         "beefy_test.go",
         "curve_test.go",
         "debank_sweep_reconciliation_live_test.go",
