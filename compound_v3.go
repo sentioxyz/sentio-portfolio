@@ -77,6 +77,10 @@ type cometMarket struct {
 	RewardsActivationBlock uint64
 }
 
+func (m cometMarket) RewardsActiveAt(block uint64) bool {
+	return m.Rewards != (common.Address{}) && block >= m.RewardsActivationBlock
+}
+
 type cometRewardConfig struct {
 	Token         common.Address
 	RescaleFactor uint64
@@ -264,8 +268,7 @@ func (a *CompoundV3Adapter) Positions(
 			hasPosition = hasPosition || amount.Sign() > 0
 		}
 		rewardOwed := cometRewardOwed{Owed: new(big.Int)}
-		if market.Rewards != (common.Address{}) &&
-			block.Number >= market.RewardsActivationBlock {
+		if market.RewardsActiveAt(block.Number) {
 			rewardRows, rewardErr := client.ParallelCalls(ctx, block, []ContractCall{
 				{
 					Contract: market.Rewards,
@@ -428,37 +431,49 @@ func newCompoundV3Adapter() Adapter {
 	const ethereumRewards = "0x1B0e765F6224C21223AeA2af16c1C46E38885a40"
 	const baseRewards = "0x123964802e6ABabBE1Bc9547D72Ef1B69B00A6b1"
 	const arbitrumRewards = "0x88730d254A2f7e6AC8388c3198aFd694bA9f7fae"
+	const polygonRewards = "0x45939657d1CA34A8FA39A924B71D28Fe8431e581"
+	const optimismRewards = "0x443EA0340cb75a160F31A440722dec7b5bc3C2E9"
 	const ethereumRewardsActivation = 15_331_591
 	const baseRewardsActivation = 2_197_596
 	const arbitrumRewardsActivation = 87_335_253
+	markets := map[ChainID][]cometMarket{
+		Ethereum: {
+			market("USDC", "0xc3d688B66703497DAA19211EEdff47f25384cdc3", ethereumRewards, 15_331_586, ethereumRewardsActivation),
+			market("USDS", "0x5D409e56D886231aDAf00c8775665AD0f9897b56", ethereumRewards, 20_987_551, ethereumRewardsActivation),
+			market("USDT", "0x3Afdc9BCA9213A35503b077a6072F3D0d5AB0840", ethereumRewards, 20_190_637, ethereumRewardsActivation),
+			market("WBTC", "0xe85Dc543813B8c2CFEaAc371517b925a166a9293", ethereumRewards, 21_820_087, ethereumRewardsActivation),
+			market("WETH", "0xA17581A9E3356d9A858b789D68B4d866e593aE94", ethereumRewards, 16_400_710, ethereumRewardsActivation),
+			market("wstETH", "0x3D0bb1ccaB520A66e607822fC55BC921738fAFE3", ethereumRewards, 20_683_535, ethereumRewardsActivation),
+		},
+		Base: {
+			market("AERO", "0x784efeB622244d2348d4F2522f8860B96fbEcE89", baseRewards, 20_852_405, baseRewardsActivation),
+			market("USDbC", "0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf", baseRewards, 2_197_588, baseRewardsActivation),
+			market("USDC", "0xb125E6687d4313864e53df431d5425969c15Eb2F", baseRewards, 11_699_480, baseRewardsActivation),
+			market("USDS", "0x2c776041CCFe903071AF44aa147368a9c8EEA518", baseRewards, 26_046_502, baseRewardsActivation),
+			market("WETH", "0x46e6b214b524310239732D51387075E0e70970bf", baseRewards, 2_495_303, baseRewardsActivation),
+		},
+		Arbitrum: {
+			market("USDC.e", "0xA5EDBDD9646f8dFF606d7448e414884C7d905dCA", arbitrumRewards, 87_335_214, arbitrumRewardsActivation),
+			market("USDC", "0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf", arbitrumRewards, 122_080_500, arbitrumRewardsActivation),
+			market("USDT", "0xd98Be00b5D27fc98112BdE293e487f8D4cA57d07", arbitrumRewards, 223_796_350, arbitrumRewardsActivation),
+			market("WETH", "0x6f7D514bbD4aFf3BcD1140B7344b32f063dEe486", arbitrumRewards, 219_386_101, arbitrumRewardsActivation),
+		},
+		Polygon: {
+			market("USDC.e", "0xF25212E676D1F7F89Cd72fFEe66158f541246445", polygonRewards, 39_412_367, 39_413_527),
+			market("USDT", "0xaeB318360f27748Acb200CE616E389A6C9409a07", polygonRewards, 58_479_907, 58_793_297),
+		},
+		Optimism: {
+			market("USDC", "0x2e44e174f7D53F0212823acC11C01A11d58c5bCB", optimismRewards, 118_406_276, 118_840_983),
+			market("USDT", "0x995E394b8B2437aC8Ce61Ee0bC610D617962B214", optimismRewards, 120_295_564, 121_727_936),
+			market("WETH", "0xE36A30D249f7761327fd973001A32010b521b6Fd", optimismRewards, 122_730_232, 123_072_627),
+		},
+	}
 	return &CompoundV3Adapter{
 		adapterBase: adapterBase{info: ProtocolInfo{
 			ID:     "compound-v3",
 			Name:   "Compound III",
-			Chains: []ChainID{Ethereum, Base, Arbitrum},
+			Chains: deploymentChains(markets),
 		}},
-		markets: map[ChainID][]cometMarket{
-			Ethereum: {
-				market("USDC", "0xc3d688B66703497DAA19211EEdff47f25384cdc3", ethereumRewards, 15_331_586, ethereumRewardsActivation),
-				market("USDS", "0x5D409e56D886231aDAf00c8775665AD0f9897b56", ethereumRewards, 20_987_551, ethereumRewardsActivation),
-				market("USDT", "0x3Afdc9BCA9213A35503b077a6072F3D0d5AB0840", ethereumRewards, 20_190_637, ethereumRewardsActivation),
-				market("WBTC", "0xe85Dc543813B8c2CFEaAc371517b925a166a9293", ethereumRewards, 21_820_087, ethereumRewardsActivation),
-				market("WETH", "0xA17581A9E3356d9A858b789D68B4d866e593aE94", ethereumRewards, 16_400_710, ethereumRewardsActivation),
-				market("wstETH", "0x3D0bb1ccaB520A66e607822fC55BC921738fAFE3", ethereumRewards, 20_683_535, ethereumRewardsActivation),
-			},
-			Base: {
-				market("AERO", "0x784efeB622244d2348d4F2522f8860B96fbEcE89", baseRewards, 20_852_405, baseRewardsActivation),
-				market("USDbC", "0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf", baseRewards, 2_197_588, baseRewardsActivation),
-				market("USDC", "0xb125E6687d4313864e53df431d5425969c15Eb2F", baseRewards, 11_699_480, baseRewardsActivation),
-				market("USDS", "0x2c776041CCFe903071AF44aa147368a9c8EEA518", baseRewards, 26_046_502, baseRewardsActivation),
-				market("WETH", "0x46e6b214b524310239732D51387075E0e70970bf", baseRewards, 2_495_303, baseRewardsActivation),
-			},
-			Arbitrum: {
-				market("USDC.e", "0xA5EDBDD9646f8dFF606d7448e414884C7d905dCA", arbitrumRewards, 87_335_214, arbitrumRewardsActivation),
-				market("USDC", "0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf", arbitrumRewards, 122_080_500, arbitrumRewardsActivation),
-				market("USDT", "0xd98Be00b5D27fc98112BdE293e487f8D4cA57d07", arbitrumRewards, 223_796_350, arbitrumRewardsActivation),
-				market("WETH", "0x6f7D514bbD4aFf3BcD1140B7344b32f063dEe486", arbitrumRewards, 219_386_101, arbitrumRewardsActivation),
-			},
-		},
+		markets: markets,
 	}
 }

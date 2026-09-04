@@ -125,6 +125,31 @@ var uniswapV3Deployments = map[ChainID]uniswapV3Deployment{
 		Manager: common.HexToAddress("0xC36442b4a4522E871399CD717aBDD847Ab11FE88"),
 		Window:  deploymentWindow{ActivationBlock: 173},
 	},
+	Polygon: {
+		Factory: common.HexToAddress("0x1F98431c8aD98523631AE4a59f267346ea31F984"),
+		Manager: common.HexToAddress("0xC36442b4a4522E871399CD717aBDD847Ab11FE88"),
+		Window:  deploymentWindow{ActivationBlock: 22_760_586},
+	},
+	Monad: {
+		Factory: common.HexToAddress("0x204faca1764b154221e35c0d20abb3c525710498"),
+		Manager: common.HexToAddress("0x7197e214c0b767cfb76fb734ab638e2c192f4e53"),
+		Window:  deploymentWindow{ActivationBlock: 29_255_879},
+	},
+	Plasma: {
+		Factory: common.HexToAddress("0xcb2436774C3e191c85056d248EF4260ce5f27A9D"),
+		Manager: common.HexToAddress("0x743E03cceB4af2efA3CC76838f6E8B50B63F184c"),
+		Window:  deploymentWindow{ActivationBlock: 430_178},
+	},
+	Avalanche: {
+		Factory: common.HexToAddress("0x740b1c1de25031C31FF4fC9A62f554A55cdC1baD"),
+		Manager: common.HexToAddress("0x655C406EBFa14EE2006250925e54ec43AD184f8B"),
+		Window:  deploymentWindow{ActivationBlock: 27_833_025},
+	},
+	Optimism: {
+		Factory: common.HexToAddress("0x1F98431c8aD98523631AE4a59f267346ea31F984"),
+		Manager: common.HexToAddress("0xC36442b4a4522E871399CD717aBDD847Ab11FE88"),
+		Window:  deploymentWindow{ActivationBlock: 0},
+	},
 }
 
 var uniswapV4Deployments = map[ChainID]uniswapV4Deployment{
@@ -152,6 +177,30 @@ var uniswapV4Deployments = map[ChainID]uniswapV4Deployment{
 		WrappedNative: common.HexToAddress("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"),
 		Window:        deploymentWindow{ActivationBlock: 297_842_893},
 	},
+	Polygon: {
+		Manager:       common.HexToAddress("0x1ec2ebf4f37e7363fdfe3551602425af0b3ceef9"),
+		StateView:     common.HexToAddress("0x5ea1bd7974c8a611cbab0bdcafcb1d9cc9b3ba5a"),
+		WrappedNative: common.HexToAddress("0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270"),
+		Window:        deploymentWindow{ActivationBlock: 66_980_399},
+	},
+	Monad: {
+		Manager:       common.HexToAddress("0x5b7ec4a94ff9bedb700fb82ab09d5846972f4016"),
+		StateView:     common.HexToAddress("0x77395f3b2e73ae90843717371294fa97cc419d64"),
+		WrappedNative: common.HexToAddress("0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A"),
+		Window:        deploymentWindow{ActivationBlock: 29_255_924},
+	},
+	Avalanche: {
+		Manager:       common.HexToAddress("0xB74b1F14d2754AcfcbBe1a221023a5cf50Ab8ACD"),
+		StateView:     common.HexToAddress("0xc3c9e198c735a4b97e3e683f391ccbdd60b69286"),
+		WrappedNative: common.HexToAddress("0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7"),
+		Window:        deploymentWindow{ActivationBlock: 56_195_389},
+	},
+	Optimism: {
+		Manager:       common.HexToAddress("0x3c3ea4b57a46241e54610e5f022e5c45859a1017"),
+		StateView:     common.HexToAddress("0xc18a3169788f4f75a170290584eca6395c75ecdb"),
+		WrappedNative: common.HexToAddress("0x4200000000000000000000000000000000000006"),
+		Window:        deploymentWindow{ActivationBlock: 130_947_685},
+	},
 }
 
 type UniswapV3Adapter struct {
@@ -169,17 +218,16 @@ func newUniswapAdapters(
 	v4Config SentioIndexerConfig,
 ) []Adapter {
 	indexer := newUniswapIndexer(v3Config, v4Config)
-	chains := append([]ChainID(nil), SupportedChainIDs...)
 	return []Adapter{
 		&UniswapV3Adapter{
 			adapterBase: adapterBase{info: ProtocolInfo{
-				ID: "uniswap-v3", Name: "Uniswap V3", Chains: chains,
+				ID: "uniswap-v3", Name: "Uniswap V3", Chains: deploymentChains(uniswapV3Deployments),
 			}},
 			indexer: indexer,
 		},
 		&UniswapV4Adapter{
 			adapterBase: adapterBase{info: ProtocolInfo{
-				ID: "uniswap-v4", Name: "Uniswap V4", Chains: chains,
+				ID: "uniswap-v4", Name: "Uniswap V4", Chains: deploymentChains(uniswapV4Deployments),
 			}},
 			indexer: indexer,
 		},

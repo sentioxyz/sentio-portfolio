@@ -101,6 +101,49 @@ var eulerV2ChainConfigs = map[ChainID]eulerV2ChainConfig{
 		EVaultFactory:    common.HexToAddress("0x78Df1CF5bf06a7f27f2ACc580B934238C1b80D50"),
 		EulerEarnFactory: common.HexToAddress("0xB9B5d62B9fE9E1B505466e75817aB178A1D2ec9d"),
 	},
+	Polygon: {
+		ChainID: Polygon, ActivationBlock: 86_932_963,
+		EVC:                  common.HexToAddress("0x90811DacA4BD23Fc79A87FBdff7522bED2d24B4B"),
+		TrackingRewards:      common.HexToAddress("0x0dCA20a43aD0DC9B6fAccf22dAF6c3CEF70971D8"),
+		TrackingRewardsBlock: 86_932_963,
+		RewardEUL:            common.HexToAddress("0xAB1ca795DDcACa7DF9ec350a4adA727e8B7212Bd"),
+		RewardEULBlock:       86_933_001,
+		EUL:                  token(Polygon, "0x995C71de11C1f07836ef7d09aC803340BDd91367", "EUL", 18),
+		EVaultFactory:        common.HexToAddress("0xB1771a13e2a13fCafA89B00335915E732B9466b7"),
+	},
+	Monad: {
+		ChainID: Monad, ActivationBlock: 30_858_592,
+		EVC:                  common.HexToAddress("0x7a9324E8f270413fa2E458f5831226d99C7477CD"),
+		TrackingRewards:      common.HexToAddress("0xa231DccE58EA5A43E69EF351D89ea4212Ec0f30b"),
+		TrackingRewardsBlock: 30_858_592,
+		RewardEUL:            common.HexToAddress("0xff074349C8b89bB7362bD25c58742896D817A862"),
+		RewardEULBlock:       30_858_713,
+		EUL:                  token(Monad, "0xDef72Af3fc69E1Dd5a094f7DDa08Ba203CD0438B", "EUL", 18),
+		EVaultFactory:        common.HexToAddress("0xba4Dd672062dE8FeeDb665DD4410658864483f1E"),
+		EulerEarnFactory:     common.HexToAddress("0xF463d4Acb650cc6C4E1D6cD4D0d1b0cb224094cF"),
+	},
+	Plasma: {
+		ChainID: Plasma, ActivationBlock: 511_021,
+		EVC:                  common.HexToAddress("0x7bdbd0A7114aA42CA957F292145F6a931a345583"),
+		TrackingRewards:      common.HexToAddress("0x6e6e1e4FB3Ee6C074f10d3f80E0d3541accf7c2b"),
+		TrackingRewardsBlock: 511_021,
+		RewardEUL:            common.HexToAddress("0xe2011F2bF6556863c3bacE991Efc8DaC26CD84c2"),
+		RewardEULBlock:       511_061,
+		EUL:                  token(Plasma, "0xca632FA58397391C750c13F935DAA61AbBe0BaA6", "EUL", 18),
+		EVaultFactory:        common.HexToAddress("0x42388213C6F56D7E1477632b58Ae6Bba9adeEeA3"),
+		EulerEarnFactory:     common.HexToAddress("0xA3843A73e6a9F81309B931237Ca4759B3B02ff0E"),
+	},
+	Avalanche: {
+		ChainID: Avalanche, ActivationBlock: 56_805_710,
+		EVC:                  common.HexToAddress("0xddcbe30A761Edd2e19bba930A977475265F36Fa1"),
+		TrackingRewards:      common.HexToAddress("0xAf5659428FEF1F6a701FaB46d8f3aF8371A9913D"),
+		TrackingRewardsBlock: 56_805_710,
+		RewardEUL:            common.HexToAddress("0x2e3b32730B4F6b6502BdAa9122df3B026eDE5391"),
+		RewardEULBlock:       56_805_862,
+		EUL:                  token(Avalanche, "0x9ceeD3A7f753608372eeAb300486cc7c2F38AC68", "EUL", 18),
+		EVaultFactory:        common.HexToAddress("0xaf4B4c18B17F6a2B32F6c398a3910bdCD7f26181"),
+		EulerEarnFactory:     common.HexToAddress("0x574B00f5a0C56D370F19fa887a5545d74F52fAC2"),
+	},
 }
 
 type EulerV2Adapter struct {
@@ -124,7 +167,7 @@ func newEulerV2Adapter(config SentioIndexerConfig) Adapter {
 func newEulerV2AdapterWithIndexer(indexer eulerPositionIndexer) *EulerV2Adapter {
 	return &EulerV2Adapter{
 		adapterBase: adapterBase{info: ProtocolInfo{
-			ID: "euler-v2", Name: "Euler V2", Chains: []ChainID{Ethereum, BSC, Base, Arbitrum},
+			ID: "euler-v2", Name: "Euler V2", Chains: deploymentChains(eulerV2ChainConfigs),
 		}},
 		indexer: indexer,
 	}

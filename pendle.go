@@ -37,7 +37,9 @@ var (
     ]`)
 	pendleYieldTokenABI = MustABI(`[
       {"type":"function","name":"PT","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
-      {"type":"function","name":"pyIndexStored","stateMutability":"view","inputs":[],"outputs":[{"type":"uint256"}]}
+      {"type":"function","name":"pyIndexStored","stateMutability":"view","inputs":[],"outputs":[{"type":"uint256"}]},
+      {"type":"function","name":"getRewardTokens","stateMutability":"view","inputs":[],"outputs":[{"type":"address[]"}]},
+      {"type":"function","name":"redeemDueInterestAndRewards","stateMutability":"nonpayable","inputs":[{"name":"user","type":"address"},{"name":"redeemInterest","type":"bool"},{"name":"redeemRewards","type":"bool"}],"outputs":[{"name":"interestOut","type":"uint256"},{"name":"rewardsOut","type":"uint256[]"}]}
     ]`)
 	pendleMarketABI = MustABI(`[
       {"type":"function","name":"readTokens","stateMutability":"view","inputs":[],"outputs":[{"name":"_SY","type":"address"},{"name":"_PT","type":"address"},{"name":"_YT","type":"address"}]},
@@ -47,16 +49,23 @@ var (
     ]`)
 	pendleStandardizedYieldABI = MustABI(`[
       {"type":"function","name":"exchangeRate","stateMutability":"view","inputs":[],"outputs":[{"type":"uint256"}]},
-      {"type":"function","name":"assetInfo","stateMutability":"view","inputs":[],"outputs":[{"name":"assetType","type":"uint8"},{"name":"assetAddress","type":"address"},{"name":"assetDecimals","type":"uint8"}]}
+      {"type":"function","name":"assetInfo","stateMutability":"view","inputs":[],"outputs":[{"name":"assetType","type":"uint8"},{"name":"assetAddress","type":"address"},{"name":"assetDecimals","type":"uint8"}]},
+      {"type":"function","name":"yieldToken","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
+      {"type":"function","name":"previewRedeem","stateMutability":"view","inputs":[{"name":"tokenOut","type":"address"},{"name":"amountSharesToRedeem","type":"uint256"}],"outputs":[{"name":"amountTokenOut","type":"uint256"}]}
     ]`)
 )
 
 // pendleExchangeRateOne is the fixed-point one that IStandardizedYield.exchangeRate is scaled by.
 var pendleExchangeRateOne = new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
 
-// pendleImpliedRateYear is the year PendleMarket.readState annualises lastLnImpliedRate over.
-// Pendle's own market math uses 365 days, so anything else here would misprice every PT.
-const pendleImpliedRateYear = 365 * 24 * 60 * 60
+const (
+	// pendleImpliedRateYear is the year PendleMarket.readState annualises lastLnImpliedRate over.
+	// Pendle's own market math uses 365 days, so anything else here would misprice every PT.
+	pendleImpliedRateYear = 365 * 24 * 60 * 60
+	// Reward lists originate in permissionless SY implementations. Bound every decoded list before
+	// it can multiply metadata or claim work for an account dusted with a hostile PT/YT/market.
+	pendleMaxRewardTokens = 64
+)
 
 // pendleSolvencyFactor is how much of its claim a PY pair can actually redeem.
 //
@@ -254,6 +263,29 @@ var pendleChainConfigs = map[ChainID]pendleChainConfig{
 			pendleGeneration("0xba814bf6e27a6d6bae4a8ac65c8bc3d8e9b0aacf", 392_471_043, "0x49f2f7002669e0e4425fa0203975625ab4af3143", 392_471_311),
 		},
 	},
+	Monad: {
+		ChainID: Monad, ActivationBlock: 75_580_673,
+		Generations: []pendleFactoryGeneration{
+			pendleGeneration("0x4fe1B23ab695D99394Ab78c16A5bE358f31847F4", 75_580_673, "0xA3cb62a49b66eB2536cf6F3C7AC82293784888A3", 75_588_954),
+		},
+	},
+	Plasma: {
+		ChainID: Plasma, ActivationBlock: 1_887_231,
+		Generations: []pendleFactoryGeneration{
+			pendleGeneration("0xED0dC8C074255c277BC704D6b096167D7a6E4311", 1_887_231, "0x28dE02Ac3c3F5ef427e55c321F73fDc7F192e8E4", 1_887_344),
+			pendleGeneration("0xeAECF59C9Da00DACB73c4AAEbBBa22cf5e5bfD93", 4_278_786, "0x84A240Fa784E7F03CB99BA3716065961c5d0D531", 4_278_863),
+		},
+	},
+	Optimism: {
+		ChainID: Optimism, ActivationBlock: 108_061_318,
+		Generations: []pendleFactoryGeneration{
+			pendleGeneration("0xf5a7De2D276dbda3EEf1b62A9E718EFf4d29dDC8", 108_061_318, "0x17F100fB4bE2707675c6439468d38249DD993d58", 108_061_448),
+			pendleGeneration("0xfa6B22FC4c3Ad88B68c16b3061a16b1714F6Bd57", 112_783_502, "0x4A2B38b9cBd83c86F261a4d64c243795D4d44aBC", 112_783_590),
+			pendleGeneration("0xf799E4c029d14f41Dc1918C9A4C67242F565710e", 122_791_975, "0x73Be47237F12F36203823BAc9A4d80dC798B7015", 122_792_017),
+			pendleGeneration("0xCcA0977eA3809C8fB785737Eb9fAcD5B19626e81", 123_998_279, "0x02Adf72d5D06a9C92136562Eb237C07696833a84", 123_998_311),
+			pendleGeneration("0x2bA5e078b1fF6f1AB02a3B4462F3Be6E950E60e8", 142_803_101, "0x95a937f7064C75C6Bc257160088C0a9D58cca333", 142_803_131),
+		},
+	},
 }
 
 // pendlePositionRef is one Pendle ERC20 the account has touched. Whether the balance is still
@@ -296,7 +328,7 @@ func newPendleAdapter(config SentioIndexerConfig) Adapter {
 func newPendleAdapterWithIndexer(indexer pendlePositionIndexer) *PendleAdapter {
 	return &PendleAdapter{
 		adapterBase: adapterBase{info: ProtocolInfo{
-			ID: "pendle", Name: "Pendle V2", Chains: []ChainID{Ethereum, BSC, Base, Arbitrum},
+			ID: "pendle", Name: "Pendle V2", Chains: deploymentChains(pendleChainConfigs),
 		}},
 		indexer: indexer,
 	}
@@ -343,9 +375,9 @@ type pendleHolding struct {
 	balance *big.Int
 }
 
-// heldRefs drops every reference whose balance is zero at the pinned block. The index only
-// records that an account once received the token; redemptions, sales and expiries are all
-// invisible to it, so the balance read is what decides.
+// heldRefs drops zero-balance PT references at the pinned block. YT and LP references remain claim
+// candidates after their last token was transferred: Pendle checkpoints accrued interest or
+// incentives before that transfer, and the former holder can still redeem them at zero balance.
 func (a *PendleAdapter) heldRefs(
 	ctx context.Context,
 	client *RPCClient,
@@ -363,17 +395,20 @@ func (a *PendleAdapter) heldRefs(
 			Method: "balanceOf", Args: []any{account},
 		}
 	}
-	rows, err := client.ParallelCalls(ctx, block, calls)
+	rows, err := client.ParallelCallsAllowFailure(ctx, block, calls)
 	if err != nil {
 		return nil, fmt.Errorf("Pendle balances: %w", err)
 	}
 	held := make([]pendleHolding, 0, len(refs))
 	for index, row := range rows {
-		balance, decodeErr := BigIntAt(row, 0)
-		if decodeErr != nil {
-			return nil, fmt.Errorf("Pendle %s balance: %w", refs[index].Token, decodeErr)
+		if row.Error != nil {
+			continue
 		}
-		if balance.Sign() == 0 {
+		balance, decodeErr := BigIntAt(row.Values, 0)
+		if decodeErr != nil {
+			continue
+		}
+		if balance.Sign() == 0 && refs[index].Kind != pendleYT && refs[index].Kind != pendleLP {
 			continue
 		}
 		held = append(held, pendleHolding{ref: refs[index], account: account, balance: balance})
@@ -390,9 +425,14 @@ func (a *PendleAdapter) buildGroups(
 	groups := make([]Group, 0, len(held))
 	direct := make([]pendleHolding, 0, len(held))
 	markets := make([]pendleHolding, 0, len(held))
+	marketClaims := make([]pendleHolding, 0)
 	for _, holding := range held {
 		if holding.ref.Kind == pendleLP {
-			markets = append(markets, holding)
+			if holding.balance.Sign() == 0 {
+				marketClaims = append(marketClaims, holding)
+			} else {
+				markets = append(markets, holding)
+			}
 			continue
 		}
 		direct = append(direct, holding)
@@ -407,6 +447,11 @@ func (a *PendleAdapter) buildGroups(
 		return nil, err
 	}
 	groups = append(groups, marketGroups...)
+	claimGroups, err := a.marketRewardOnlyGroups(ctx, client, block, marketClaims)
+	if err != nil {
+		return nil, err
+	}
+	groups = append(groups, claimGroups...)
 	sort.Slice(groups, func(left, right int) bool { return groups[left].ID < groups[right].ID })
 	return groups, nil
 }
@@ -436,47 +481,236 @@ func (a *PendleAdapter) tokenGroups(
 	if len(held) == 0 {
 		return nil, nil
 	}
-	bases, err := a.tokenPriceBases(ctx, client, block, held)
+	claims, err := pendleYTClaims(ctx, client, block, held)
 	if err != nil {
 		return nil, err
 	}
-	addresses := make([]common.Address, 0, len(held)+len(bases))
+	positiveHoldings := make([]pendleHolding, 0, len(held))
 	for _, holding := range held {
-		addresses = append(addresses, holding.ref.Token)
+		if holding.balance.Sign() > 0 {
+			positiveHoldings = append(positiveHoldings, holding)
+		}
 	}
-	for _, basis := range bases {
-		addresses = append(addresses, basis.asset)
+	bases, err := a.tokenPriceBases(ctx, client, block, positiveHoldings)
+	if err != nil {
+		return nil, err
+	}
+	addresses := make([]common.Address, 0, len(held))
+	for _, holding := range positiveHoldings {
+		addresses = append(addresses, holding.ref.Token)
 	}
 	tokens, err := tokenMetadataAt(ctx, client, block, addresses)
 	if err != nil {
 		return nil, fmt.Errorf("Pendle token metadata: %w", err)
 	}
+	basisAddresses := make([]common.Address, 0, len(bases))
+	for _, basis := range bases {
+		basisAddresses = append(basisAddresses, basis.asset)
+	}
+	basisTokens, err := pendleTokenMetadataAtAllowFailure(ctx, client, block, basisAddresses)
+	if err != nil {
+		return nil, fmt.Errorf("Pendle basis token metadata: %w", err)
+	}
+	claimAddresses := make([]common.Address, 0, len(claims)*3)
+	for _, claim := range claims {
+		if claim.interest.Sign() > 0 {
+			claimAddresses = append(claimAddresses, claim.interestToken)
+		}
+		if claim.rawInterest.Sign() > 0 {
+			claimAddresses = append(claimAddresses, claim.rawInterestToken)
+		}
+		for index, rewardToken := range claim.rewardTokens {
+			if claim.rewards[index].Sign() > 0 {
+				claimAddresses = append(claimAddresses, rewardToken)
+			}
+		}
+	}
+	claimTokens, err := pendleTokenMetadataAtAllowFailure(
+		ctx, client, block, claimAddresses,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("Pendle YT claim metadata: %w", err)
+	}
 	groups := make([]Group, 0, len(held))
 	for _, holding := range held {
-		token, exists := tokens[holding.ref.Token]
-		if !exists {
-			return nil, fmt.Errorf("Pendle token %s metadata is absent", holding.ref.Token)
+		components := make([]Component, 0, 1)
+		if holding.balance.Sign() > 0 {
+			token, exists := tokens[holding.ref.Token]
+			if !exists {
+				return nil, fmt.Errorf("Pendle token %s metadata is absent", holding.ref.Token)
+			}
+			component := NewComponent("asset", token, holding.balance,
+				Source{Contract: holding.ref.Token, Method: "balanceOf"})
+			if basis, priced := bases[holding.ref.Token]; priced {
+				if assetToken, known := basisTokens[basis.asset]; known {
+					component.PriceBasis = &PriceBasis{
+						Token: assetToken, RatioRaw: basis.ratio.String(),
+					}
+				}
+			}
+			components = append(components, component)
 		}
-		component := NewComponent("asset", token, holding.balance,
-			Source{Contract: holding.ref.Token, Method: "balanceOf"})
-		if basis, priced := bases[holding.ref.Token]; priced {
-			assetToken, known := tokens[basis.asset]
-			if !known {
-				return nil, fmt.Errorf("Pendle asset %s metadata is absent", basis.asset)
+		if claim, exists := claims[holding.ref.Token]; exists {
+			if claim.interest.Sign() > 0 {
+				interestToken, known := claimTokens[claim.interestToken]
+				interestAmount := claim.interest
+				if !known && claim.rawInterest.Sign() > 0 {
+					interestToken, known = claimTokens[claim.rawInterestToken]
+					interestAmount = claim.rawInterest
+				}
+				if known {
+					components = append(components, NewComponent(
+						"reward", interestToken, interestAmount,
+						Source{Contract: holding.ref.Token, Method: "redeemDueInterestAndRewards(interest)"},
+					))
+				}
 			}
-			component.PriceBasis = &PriceBasis{
-				Token: assetToken, RatioRaw: basis.ratio.String(),
+			for index, rewardToken := range claim.rewardTokens {
+				if claim.rewards[index].Sign() == 0 {
+					continue
+				}
+				metadata, known := claimTokens[rewardToken]
+				if !known {
+					continue
+				}
+				components = append(components, NewComponent(
+					"reward", metadata, claim.rewards[index],
+					Source{Contract: holding.ref.Token, Method: "redeemDueInterestAndRewards(rewards)"},
+				))
 			}
+		}
+		if len(components) == 0 {
+			continue
 		}
 		groups = append(groups, Group{
 			ID:         string(holding.ref.Kind) + ":" + strings.ToLower(holding.ref.Token.Hex()),
 			MarketID:   strings.ToLower(holding.ref.PT.Hex()),
 			Label:      pendleGroupLabel(holding.ref.Kind),
-			Components: []Component{component},
+			Components: components,
 			Metadata:   pendleMetadata(holding.ref),
 		})
 	}
 	return groups, nil
+}
+
+// pendleYTClaim is what a YT holder can claim at the pinned block. Interest is paid in SY;
+// whenever that SY can preview redemption into its native yield token we report the concrete
+// token instead, preserving the wrapper/depeg risk and matching Pendle's recommended unit.
+type pendleYTClaim struct {
+	interestToken    common.Address
+	interest         *big.Int
+	rawInterestToken common.Address
+	rawInterest      *big.Int
+	rewardTokens     []common.Address
+	rewards          []*big.Int
+}
+
+func pendleYTClaims(
+	ctx context.Context,
+	client *RPCClient,
+	block BlockRef,
+	held []pendleHolding,
+) (map[common.Address]pendleYTClaim, error) {
+	yieldHoldings := make([]pendleHolding, 0, len(held))
+	for _, holding := range held {
+		if holding.ref.Kind == pendleYT && holding.ref.SY != (common.Address{}) {
+			yieldHoldings = append(yieldHoldings, holding)
+		}
+	}
+	if len(yieldHoldings) == 0 {
+		return nil, nil
+	}
+	calls := make([]ContractCall, 0, len(yieldHoldings)*3)
+	for _, holding := range yieldHoldings {
+		calls = append(calls,
+			ContractCall{Contract: holding.ref.SY, ABI: pendleStandardizedYieldABI, Method: "yieldToken"},
+			ContractCall{Contract: holding.ref.Token, ABI: pendleYieldTokenABI, Method: "getRewardTokens"},
+			ContractCall{
+				Contract: holding.ref.Token, ABI: pendleYieldTokenABI,
+				Method: "redeemDueInterestAndRewards", Args: []any{holding.account, true, true},
+			},
+		)
+	}
+	rows, err := client.ParallelCallsAllowFailure(ctx, block, calls)
+	if err != nil {
+		return nil, fmt.Errorf("Pendle YT claims: %w", err)
+	}
+	claims := make(map[common.Address]pendleYTClaim, len(yieldHoldings))
+	previewCalls := make([]ContractCall, 0, len(yieldHoldings))
+	previewClaims := make([]common.Address, 0, len(yieldHoldings))
+	previewTokens := make([]common.Address, 0, len(yieldHoldings))
+	for index, holding := range yieldHoldings {
+		yieldRow, tokenRow, claimRow := rows[index*3], rows[index*3+1], rows[index*3+2]
+		if claimRow.Error != nil {
+			continue
+		}
+		rewardTokens := []common.Address{}
+		if tokenRow.Error == nil {
+			if decoded, decodeErr := AddressSliceAt(tokenRow.Values, 0); decodeErr == nil &&
+				len(decoded) <= pendleMaxRewardTokens {
+				rewardTokens = decoded
+			}
+		}
+		interest, decodeErr := BigIntAt(claimRow.Values, 0)
+		if decodeErr != nil {
+			continue
+		}
+		rewards, decodeErr := BigIntSliceAt(claimRow.Values, 1)
+		if decodeErr != nil || len(rewards) > pendleMaxRewardTokens {
+			rewards = []*big.Int{}
+		}
+		if len(rewards) != len(rewardTokens) {
+			// Yield-contract creation is permissionless and an arbitrary SY controls the YT's
+			// reward surface. Preserve its independently decoded interest, but drop reward arrays
+			// that cannot be aligned without guessing; one dusted YT must not fail the account.
+			rewardTokens = []common.Address{}
+			rewards = []*big.Int{}
+		}
+		claims[holding.ref.Token] = pendleYTClaim{
+			interestToken:    holding.ref.SY,
+			interest:         interest,
+			rawInterestToken: holding.ref.SY,
+			rawInterest:      new(big.Int).Set(interest),
+			rewardTokens:     rewardTokens,
+			rewards:          rewards,
+		}
+		if interest.Sign() == 0 || yieldRow.Error != nil {
+			continue
+		}
+		yieldToken, decodeErr := AddressAt(yieldRow.Values, 0)
+		if decodeErr != nil || yieldToken == (common.Address{}) {
+			continue
+		}
+		previewCalls = append(previewCalls, ContractCall{
+			Contract: holding.ref.SY, ABI: pendleStandardizedYieldABI, Method: "previewRedeem",
+			Args: []any{yieldToken, interest},
+		})
+		previewClaims = append(previewClaims, holding.ref.Token)
+		previewTokens = append(previewTokens, yieldToken)
+	}
+	if len(previewCalls) == 0 {
+		return claims, nil
+	}
+	previewRows, err := client.ParallelCallsAllowFailure(ctx, block, previewCalls)
+	if err != nil {
+		return nil, fmt.Errorf("Pendle YT interest redemption preview: %w", err)
+	}
+	for index, row := range previewRows {
+		if row.Error != nil {
+			continue
+		}
+		amount, decodeErr := BigIntAt(row.Values, 0)
+		if decodeErr != nil || amount.Sign() <= 0 {
+			continue
+		}
+		claimKey := previewClaims[index]
+		claim := claims[claimKey]
+		yieldToken := previewTokens[index]
+		claim.interestToken = yieldToken
+		claim.interest = amount
+		claims[claimKey] = claim
+	}
+	return claims, nil
 }
 
 // pendleTokenBasis is the accounting asset one directly held PT or YT prices through, with the
@@ -809,9 +1043,13 @@ type pendleMarketState struct {
 	// established. It discounts the PT reserve leg exactly as it discounts a directly held PT.
 	solvency *big.Int
 	asset    common.Address
-	// assetDecimals is what the SY itself declares its accounting asset to be. exchangeRate
-	// converts SY units to asset units at the same decimal base, so a SY whose own decimals
-	// disagree with it would silently scale the result.
+	// yieldToken is the SY's native redemption asset. A successful previewRedeem into it is a
+	// stronger description of the reserve than the accounting asset: it preserves wrapper/depeg
+	// risk and is also how Pendle recommends representing standard SYs.
+	yieldToken common.Address
+	// assetDecimals is what the SY itself declares its accounting asset to be. It is checked
+	// against that asset's metadata, not against the SY: exchangeRate operates on raw units and
+	// deliberately bridges differing decimal bases (for example an 18-decimal SY over USDC).
 	assetDecimals uint8
 	rewardTokens  []common.Address
 	rewards       []*big.Int
@@ -835,54 +1073,60 @@ func (a *PendleAdapter) readMarketStates(
 			ContractCall{Contract: holding.ref.Token, ABI: pendleMarketABI, Method: "getRewardTokens"},
 		)
 	}
-	rows, err := client.ParallelCalls(ctx, block, calls)
+	rows, err := client.ParallelCallsAllowFailure(ctx, block, calls)
 	if err != nil {
 		return nil, fmt.Errorf("Pendle market state: %w", err)
 	}
 	states := make([]pendleMarketState, 0, len(held))
 	for index, holding := range held {
-		market := holding.ref.Token
-		sy, decodeErr := AddressAt(rows[index*3], 0)
-		if decodeErr != nil {
-			return nil, fmt.Errorf("Pendle market %s tokens: %w", market, decodeErr)
+		tokenRow, stateRow, rewardRow := rows[index*3], rows[index*3+1], rows[index*3+2]
+		if tokenRow.Error != nil || stateRow.Error != nil {
+			continue
 		}
-		pt, decodeErr := AddressAt(rows[index*3], 1)
+		sy, decodeErr := AddressAt(tokenRow.Values, 0)
 		if decodeErr != nil {
-			return nil, fmt.Errorf("Pendle market %s tokens: %w", market, decodeErr)
+			continue
 		}
-		yieldToken, decodeErr := AddressAt(rows[index*3], 2)
+		pt, decodeErr := AddressAt(tokenRow.Values, 1)
 		if decodeErr != nil {
-			return nil, fmt.Errorf("Pendle market %s tokens: %w", market, decodeErr)
+			continue
 		}
-		totalPt, decodeErr := BigIntAt(rows[index*3+1], 0)
+		yieldToken, decodeErr := AddressAt(tokenRow.Values, 2)
 		if decodeErr != nil {
-			return nil, fmt.Errorf("Pendle market %s state: %w", market, decodeErr)
+			continue
 		}
-		totalSy, decodeErr := BigIntAt(rows[index*3+1], 1)
+		totalPt, decodeErr := BigIntAt(stateRow.Values, 0)
 		if decodeErr != nil {
-			return nil, fmt.Errorf("Pendle market %s state: %w", market, decodeErr)
+			continue
 		}
-		totalLp, decodeErr := BigIntAt(rows[index*3+1], 2)
+		totalSy, decodeErr := BigIntAt(stateRow.Values, 1)
 		if decodeErr != nil {
-			return nil, fmt.Errorf("Pendle market %s state: %w", market, decodeErr)
+			continue
+		}
+		totalLp, decodeErr := BigIntAt(stateRow.Values, 2)
+		if decodeErr != nil {
+			continue
 		}
 		if totalLp.Sign() <= 0 || totalPt.Sign() < 0 || totalSy.Sign() < 0 {
-			return nil, fmt.Errorf("Pendle market %s reported a non-positive reserve state", market)
+			continue
 		}
-		expiry, decodeErr := BigIntAt(rows[index*3+1], 5)
+		expiry, decodeErr := BigIntAt(stateRow.Values, 5)
 		if decodeErr != nil {
-			return nil, fmt.Errorf("Pendle market %s expiry: %w", market, decodeErr)
+			continue
 		}
 		if !expiry.IsUint64() {
-			return nil, fmt.Errorf("Pendle market %s reported an out-of-range expiry", market)
+			continue
 		}
-		lnImpliedRate, decodeErr := BigIntAt(rows[index*3+1], 8)
+		lnImpliedRate, decodeErr := BigIntAt(stateRow.Values, 8)
 		if decodeErr != nil {
-			return nil, fmt.Errorf("Pendle market %s implied rate: %w", market, decodeErr)
+			continue
 		}
-		rewardTokens, decodeErr := AddressSliceAt(rows[index*3+2], 0)
-		if decodeErr != nil {
-			return nil, fmt.Errorf("Pendle market %s reward tokens: %w", market, decodeErr)
+		rewardTokens := []common.Address{}
+		if rewardRow.Error == nil {
+			if decoded, rewardErr := AddressSliceAt(rewardRow.Values, 0); rewardErr == nil &&
+				len(decoded) <= pendleMaxRewardTokens {
+				rewardTokens = decoded
+			}
 		}
 		states = append(states, pendleMarketState{
 			holding: holding, sy: sy, pt: pt, yt: yieldToken,
@@ -900,36 +1144,37 @@ func (a *PendleAdapter) readMarketSY(
 	block BlockRef,
 	states []pendleMarketState,
 ) ([]pendleMarketState, error) {
-	calls := make([]ContractCall, 0, len(states)*2)
+	calls := make([]ContractCall, 0, len(states)*3)
 	for _, state := range states {
 		calls = append(calls,
 			ContractCall{Contract: state.sy, ABI: pendleStandardizedYieldABI, Method: "exchangeRate"},
 			ContractCall{Contract: state.sy, ABI: pendleStandardizedYieldABI, Method: "assetInfo"},
+			ContractCall{Contract: state.sy, ABI: pendleStandardizedYieldABI, Method: "yieldToken"},
 		)
 	}
-	rows, err := client.ParallelCalls(ctx, block, calls)
+	rows, err := client.ParallelCallsAllowFailure(ctx, block, calls)
 	if err != nil {
 		return nil, fmt.Errorf("Pendle SY state: %w", err)
 	}
 	for index := range states {
-		rate, decodeErr := BigIntAt(rows[index*2], 0)
-		if decodeErr != nil {
-			return nil, fmt.Errorf("Pendle SY %s exchange rate: %w", states[index].sy, decodeErr)
+		rateRow, assetRow, yieldRow := rows[index*3], rows[index*3+1], rows[index*3+2]
+		if rateRow.Error == nil && assetRow.Error == nil {
+			rate, rateErr := BigIntAt(rateRow.Values, 0)
+			asset, assetErr := AddressAt(assetRow.Values, 1)
+			decimals, decimalsErr := Uint8At(assetRow.Values, 2)
+			if rateErr == nil && assetErr == nil && decimalsErr == nil && rate.Sign() > 0 {
+				states[index].exchangeRate = rate
+				states[index].asset = asset
+				states[index].assetDecimals = decimals
+			}
 		}
-		if rate.Sign() <= 0 {
-			return nil, fmt.Errorf("Pendle SY %s reported a non-positive exchange rate", states[index].sy)
+		yieldToken := common.Address{}
+		if yieldRow.Error == nil {
+			if decoded, yieldErr := AddressAt(yieldRow.Values, 0); yieldErr == nil {
+				yieldToken = decoded
+			}
 		}
-		asset, decodeErr := AddressAt(rows[index*2+1], 1)
-		if decodeErr != nil {
-			return nil, fmt.Errorf("Pendle SY %s asset: %w", states[index].sy, decodeErr)
-		}
-		decimals, decodeErr := Uint8At(rows[index*2+1], 2)
-		if decodeErr != nil {
-			return nil, fmt.Errorf("Pendle SY %s asset decimals: %w", states[index].sy, decodeErr)
-		}
-		states[index].exchangeRate = rate
-		states[index].asset = asset
-		states[index].assetDecimals = decimals
+		states[index].yieldToken = yieldToken
 	}
 	return a.readMarketSolvency(ctx, client, block, states)
 }
@@ -1011,7 +1256,7 @@ func (a *PendleAdapter) readMarketRewards(
 			continue
 		}
 		amounts, decodeErr := BigIntSliceAt(row.Values, 0)
-		if decodeErr != nil {
+		if decodeErr != nil || len(amounts) > pendleMaxRewardTokens {
 			continue
 		}
 		state := &states[claimants[position]]
@@ -1023,14 +1268,222 @@ func (a *PendleAdapter) readMarketRewards(
 	return states, nil
 }
 
+type pendleMarketRewardClaim struct {
+	holding pendleHolding
+	tokens  []common.Address
+	amounts []*big.Int
+}
+
+// pendleTokenMetadataAtAllowFailure is deliberately narrower than tokenMetadataAt. These token
+// addresses come from permissionless Pendle contracts: one broken yield/reward token must be
+// skipped rather than fail unrelated current positions. Transport failure remains fatal, while
+// contract/decode failure is isolated to that token.
+func pendleTokenMetadataAtAllowFailure(
+	ctx context.Context,
+	client *RPCClient,
+	block BlockRef,
+	addresses []common.Address,
+) (map[common.Address]Token, error) {
+	unique := make([]common.Address, 0, len(addresses))
+	seen := make(map[common.Address]struct{}, len(addresses))
+	for _, address := range addresses {
+		if address == (common.Address{}) {
+			continue
+		}
+		if _, exists := seen[address]; exists {
+			continue
+		}
+		seen[address] = struct{}{}
+		unique = append(unique, address)
+	}
+	calls := make([]ContractCall, 0, len(unique)*2)
+	for _, address := range unique {
+		calls = append(calls,
+			ContractCall{Contract: address, ABI: erc20ABI, Method: "symbol"},
+			ContractCall{Contract: address, ABI: erc20ABI, Method: "decimals"},
+		)
+	}
+	rows, err := client.ParallelCallsAllowFailure(ctx, block, calls)
+	if err != nil {
+		return nil, err
+	}
+	tokens := make(map[common.Address]Token, len(unique))
+	fallbackAddresses := make([]common.Address, 0)
+	for index, address := range unique {
+		decimalsRow := rows[index*2+1]
+		if decimalsRow.Error != nil {
+			continue
+		}
+		decimals, decodeErr := Uint8At(decimalsRow.Values, 0)
+		if decodeErr != nil {
+			continue
+		}
+		symbol := ""
+		if rows[index*2].Error == nil {
+			symbol, _ = StringAt(rows[index*2].Values, 0)
+		}
+		tokens[address] = Token{
+			ChainID: block.ChainID, Address: address, Symbol: symbol, Decimals: decimals,
+		}
+		if symbol == "" {
+			fallbackAddresses = append(fallbackAddresses, address)
+		}
+	}
+	if len(fallbackAddresses) == 0 {
+		return tokens, nil
+	}
+	fallbackCalls := make([]ContractCall, len(fallbackAddresses))
+	for index, address := range fallbackAddresses {
+		fallbackCalls[index] = ContractCall{
+			Contract: address, ABI: erc20Bytes32SymbolABI, Method: "symbol",
+		}
+	}
+	fallbackRows, err := client.ParallelCallsAllowFailure(ctx, block, fallbackCalls)
+	if err != nil {
+		return nil, err
+	}
+	for index, address := range fallbackAddresses {
+		row := fallbackRows[index]
+		if row.Error != nil {
+			delete(tokens, address)
+			continue
+		}
+		symbol, decodeErr := Bytes32StringAt(row.Values, 0)
+		if decodeErr != nil || symbol == "" {
+			delete(tokens, address)
+			continue
+		}
+		token := tokens[address]
+		token.Symbol = symbol
+		tokens[address] = token
+	}
+	return tokens, nil
+}
+
+// marketRewardOnlyGroups handles historical LP references whose current balance is zero. Pendle
+// checkpoints gauge rewards before the final transfer, so those accounts may still have a claim;
+// however, a stale zero-balance market must never trigger the full market/SY decomposition or
+// break healthy positive positions. Every per-market read here is therefore best effort.
+func (a *PendleAdapter) marketRewardOnlyGroups(
+	ctx context.Context,
+	client *RPCClient,
+	block BlockRef,
+	held []pendleHolding,
+) ([]Group, error) {
+	if len(held) == 0 {
+		return nil, nil
+	}
+	tokenCalls := make([]ContractCall, len(held))
+	for index, holding := range held {
+		tokenCalls[index] = ContractCall{
+			Contract: holding.ref.Token, ABI: pendleMarketABI, Method: "getRewardTokens",
+		}
+	}
+	tokenRows, err := client.ParallelCallsAllowFailure(ctx, block, tokenCalls)
+	if err != nil {
+		return nil, fmt.Errorf("Pendle zero-balance market reward tokens: %w", err)
+	}
+	redeemCalls := make([]ContractCall, 0, len(held))
+	candidates := make([]pendleHolding, 0, len(held))
+	rewardTokens := make([][]common.Address, 0, len(held))
+	for index, row := range tokenRows {
+		if row.Error != nil {
+			continue
+		}
+		tokens, decodeErr := AddressSliceAt(row.Values, 0)
+		if decodeErr != nil || len(tokens) == 0 || len(tokens) > pendleMaxRewardTokens {
+			continue
+		}
+		holding := held[index]
+		redeemCalls = append(redeemCalls, ContractCall{
+			Contract: holding.ref.Token, ABI: pendleMarketABI,
+			Method: "redeemRewards", Args: []any{holding.account},
+		})
+		candidates = append(candidates, holding)
+		rewardTokens = append(rewardTokens, tokens)
+	}
+	if len(redeemCalls) == 0 {
+		return nil, nil
+	}
+	redeemRows, err := client.ParallelCallsAllowFailure(ctx, block, redeemCalls)
+	if err != nil {
+		return nil, fmt.Errorf("Pendle zero-balance market rewards: %w", err)
+	}
+	claims := make([]pendleMarketRewardClaim, 0, len(redeemRows))
+	metadataAddresses := make([]common.Address, 0)
+	for index, row := range redeemRows {
+		if row.Error != nil {
+			continue
+		}
+		amounts, decodeErr := BigIntSliceAt(row.Values, 0)
+		if decodeErr != nil || len(amounts) > pendleMaxRewardTokens ||
+			len(amounts) != len(rewardTokens[index]) {
+			continue
+		}
+		claim := pendleMarketRewardClaim{
+			holding: candidates[index], tokens: rewardTokens[index], amounts: amounts,
+		}
+		positive := false
+		for tokenIndex, amount := range amounts {
+			if amount.Sign() > 0 && rewardTokens[index][tokenIndex] != (common.Address{}) {
+				metadataAddresses = append(metadataAddresses, rewardTokens[index][tokenIndex])
+				positive = true
+			}
+		}
+		if positive {
+			claims = append(claims, claim)
+		}
+	}
+	if len(claims) == 0 {
+		return nil, nil
+	}
+	metadata, err := pendleTokenMetadataAtAllowFailure(ctx, client, block, metadataAddresses)
+	if err != nil {
+		return nil, fmt.Errorf("Pendle zero-balance market reward metadata: %w", err)
+	}
+	groups := make([]Group, 0, len(claims))
+	for _, claim := range claims {
+		components := make([]Component, 0, len(claim.tokens))
+		for index, rewardToken := range claim.tokens {
+			if claim.amounts[index].Sign() == 0 || rewardToken == (common.Address{}) {
+				continue
+			}
+			token, known := metadata[rewardToken]
+			if !known {
+				continue
+			}
+			components = append(components, NewComponent(
+				"reward", token, claim.amounts[index],
+				Source{Contract: claim.holding.ref.Token, Method: "redeemRewards"},
+			))
+		}
+		if len(components) == 0 {
+			continue
+		}
+		market := claim.holding.ref.Token
+		groupMetadata := pendleMetadata(claim.holding.ref)
+		groupMetadata["market"] = market
+		groupMetadata["lpBalance"] = "0"
+		groups = append(groups, Group{
+			ID:         string(pendleLP) + ":" + strings.ToLower(market.Hex()),
+			MarketID:   strings.ToLower(claim.holding.ref.PT.Hex()),
+			Label:      pendleGroupLabel(pendleLP),
+			Components: components,
+			Metadata:   groupMetadata,
+		})
+	}
+	return groups, nil
+}
+
 // pendleReserveShare is the holder's slice of one market reserve. Rounding is down, so the sum
 // of every holder's share can never exceed the reserve.
 func pendleReserveShare(balance, reserve, totalLp *big.Int) *big.Int {
 	return new(big.Int).Div(new(big.Int).Mul(balance, reserve), totalLp)
 }
 
-// pendleSYToAsset converts SY units into the SY's accounting asset. exchangeRate is asset per SY
-// in 1e18 fixed point, with both sides on the same decimal base.
+// pendleSYToAsset converts raw SY units into raw accounting-asset units. Pendle defines the rate
+// on raw units with a constant 1e18 divisor, so the rate itself carries any decimal-base change.
+// For example, one raw-natural 18-decimal SY over a 6-decimal asset has a parity rate of 1e6.
 func pendleSYToAsset(syAmount, exchangeRate *big.Int) *big.Int {
 	return new(big.Int).Div(new(big.Int).Mul(syAmount, exchangeRate), pendleExchangeRateOne)
 }
@@ -1052,61 +1505,119 @@ func (a *PendleAdapter) marketGroups(
 	if err != nil {
 		return nil, err
 	}
-	addresses := make([]common.Address, 0, len(states)*3)
-	for _, state := range states {
-		addresses = append(addresses, state.asset, state.pt, state.sy)
-		addresses = append(addresses, state.rewardTokens...)
+	// Prefer the concrete yield token the holder could receive for the SY reserve. Every upgrade
+	// keeps the preceding representation so an optional preview or metadata failure degrades from
+	// yield token, to accounting asset, to the raw SY reserve rather than erasing the position.
+	type syLeg struct {
+		token  common.Address
+		amount *big.Int
+		source string
 	}
-	tokens, err := tokenMetadataAt(ctx, client, block, addresses)
+	rawLegs := make([]syLeg, len(states))
+	assetLegs := make([]syLeg, len(states))
+	previewLegs := make([]syLeg, len(states))
+	previewCalls := make([]ContractCall, len(states))
+	for index, state := range states {
+		share := pendleReserveShare(state.holding.balance, state.totalSy, state.totalLp)
+		rawLegs[index] = syLeg{token: state.sy, amount: share, source: "readState(totalSy)"}
+		if state.asset != (common.Address{}) {
+			assetLegs[index] = syLeg{
+				token: state.asset, amount: pendleSYToAsset(share, state.exchangeRate),
+				source: "readState(totalSy)*exchangeRate",
+			}
+		}
+		previewCalls[index] = ContractCall{
+			Contract: state.sy, ABI: pendleStandardizedYieldABI, Method: "previewRedeem",
+			Args: []any{state.yieldToken, share},
+		}
+	}
+	previewRows, err := client.ParallelCallsAllowFailure(ctx, block, previewCalls)
+	if err != nil {
+		return nil, fmt.Errorf("Pendle SY redemption preview: %w", err)
+	}
+	for index, row := range previewRows {
+		if row.Error != nil {
+			continue
+		}
+		amount, decodeErr := BigIntAt(row.Values, 0)
+		if decodeErr != nil || amount.Sign() <= 0 {
+			continue
+		}
+		previewLegs[index] = syLeg{
+			token: states[index].yieldToken, amount: amount,
+			source: "readState(totalSy)*previewRedeem",
+		}
+	}
+
+	addresses := make([]common.Address, 0, len(states)*5)
+	for index, state := range states {
+		if rawLegs[index].amount.Sign() > 0 {
+			addresses = append(addresses, rawLegs[index].token)
+		}
+		if state.asset != (common.Address{}) {
+			addresses = append(addresses, state.asset)
+		}
+		if previewLegs[index].amount != nil && previewLegs[index].amount.Sign() > 0 {
+			addresses = append(addresses, previewLegs[index].token)
+		}
+		addresses = append(addresses, state.pt)
+		for rewardIndex, rewardToken := range state.rewardTokens {
+			if rewardIndex < len(state.rewards) && state.rewards[rewardIndex].Sign() > 0 {
+				addresses = append(addresses, rewardToken)
+			}
+		}
+	}
+	tokens, err := pendleTokenMetadataAtAllowFailure(ctx, client, block, addresses)
 	if err != nil {
 		return nil, fmt.Errorf("Pendle market token metadata: %w", err)
 	}
 	groups := make([]Group, 0, len(states))
-	for _, state := range states {
+	for stateIndex, state := range states {
 		market := state.holding.ref.Token
-		syToken, exists := tokens[state.sy]
-		if !exists {
-			return nil, fmt.Errorf("Pendle SY %s metadata is absent", state.sy)
-		}
-		if syToken.Decimals != state.assetDecimals {
-			return nil, fmt.Errorf(
-				"Pendle SY %s has %d decimals but reports a %d-decimal asset",
-				state.sy, syToken.Decimals, state.assetDecimals,
-			)
-		}
-		assetToken, exists := tokens[state.asset]
-		if !exists {
-			return nil, fmt.Errorf("Pendle market %s asset metadata is absent", market)
-		}
-		ptToken, exists := tokens[state.pt]
-		if !exists {
-			return nil, fmt.Errorf("Pendle market %s PT metadata is absent", market)
-		}
+		assetToken, assetKnown := tokens[state.asset]
+		assetUsable := state.asset != (common.Address{}) && assetKnown &&
+			assetToken.Decimals == state.assetDecimals
 		share := state.holding.balance
 		ptAmount := pendleReserveShare(share, state.totalPt, state.totalLp)
-		syAmount := pendleReserveShare(share, state.totalSy, state.totalLp)
-		assetAmount := pendleSYToAsset(syAmount, state.exchangeRate)
 		components := make([]Component, 0, 2+len(state.rewardTokens))
-		if assetAmount.Sign() > 0 {
-			components = append(components, NewComponent("asset", assetToken, assetAmount,
-				Source{Contract: market, Method: "readState(totalSy)*exchangeRate"}))
+		selectedLeg := syLeg{}
+		if raw := rawLegs[stateIndex]; raw.amount.Sign() > 0 {
+			if _, known := tokens[raw.token]; known {
+				selectedLeg = raw
+			}
+		}
+		if asset := assetLegs[stateIndex]; asset.amount != nil && asset.amount.Sign() > 0 && assetUsable {
+			selectedLeg = asset
+		}
+		if preview := previewLegs[stateIndex]; preview.amount != nil && preview.amount.Sign() > 0 {
+			if _, known := tokens[preview.token]; known {
+				selectedLeg = preview
+			}
+		}
+		if selectedLeg.amount != nil {
+			components = append(components, NewComponent(
+				"asset", tokens[selectedLeg.token], selectedLeg.amount,
+				Source{Contract: market, Method: selectedLeg.source},
+			))
 		}
 		if ptAmount.Sign() > 0 {
-			ptComponent := NewComponent("asset", ptToken, ptAmount,
-				Source{Contract: market, Method: "readState(totalPt)"})
-			// The reserve is reported as the PT itself, the way DeBank reports it, and priced
-			// through the same accounting asset as the SY leg. Both legs of a liquidity position
-			// therefore value, where before only the SY leg did.
-			if raw, ratioErr := pendlePTToAssetRatio(
-				state.lnImpliedRate, state.expiry, block.Timestamp,
-			); ratioErr == nil && state.solvency != nil {
-				if ratio := pendleApplySolvency(raw, state.solvency); ratio.Sign() > 0 {
-					ptComponent.PriceBasis = &PriceBasis{
-						Token: assetToken, RatioRaw: ratio.String(),
+			if ptToken, known := tokens[state.pt]; known {
+				ptComponent := NewComponent("asset", ptToken, ptAmount,
+					Source{Contract: market, Method: "readState(totalPt)"})
+				// The reserve is reported as the PT itself, the way DeBank reports it, and priced
+				// through the same accounting asset as the SY leg. Both legs therefore value when
+				// that asset is usable, while malformed optional metadata leaves the PT unpriced.
+				if raw, ratioErr := pendlePTToAssetRatio(
+					state.lnImpliedRate, state.expiry, block.Timestamp,
+				); assetUsable && ratioErr == nil && state.solvency != nil {
+					if ratio := pendleApplySolvency(raw, state.solvency); ratio.Sign() > 0 {
+						ptComponent.PriceBasis = &PriceBasis{
+							Token: assetToken, RatioRaw: ratio.String(),
+						}
 					}
 				}
+				components = append(components, ptComponent)
 			}
-			components = append(components, ptComponent)
 		}
 		for index, rewardToken := range state.rewardTokens {
 			if index >= len(state.rewards) || state.rewards[index].Sign() == 0 {
@@ -1114,7 +1625,7 @@ func (a *PendleAdapter) marketGroups(
 			}
 			metadata, known := tokens[rewardToken]
 			if !known {
-				return nil, fmt.Errorf("Pendle market %s reward metadata is absent", market)
+				continue
 			}
 			components = append(components, NewComponent("reward", metadata, state.rewards[index],
 				Source{Contract: market, Method: "redeemRewards"}))

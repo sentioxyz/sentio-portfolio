@@ -172,7 +172,7 @@ func newMorphoAccrualFixture(
 }
 
 func TestMorphoDeploymentsCoverSupportedChains(t *testing.T) {
-	for _, chainID := range SupportedChainIDs {
+	for _, chainID := range deploymentChains(morphoDeployments) {
 		deployment, exists := morphoDeployments[chainID]
 		if !exists {
 			t.Fatalf("Morpho deployment is absent for chain %d", chainID)
@@ -180,8 +180,8 @@ func TestMorphoDeploymentsCoverSupportedChains(t *testing.T) {
 		if deployment.Morpho == (common.Address{}) || deployment.Window.ActivationBlock == 0 {
 			t.Errorf("chain %d has an incomplete Morpho core deployment", chainID)
 		}
-		if len(deployment.VaultV1Factories) == 0 {
-			t.Errorf("chain %d has no Morpho V1 factory", chainID)
+		if len(deployment.VaultV1Factories)+len(deployment.VaultV2Factories) == 0 {
+			t.Errorf("chain %d has no Morpho vault factory", chainID)
 		}
 		for _, factory := range append(deployment.VaultV1Factories, deployment.VaultV2Factories...) {
 			if factory.Address == (common.Address{}) || factory.Window.ActivationBlock < deployment.Window.ActivationBlock {

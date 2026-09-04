@@ -79,6 +79,12 @@ type aaveMarket struct {
 	DataProvider common.Address
 }
 
+type aaveV2RewardDeployment struct {
+	deploymentWindow
+	Controller common.Address
+	Token      Token
+}
+
 type AaveAdapter struct {
 	adapterBase
 	markets map[ChainID][]aaveMarket
@@ -100,18 +106,38 @@ var ethereumAaveV2SafetyModules = []aaveSafetyModuleDeployment{
 	},
 }
 
-var ethereumAaveV2RewardsController = common.HexToAddress(
-	"0xd784927Ff2f95ba542BfC824c8a8a98F3495f6b5",
-)
-
-var ethereumAaveV2RewardsDeployment = deploymentWindow{ActivationBlock: 12_251_569}
-
-var ethereumAaveToken = token(
-	Ethereum,
-	"0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2dDaE9",
-	"AAVE",
-	18,
-)
+var aaveV2RewardDeployments = map[ChainID]aaveV2RewardDeployment{
+	Ethereum: {
+		deploymentWindow: deploymentWindow{ActivationBlock: 12_251_569},
+		Controller:       common.HexToAddress("0xd784927Ff2f95ba542BfC824c8a8a98F3495f6b5"),
+		Token: token(
+			Ethereum,
+			"0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2dDaE9",
+			"AAVE",
+			18,
+		),
+	},
+	Polygon: {
+		deploymentWindow: deploymentWindow{ActivationBlock: 12_486_774},
+		Controller:       common.HexToAddress("0x357D51124f59836DeD84c8a1730D72B749d8BC23"),
+		Token: token(
+			Polygon,
+			"0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
+			"WPOL",
+			18,
+		),
+	},
+	Avalanche: {
+		deploymentWindow: deploymentWindow{ActivationBlock: 3_424_262},
+		Controller:       common.HexToAddress("0x01D83Fe6A10D2f2B7AF17034343746188272cAc9"),
+		Token: token(
+			Avalanche,
+			"0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
+			"WAVAX",
+			18,
+		),
+	},
+}
 
 var ethereumSparkRewardsController = common.HexToAddress(
 	"0x4370D3b6C9588E02ce9D22e684387859c7Ff5b34",
@@ -182,6 +208,24 @@ var sparkSavingsVaults = map[ChainID][]vaultConfig{
 			ActivationBlock: 476_542_096,
 		},
 	},
+	Avalanche: {
+		{
+			ID:              "0x28b3a8fb53b741a8fd78c0fb9a6b2393d896a43d",
+			Label:           "Yield · spUSDC",
+			Address:         common.HexToAddress("0x28B3a8fb53B741A8Fd78c0fb9A6B2393d896a43d"),
+			Asset:           token(Avalanche, "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E", "USDC", 6),
+			ActivationBlock: 69_983_672,
+		},
+	},
+	Optimism: {
+		{
+			ID:              "0xcf9326e24ebffbef22ce1050007a43a3c0b6db55",
+			Label:           "Yield · sUSDC",
+			Address:         common.HexToAddress("0xCF9326e24EBfFBEF22ce1050007A43A3c0B6DB55"),
+			Asset:           token(Optimism, "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85", "USDC", 6),
+			ActivationBlock: 136_322_256,
+		},
+	},
 }
 
 func NewAaveAdapter(id, name string, markets map[ChainID][]aaveMarket) *AaveAdapter {
@@ -194,16 +238,19 @@ func newAaveAdapter(
 	markets map[ChainID][]aaveMarket,
 	vaults map[ChainID][]vaultConfig,
 ) *AaveAdapter {
-	chains := make([]ChainID, 0, len(markets)+len(vaults))
-	for _, chainID := range SupportedChainIDs {
-		if len(markets[chainID]) > 0 || len(vaults[chainID]) > 0 {
-			chains = append(chains, chainID)
-		}
+	deployments := make(map[ChainID]struct{}, len(markets)+len(vaults))
+	for chainID := range markets {
+		deployments[chainID] = struct{}{}
+	}
+	for chainID := range vaults {
+		deployments[chainID] = struct{}{}
 	}
 	return &AaveAdapter{
-		adapterBase: adapterBase{info: ProtocolInfo{ID: id, Name: name, Chains: chains}},
-		markets:     markets,
-		vaults:      vaults,
+		adapterBase: adapterBase{info: ProtocolInfo{
+			ID: id, Name: name, Chains: deploymentChains(deployments),
+		}},
+		markets: markets,
+		vaults:  vaults,
 	}
 }
 
@@ -519,8 +566,11 @@ func (a *AaveAdapter) Positions(
 				components = append(components, component)
 			}
 		}
-		if a.Info().ID == "aave-v2" && block.ChainID == Ethereum &&
-			ethereumAaveV2RewardsDeployment.ActiveAt(block.Number) {
+		// Reward support is independently gated because controller deployments do
+		// not necessarily start at the same block as their corresponding pools.
+		rewardDeployment, rewardExists := aaveV2RewardDeployments[block.ChainID]
+		if a.Info().ID == "aave-v2" && rewardExists &&
+			rewardDeployment.ActiveAt(block.Number) {
 			incentiveAssets, rewardErr := readAaveIncentiveAssets(
 				ctx,
 				client,
@@ -535,7 +585,7 @@ func (a *AaveAdapter) Positions(
 			rewardResult, rewardErr := client.Call(
 				ctx,
 				block,
-				ethereumAaveV2RewardsController,
+				rewardDeployment.Controller,
 				aaveV2RewardsControllerABI,
 				"getRewardsBalance",
 				incentiveAssets,
@@ -551,10 +601,10 @@ func (a *AaveAdapter) Positions(
 			if rewardAmount.Sign() > 0 {
 				components = append(components, NewComponent(
 					"reward",
-					ethereumAaveToken,
+					rewardDeployment.Token,
 					rewardAmount,
 					Source{
-						Contract: ethereumAaveV2RewardsController,
+						Contract: rewardDeployment.Controller,
 						Method:   "getRewardsBalance",
 					},
 				))
@@ -733,10 +783,46 @@ func aaveAdapters() []Adapter {
 				aaveMarketAt("Core", "0x794a61358D6845594F94dc1DB02A252b5b4814aD", "0x14496b405D62c24F91f04Cda1c69Dc526D56fDE5", 302_650_382, 345_855_960),
 				aaveMarketAt("Core", "0x794a61358D6845594F94dc1DB02A252b5b4814aD", "0x243Aa95cAC2a25651eda86e80bEe66114413c43b", 345_855_961, 0),
 			},
+			Polygon: {
+				aaveMarketAt("Core", "0x794a61358D6845594F94dc1DB02A252b5b4814aD", "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654", 25_826_028, 41_174_631),
+				aaveMarketAt("Core", "0x794a61358D6845594F94dc1DB02A252b5b4814aD", "0x9441B65EE553F70df9C77d45d3283B6BC24F222d", 41_174_632, 59_108_788),
+				aaveMarketAt("Core", "0x794a61358D6845594F94dc1DB02A252b5b4814aD", "0x7deEB8aCE4220643D8edeC871a23807E4d006eE5", 59_108_789, 62_249_156),
+				aaveMarketAt("Core", "0x794a61358D6845594F94dc1DB02A252b5b4814aD", "0x7F23D86Ee20D869112572136221e173428DD740B", 62_249_157, 67_532_798),
+				aaveMarketAt("Core", "0x794a61358D6845594F94dc1DB02A252b5b4814aD", "0x14496b405D62c24F91f04Cda1c69Dc526D56fDE5", 67_532_799, 72_592_540),
+				aaveMarketAt("Core", "0x794a61358D6845594F94dc1DB02A252b5b4814aD", "0x243Aa95cAC2a25651eda86e80bEe66114413c43b", 72_592_541, 0),
+			},
+			Monad: {
+				aaveMarketAt("Core", "0x69a5F9AD4f96ebf0a0C792dD42a01cC5C0102fef", "0xB65A68B98274ef7D9a60E0C0747dD1BEc3D32fad", 81_909_763, 0),
+			},
+			Plasma: {
+				aaveMarketAt("Core", "0x925a2A7214Ed92428B5b1B090F80b25700095e12", "0xf2D6E38B407e31E7E7e4a16E6769728b76c7419F", 489_197, 0),
+			},
+			Avalanche: {
+				aaveMarketAt("Core", "0x794a61358D6845594F94dc1DB02A252b5b4814aD", "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654", 11_970_506, 28_384_510),
+				aaveMarketAt("Core", "0x794a61358D6845594F94dc1DB02A252b5b4814aD", "0x50ddd0Cd4266299527d25De9CBb55fE0EB8dAc30", 28_384_511, 47_712_700),
+				aaveMarketAt("Core", "0x794a61358D6845594F94dc1DB02A252b5b4814aD", "0x7deEB8aCE4220643D8edeC871a23807E4d006eE5", 47_712_701, 50_972_229),
+				aaveMarketAt("Core", "0x794a61358D6845594F94dc1DB02A252b5b4814aD", "0x7F23D86Ee20D869112572136221e173428DD740B", 50_972_230, 56_836_940),
+				aaveMarketAt("Core", "0x794a61358D6845594F94dc1DB02A252b5b4814aD", "0x14496b405D62c24F91f04Cda1c69Dc526D56fDE5", 56_836_941, 63_632_022),
+				aaveMarketAt("Core", "0x794a61358D6845594F94dc1DB02A252b5b4814aD", "0x243Aa95cAC2a25651eda86e80bEe66114413c43b", 63_632_023, 0),
+			},
+			Optimism: {
+				aaveMarketAt("Core", "0x794a61358D6845594F94dc1DB02A252b5b4814aD", "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654", 4_365_693, 86_483_662),
+				aaveMarketAt("Core", "0x794a61358D6845594F94dc1DB02A252b5b4814aD", "0xd9Ca4878dd38B021583c1B669905592EAe76E044", 86_483_663, 122_423_343),
+				aaveMarketAt("Core", "0x794a61358D6845594F94dc1DB02A252b5b4814aD", "0x7deEB8aCE4220643D8edeC871a23807E4d006eE5", 122_423_344, 125_827_825),
+				aaveMarketAt("Core", "0x794a61358D6845594F94dc1DB02A252b5b4814aD", "0x7F23D86Ee20D869112572136221e173428DD740B", 125_827_826, 131_542_951),
+				aaveMarketAt("Core", "0x794a61358D6845594F94dc1DB02A252b5b4814aD", "0x14496b405D62c24F91f04Cda1c69Dc526D56fDE5", 131_542_952, 136_976_691),
+				aaveMarketAt("Core", "0x794a61358D6845594F94dc1DB02A252b5b4814aD", "0x243Aa95cAC2a25651eda86e80bEe66114413c43b", 136_976_692, 0),
+			},
 		}),
 		NewAaveAdapter("aave-v2", "Aave v2", map[ChainID][]aaveMarket{
 			Ethereum: {
 				aaveMarketAt("Core", "0x7d2768dE32b0b80b7a3454c06BdAc94A69DdC7A9", "0x057835Ad21a177dbdd3090bB1CAE03EaCF78Fc6d", 11_362_589, 0),
+			},
+			Polygon: {
+				aaveMarketAt("Core", "0x8dFf5E27EA6b7AC08EbFdf9eB090F32ee9a30fcf", "0x7551b5D2763519d4e37E8B81929D336De671d46d", 12_687_302, 0),
+			},
+			Avalanche: {
+				aaveMarketAt("Core", "0x4F01AeD16D97E3aB5ab2B501154DC9bb0F1A5A2C", "0x65285E9dfab318f57051ab2b139ccCf232945451", 4_607_174, 0),
 			},
 		}),
 		newAaveAdapter("spark", "Spark", map[ChainID][]aaveMarket{

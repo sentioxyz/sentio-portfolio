@@ -187,7 +187,8 @@ func (c *sentioAPIClient) chainStatuses(
 	chains := make(map[ChainID]sentioChainStatus)
 	for _, processor := range payload.Processors {
 		if fmt.Sprint(processor.Version) != config.ProcessorVersion ||
-			processor.VersionState != "ACTIVE" || processor.Status.State != "PROCESSING" {
+			(processor.VersionState != "ACTIVE" && processor.VersionState != "PENDING") ||
+			processor.Status.State != "PROCESSING" {
 			continue
 		}
 		matched++
@@ -218,7 +219,7 @@ func (c *sentioAPIClient) chainStatuses(
 	}
 	if matched != 1 {
 		return nil, fmt.Errorf(
-			"processor status returned %d active version %s processors",
+			"processor status returned %d runnable version %s processors",
 			matched,
 			config.ProcessorVersion,
 		)

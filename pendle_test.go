@@ -15,11 +15,10 @@ import (
 )
 
 func TestPendleFactoryGenerationsCoverEveryChain(t *testing.T) {
-	if got, want := len(pendleChainConfigs), len(SupportedChainIDs); got != want {
+	if got, want := len(pendleChainConfigs), 7; got != want {
 		t.Fatalf("Pendle chain configs = %d, want %d", got, want)
 	}
-	seen := make(map[common.Address]ChainID)
-	for _, chainID := range SupportedChainIDs {
+	for _, chainID := range deploymentChains(pendleChainConfigs) {
 		chain, supported := pendleChainConfigs[chainID]
 		if !supported {
 			t.Fatalf("chain %d has no Pendle config", chainID)
@@ -30,6 +29,7 @@ func TestPendleFactoryGenerationsCoverEveryChain(t *testing.T) {
 		if len(chain.Generations) == 0 {
 			t.Fatalf("chain %d has no Pendle factory generations", chainID)
 		}
+		seen := make(map[common.Address]struct{})
 		for _, generation := range chain.Generations {
 			for _, address := range []common.Address{
 				generation.YieldContractFactory, generation.MarketFactory,
@@ -37,11 +37,10 @@ func TestPendleFactoryGenerationsCoverEveryChain(t *testing.T) {
 				if address == (common.Address{}) {
 					t.Fatalf("chain %d has an unset Pendle factory", chainID)
 				}
-				if other, duplicate := seen[address]; duplicate {
-					t.Fatalf("factory %s is configured on both chain %d and chain %d",
-						address, other, chainID)
+				if _, duplicate := seen[address]; duplicate {
+					t.Fatalf("factory %s is configured twice on chain %d", address, chainID)
 				}
-				seen[address] = chainID
+				seen[address] = struct{}{}
 			}
 		}
 	}
@@ -134,11 +133,17 @@ func TestPendleSkipsChainsBeforeActivation(t *testing.T) {
 }
 
 // An unsupported chain must not be treated as "Pendle with no positions": the adapter advertises
-// four chains and the engine only calls it for those.
+// only configured chains and the engine only calls it for those.
 func TestPendleSkipsUnsupportedChains(t *testing.T) {
+	unsupported := ChainID(999_999)
 	indexer := &stubPendleIndexer{}
 	adapter := newPendleAdapterWithIndexer(indexer)
-	block := BlockRef{ChainID: ChainID(10), Number: 1_000_000, Fixed: true}
+	for _, chainID := range adapter.Info().Chains {
+		if chainID == unsupported {
+			t.Fatalf("sentinel chain %d unexpectedly became supported", unsupported)
+		}
+	}
+	block := BlockRef{ChainID: unsupported, Number: 1_000_000, Fixed: true}
 	groups, err := adapter.Positions(
 		context.Background(), nil, block, common.HexToAddress("0x000000000000000000000000000000000000dEaD"),
 	)
@@ -470,17 +475,24 @@ type pendleStubMarket struct {
 }
 
 type pendleStubRPC struct {
-	t             *testing.T
-	balances      map[common.Address]*big.Int
-	markets       map[common.Address]pendleStubMarket
-	marketTokens  map[common.Address][3]common.Address
-	exchangeRates map[common.Address]*big.Int
-	pyIndices     map[common.Address]*big.Int
-	siblingYT     map[common.Address]common.Address
-	assets        map[common.Address]common.Address
-	symbols       map[common.Address]string
-	decimals      map[common.Address]uint8
-	stateCalls    map[common.Address]int
+	t              *testing.T
+	balances       map[common.Address]*big.Int
+	markets        map[common.Address]pendleStubMarket
+	marketTokens   map[common.Address][3]common.Address
+	exchangeRates  map[common.Address]*big.Int
+	yieldTokens    map[common.Address]common.Address
+	previewRates   map[common.Address]*big.Int
+	ytInterests    map[common.Address]*big.Int
+	ytRewards      map[common.Address][]*big.Int
+	ytRewardTokens map[common.Address][]common.Address
+	rewardReverts  map[common.Address]bool
+	rewardCalls    map[common.Address]int
+	pyIndices      map[common.Address]*big.Int
+	siblingYT      map[common.Address]common.Address
+	assets         map[common.Address]common.Address
+	symbols        map[common.Address]string
+	decimals       map[common.Address]uint8
+	stateCalls     map[common.Address]int
 }
 
 func (s *pendleStubRPC) dispatch(to common.Address, data []byte) (string, map[string]any) {
@@ -491,6 +503,9 @@ func (s *pendleStubRPC) dispatch(to common.Address, data []byte) (string, map[st
 	selector := string(data[:4])
 	switch selector {
 	case string(erc20ABI.Methods["symbol"].ID):
+		if to == (common.Address{}) {
+			return "", fail
+		}
 		symbol, known := s.symbols[to]
 		if !known {
 			return "", fail
@@ -498,6 +513,9 @@ func (s *pendleStubRPC) dispatch(to common.Address, data []byte) (string, map[st
 		out, _ := erc20ABI.Methods["symbol"].Outputs.Pack(symbol)
 		return "0x" + common.Bytes2Hex(out), nil
 	case string(erc20ABI.Methods["decimals"].ID):
+		if to == (common.Address{}) {
+			return "", fail
+		}
 		decimals, known := s.decimals[to]
 		if !known {
 			return "", fail
@@ -547,7 +565,32 @@ func (s *pendleStubRPC) dispatch(to common.Address, data []byte) (string, map[st
 		)
 		return "0x" + common.Bytes2Hex(out), nil
 	case string(pendleMarketABI.Methods["getRewardTokens"].ID):
-		out, _ := pendleMarketABI.Methods["getRewardTokens"].Outputs.Pack([]common.Address{})
+		if s.rewardReverts[to] {
+			return "", fail
+		}
+		rewardTokens := s.ytRewardTokens[to]
+		out, _ := pendleMarketABI.Methods["getRewardTokens"].Outputs.Pack(rewardTokens)
+		return "0x" + common.Bytes2Hex(out), nil
+	case string(pendleYieldTokenABI.Methods["redeemDueInterestAndRewards"].ID):
+		interest := s.ytInterests[to]
+		if interest == nil {
+			interest = new(big.Int)
+		}
+		rewards := s.ytRewards[to]
+		if rewards == nil {
+			rewards = []*big.Int{}
+		}
+		out, _ := pendleYieldTokenABI.Methods["redeemDueInterestAndRewards"].Outputs.Pack(
+			interest, rewards,
+		)
+		return "0x" + common.Bytes2Hex(out), nil
+	case string(pendleMarketABI.Methods["redeemRewards"].ID):
+		s.rewardCalls[to]++
+		rewards := s.ytRewards[to]
+		if rewards == nil {
+			rewards = []*big.Int{}
+		}
+		out, _ := pendleMarketABI.Methods["redeemRewards"].Outputs.Pack(rewards)
 		return "0x" + common.Bytes2Hex(out), nil
 	case string(pendleStandardizedYieldABI.Methods["exchangeRate"].ID):
 		rate, known := s.exchangeRates[to]
@@ -556,13 +599,39 @@ func (s *pendleStubRPC) dispatch(to common.Address, data []byte) (string, map[st
 		}
 		out, _ := pendleStandardizedYieldABI.Methods["exchangeRate"].Outputs.Pack(rate)
 		return "0x" + common.Bytes2Hex(out), nil
+	case string(pendleStandardizedYieldABI.Methods["yieldToken"].ID):
+		yieldToken, known := s.yieldTokens[to]
+		if !known {
+			return "", fail
+		}
+		out, _ := pendleStandardizedYieldABI.Methods["yieldToken"].Outputs.Pack(yieldToken)
+		return "0x" + common.Bytes2Hex(out), nil
+	case string(pendleStandardizedYieldABI.Methods["previewRedeem"].ID):
+		values, err := pendleStandardizedYieldABI.Methods["previewRedeem"].Inputs.Unpack(data[4:])
+		if err != nil || len(values) != 2 {
+			return "", fail
+		}
+		tokenOut, tokenOK := values[0].(common.Address)
+		shares, sharesOK := values[1].(*big.Int)
+		yieldToken, tokenKnown := s.yieldTokens[to]
+		rate, rateKnown := s.previewRates[to]
+		if !tokenOK || !sharesOK || !tokenKnown || !rateKnown || tokenOut != yieldToken {
+			return "", fail
+		}
+		amount := new(big.Int).Div(new(big.Int).Mul(shares, rate), pendleExchangeRateOne)
+		out, _ := pendleStandardizedYieldABI.Methods["previewRedeem"].Outputs.Pack(amount)
+		return "0x" + common.Bytes2Hex(out), nil
 	case string(pendleStandardizedYieldABI.Methods["assetInfo"].ID):
 		asset, known := s.assets[to]
 		if !known {
 			return "", fail
 		}
+		decimals, known := s.decimals[asset]
+		if !known {
+			return "", fail
+		}
 		out, _ := pendleStandardizedYieldABI.Methods["assetInfo"].Outputs.Pack(
-			uint8(0), asset, uint8(18),
+			uint8(0), asset, decimals,
 		)
 		return "0x" + common.Bytes2Hex(out), nil
 	}
@@ -673,7 +742,14 @@ func newPendlePricingFixture(t *testing.T) pendlePricingFixture {
 		marketTokens: map[common.Address][3]common.Address{
 			fixture.market: {fixture.sy, fixture.principal, fixture.yieldT},
 		},
-		exchangeRates: map[common.Address]*big.Int{fixture.sy: pendleExchangeRateOne},
+		exchangeRates:  map[common.Address]*big.Int{fixture.sy: pendleExchangeRateOne},
+		yieldTokens:    map[common.Address]common.Address{fixture.sy: fixture.asset},
+		previewRates:   map[common.Address]*big.Int{fixture.sy: pendleExchangeRateOne},
+		ytInterests:    map[common.Address]*big.Int{fixture.yieldT: new(big.Int)},
+		ytRewards:      map[common.Address][]*big.Int{fixture.yieldT: {}},
+		ytRewardTokens: map[common.Address][]common.Address{fixture.yieldT: {}},
+		rewardReverts:  map[common.Address]bool{},
+		rewardCalls:    map[common.Address]int{},
 		// A solvent SY: the exchange rate has kept up with the index the pair ratcheted to, so
 		// the solvency factor is one and the discount is the implied rate alone.
 		pyIndices:  map[common.Address]*big.Int{fixture.yieldT: pendleExchangeRateOne},
@@ -784,6 +860,436 @@ func TestPendleDirectYTPricesAsTheComplementOfItsPT(t *testing.T) {
 	}
 	if component.PriceBasis.RatioRaw != "10969526824844534" {
 		t.Fatalf("basis ratio = %s", component.PriceBasis.RatioRaw)
+	}
+}
+
+// A YT balance is only the future-yield claim. Interest already accrued but not redeemed is a
+// separate, currently claimable SY amount; simulating the canonical claim and previewing that SY
+// into its yield token keeps it from disappearing from the portfolio.
+func TestPendleDirectYTIncludesClaimableInterestInTheYieldToken(t *testing.T) {
+	fixture := newPendlePricingFixture(t)
+	yieldToken := common.HexToAddress("0x00000000000000000000000000000000000000b2")
+	interest, ok := new(big.Int).SetString("7124537190334757000", 10)
+	if !ok {
+		t.Fatal("invalid interest fixture")
+	}
+	fixture.stub.yieldTokens[fixture.sy] = yieldToken
+	fixture.stub.previewRates[fixture.sy] = pendleExchangeRateOne
+	fixture.stub.symbols[yieldToken] = "sUSDe"
+	fixture.stub.decimals[yieldToken] = 18
+	fixture.stub.ytInterests[fixture.yieldT] = interest
+	indexer := &stubPendleIndexer{
+		refs: []pendlePositionRef{{
+			Token: fixture.yieldT, Kind: pendleYT, PT: fixture.principal,
+			SY: fixture.sy, Expiry: 1_795_651_200, CreatedBlock: 25_098_960,
+		}},
+		markets: map[common.Address][]common.Address{
+			fixture.principal: {fixture.market},
+		},
+	}
+
+	groups := fixture.run(t, indexer)
+	if len(groups) != 1 || len(groups[0].Components) != 2 {
+		t.Fatalf("groups = %#v, want YT balance plus claimable interest", groups)
+	}
+	claim := groups[0].Components[1]
+	if claim.Kind != "reward" || claim.Token.Address != yieldToken {
+		t.Fatalf("interest component = %#v, want redeemable yield-token reward", claim)
+	}
+	if claim.AmountRaw != interest.String() {
+		t.Fatalf("interest amount = %s, want %s", claim.AmountRaw, interest)
+	}
+}
+
+// Transferring the final YT checkpoints interest to the former holder before their token balance
+// reaches zero. The index still has the YT reference, so the claim remains discoverable and must
+// be reported without inventing a zero-balance YT asset component.
+func TestPendleDirectYTKeepsClaimAfterLastTokenWasTransferred(t *testing.T) {
+	fixture := newPendlePricingFixture(t)
+	yieldToken := common.HexToAddress("0x00000000000000000000000000000000000000b4")
+	interest := big.NewInt(9_500_000_000_000_000)
+	fixture.stub.balances[fixture.yieldT] = new(big.Int)
+	fixture.stub.yieldTokens[fixture.sy] = yieldToken
+	fixture.stub.previewRates[fixture.sy] = pendleExchangeRateOne
+	fixture.stub.symbols[yieldToken] = "sUSDe"
+	fixture.stub.decimals[yieldToken] = 18
+	fixture.stub.ytInterests[fixture.yieldT] = interest
+	indexer := &stubPendleIndexer{
+		refs: []pendlePositionRef{{
+			Token: fixture.yieldT, Kind: pendleYT, PT: fixture.principal,
+			SY: fixture.sy, Expiry: 1_795_651_200, CreatedBlock: 25_098_960,
+		}},
+	}
+
+	groups := fixture.run(t, indexer)
+	if len(groups) != 1 || len(groups[0].Components) != 1 {
+		t.Fatalf("groups = %#v, want only the post-transfer claim", groups)
+	}
+	claim := groups[0].Components[0]
+	if claim.Kind != "reward" || claim.Token.Address != yieldToken || claim.AmountRaw != interest.String() {
+		t.Fatalf("claim component = %#v, want %s %s", claim, interest, yieldToken)
+	}
+}
+
+// A stale zero-balance YT can return a claim token whose ERC20 metadata is no longer readable.
+// That historical claim is skipped best effort and cannot erase an unrelated healthy PT holding.
+func TestPendleBrokenZeroBalanceYTClaimMetadataDoesNotBreakHealthyToken(t *testing.T) {
+	fixture := newPendlePricingFixture(t)
+	staleYT := common.HexToAddress("0x00000000000000000000000000000000000000b5")
+	brokenInterestToken := common.HexToAddress("0x00000000000000000000000000000000000000b6")
+	fixture.stub.balances[staleYT] = new(big.Int)
+	fixture.stub.ytInterests[staleYT] = big.NewInt(1)
+	indexer := &stubPendleIndexer{
+		refs: []pendlePositionRef{
+			{
+				Token: staleYT, Kind: pendleYT, PT: fixture.principal,
+				SY: brokenInterestToken, Expiry: 1_795_651_200, CreatedBlock: 1,
+			},
+			{
+				Token: fixture.principal, Kind: pendlePT, PT: fixture.principal,
+				SY: fixture.sy, Expiry: 1_795_651_200, CreatedBlock: 25_098_960,
+			},
+		},
+		markets: map[common.Address][]common.Address{
+			fixture.principal: {fixture.market},
+		},
+	}
+
+	groups := fixture.run(t, indexer)
+	if len(groups) != 1 || groups[0].ID != "pt:"+strings.ToLower(fixture.principal.Hex()) {
+		t.Fatalf("groups = %#v, want only the healthy PT holding", groups)
+	}
+}
+
+// previewRedeem is an optional improvement to the claim's unit. If its yield token later stops
+// answering ERC20 metadata, retain the canonical raw SY claim returned by the YT contract.
+func TestPendleYTClaimFallsBackToRawSYWhenPreviewTokenMetadataIsBroken(t *testing.T) {
+	fixture := newPendlePricingFixture(t)
+	brokenYieldToken := common.HexToAddress("0x00000000000000000000000000000000000000b7")
+	rawInterest := big.NewInt(17_000_000_000_000_000)
+	fixture.stub.balances[fixture.yieldT] = new(big.Int)
+	fixture.stub.yieldTokens[fixture.sy] = brokenYieldToken
+	fixture.stub.previewRates[fixture.sy] = new(big.Int).Mul(pendleExchangeRateOne, big.NewInt(2))
+	fixture.stub.ytInterests[fixture.yieldT] = rawInterest
+	indexer := &stubPendleIndexer{
+		refs: []pendlePositionRef{{
+			Token: fixture.yieldT, Kind: pendleYT, PT: fixture.principal,
+			SY: fixture.sy, Expiry: 1_795_651_200, CreatedBlock: 25_098_960,
+		}},
+	}
+
+	groups := fixture.run(t, indexer)
+	if len(groups) != 1 || len(groups[0].Components) != 1 {
+		t.Fatalf("groups = %#v, want one raw-SY claim fallback", groups)
+	}
+	claim := groups[0].Components[0]
+	if claim.Token.Address != fixture.sy || claim.AmountRaw != rawInterest.String() {
+		t.Fatalf("claim = %#v, want raw SY %s", claim, rawInterest)
+	}
+}
+
+// A permissionless SY controls the reward arrays exposed through its YT. A malformed pair cannot
+// use a dust YT transfer to fail the whole account; the valid token holding remains visible while
+// only its unalignable reward list is discarded.
+func TestPendleMismatchedYTRewardArraysDoNotBreakHealthyToken(t *testing.T) {
+	fixture := newPendlePricingFixture(t)
+	malformedYT := common.HexToAddress("0x00000000000000000000000000000000000000b8")
+	rewardToken := common.HexToAddress("0x00000000000000000000000000000000000000b9")
+	fixture.stub.balances[malformedYT] = big.NewInt(1)
+	fixture.stub.ytRewardTokens[malformedYT] = []common.Address{rewardToken}
+	fixture.stub.ytRewards[malformedYT] = []*big.Int{}
+	fixture.stub.symbols[malformedYT] = "YT-MALFORMED"
+	fixture.stub.decimals[malformedYT] = 18
+	indexer := &stubPendleIndexer{
+		refs: []pendlePositionRef{
+			{
+				Token: malformedYT, Kind: pendleYT, PT: fixture.principal,
+				SY: fixture.sy, Expiry: 1_795_651_200, CreatedBlock: 1,
+			},
+			{
+				Token: fixture.principal, Kind: pendlePT, PT: fixture.principal,
+				SY: fixture.sy, Expiry: 1_795_651_200, CreatedBlock: 25_098_960,
+			},
+		},
+		markets: map[common.Address][]common.Address{
+			fixture.principal: {fixture.market},
+		},
+	}
+
+	groups := fixture.run(t, indexer)
+	if len(groups) != 2 {
+		t.Fatalf("groups = %#v, want both valid token holdings", groups)
+	}
+	foundHealthyPT := false
+	for _, group := range groups {
+		if group.ID == "pt:"+strings.ToLower(fixture.principal.Hex()) {
+			foundHealthyPT = true
+		}
+	}
+	if !foundHealthyPT {
+		t.Fatalf("groups = %#v, healthy PT was erased by malformed YT rewards", groups)
+	}
+}
+
+// A permissionless SY can name an accounting asset with broken ERC20 metadata. That makes only
+// the dust YT's optional price basis unusable; canonical held-token metadata and healthy groups
+// remain strict and intact.
+func TestPendleBrokenBasisMetadataDoesNotBreakHealthyDirectHolding(t *testing.T) {
+	fixture := newPendlePricingFixture(t)
+	malformedYT := common.HexToAddress("0x00000000000000000000000000000000000000bc")
+	maliciousSY := common.HexToAddress("0x00000000000000000000000000000000000000bd")
+	brokenAsset := common.HexToAddress("0x00000000000000000000000000000000000000be")
+	fixture.stub.balances[malformedYT] = big.NewInt(1)
+	fixture.stub.symbols[malformedYT] = "YT-BROKEN-BASIS"
+	fixture.stub.decimals[malformedYT] = 18
+	fixture.stub.exchangeRates[maliciousSY] = pendleExchangeRateOne
+	fixture.stub.assets[maliciousSY] = brokenAsset
+	fixture.stub.decimals[brokenAsset] = 18
+	fixture.stub.pyIndices[malformedYT] = pendleExchangeRateOne
+	indexer := &stubPendleIndexer{
+		refs: []pendlePositionRef{
+			{
+				Token: malformedYT, Kind: pendleYT, PT: fixture.principal,
+				SY: maliciousSY, Expiry: 1_795_651_200, CreatedBlock: 1,
+			},
+			{
+				Token: fixture.principal, Kind: pendlePT, PT: fixture.principal,
+				SY: fixture.sy, Expiry: 1_795_651_200, CreatedBlock: 25_098_960,
+			},
+		},
+		markets: map[common.Address][]common.Address{
+			fixture.principal: {fixture.market},
+		},
+	}
+
+	groups := fixture.run(t, indexer)
+	if len(groups) != 2 {
+		t.Fatalf("groups = %#v, want both direct holdings", groups)
+	}
+	for _, group := range groups {
+		if group.ID == "yt:"+strings.ToLower(malformedYT.Hex()) && group.Components[0].PriceBasis != nil {
+			t.Fatalf("malformed YT basis = %#v, want unpriced holding", group.Components[0].PriceBasis)
+		}
+	}
+}
+
+// Native incentives returned by the YT claim simulation are separate portfolio assets. The
+// token and amount arrays are positional, and zero rewards must not create empty components or
+// trigger metadata reads for assets the account cannot currently claim.
+func TestPendleDirectYTIncludesOnlyNonzeroNativeRewards(t *testing.T) {
+	fixture := newPendlePricingFixture(t)
+	zeroRewardToken := common.HexToAddress("0x00000000000000000000000000000000000000c1")
+	rewardToken := common.HexToAddress("0x00000000000000000000000000000000000000c2")
+	rewardAmount := big.NewInt(42_500_000)
+	fixture.stub.ytRewardTokens[fixture.yieldT] = []common.Address{zeroRewardToken, rewardToken}
+	fixture.stub.ytRewards[fixture.yieldT] = []*big.Int{new(big.Int), rewardAmount}
+	fixture.stub.symbols[rewardToken] = "PENDLE"
+	fixture.stub.decimals[rewardToken] = 18
+	indexer := &stubPendleIndexer{
+		refs: []pendlePositionRef{{
+			Token: fixture.yieldT, Kind: pendleYT, PT: fixture.principal,
+			SY: fixture.sy, Expiry: 1_795_651_200, CreatedBlock: 25_098_960,
+		}},
+		markets: map[common.Address][]common.Address{
+			fixture.principal: {fixture.market},
+		},
+	}
+
+	groups := fixture.run(t, indexer)
+	if len(groups) != 1 || len(groups[0].Components) != 2 {
+		t.Fatalf("groups = %#v, want YT balance plus one nonzero native reward", groups)
+	}
+	reward := groups[0].Components[1]
+	if reward.Kind != "reward" || reward.Token.Address != rewardToken {
+		t.Fatalf("reward component = %#v, want the nonzero native reward token", reward)
+	}
+	if reward.AmountRaw != rewardAmount.String() {
+		t.Fatalf("reward amount = %s, want %s", reward.AmountRaw, rewardAmount)
+	}
+}
+
+// A market checkpoints gauge rewards before transferring away the final LP token. Preserve that
+// reward-only position without emitting zero SY or PT reserve components.
+func TestPendleLiquidityKeepsRewardAfterLastLPWasTransferred(t *testing.T) {
+	fixture := newPendlePricingFixture(t)
+	rewardToken := common.HexToAddress("0x00000000000000000000000000000000000000c3")
+	rewardAmount := big.NewInt(81_000_000_000_000_000)
+	fixture.stub.balances[fixture.market] = new(big.Int)
+	fixture.stub.ytRewardTokens[fixture.market] = []common.Address{rewardToken}
+	fixture.stub.ytRewards[fixture.market] = []*big.Int{rewardAmount}
+	fixture.stub.symbols[rewardToken] = "PENDLE"
+	fixture.stub.decimals[rewardToken] = 18
+	indexer := &stubPendleIndexer{
+		refs: []pendlePositionRef{{
+			Token: fixture.market, Kind: pendleLP, PT: fixture.principal,
+			CreatedBlock: 25_098_960,
+		}},
+	}
+
+	groups := fixture.run(t, indexer)
+	if len(groups) != 1 || len(groups[0].Components) != 1 {
+		t.Fatalf("groups = %#v, want only the post-transfer LP reward", groups)
+	}
+	reward := groups[0].Components[0]
+	if reward.Kind != "reward" || reward.Token.Address != rewardToken || reward.AmountRaw != rewardAmount.String() {
+		t.Fatalf("reward component = %#v, want %s %s", reward, rewardAmount, rewardToken)
+	}
+	if fixture.stub.stateCalls[fixture.market] != 0 {
+		t.Fatal("a zero-balance LP reward claim must not read full market state")
+	}
+}
+
+// A stale historical LP reference with no rewards is not a position. It gets only the lightweight
+// reward-token probe, cannot touch market/SY decomposition, and cannot erase a healthy live LP.
+func TestPendleStaleZeroBalanceLPDoesNotBreakHealthyLiquidity(t *testing.T) {
+	fixture := newPendlePricingFixture(t)
+	staleMarket := common.HexToAddress("0x00000000000000000000000000000000000000d1")
+	fixture.stub.balances[fixture.market] = big.NewInt(111_565)
+	fixture.stub.balances[staleMarket] = new(big.Int)
+	indexer := &stubPendleIndexer{
+		refs: []pendlePositionRef{
+			{Token: staleMarket, Kind: pendleLP, PT: fixture.principal, CreatedBlock: 1},
+			{Token: fixture.market, Kind: pendleLP, PT: fixture.principal, CreatedBlock: 25_098_960},
+		},
+	}
+
+	groups := fixture.run(t, indexer)
+	if len(groups) != 1 || groups[0].ID != "lp:"+strings.ToLower(fixture.market.Hex()) {
+		t.Fatalf("groups = %#v, want only the healthy positive LP", groups)
+	}
+	if fixture.stub.stateCalls[staleMarket] != 0 {
+		t.Fatal("a stale zero-balance LP must not read market state")
+	}
+}
+
+// Even a stale LP that reports a positive simulated reward is untrusted historical input. Broken
+// reward-token metadata drops only that claim; it cannot fail a healthy positive-balance market.
+func TestPendleBrokenZeroBalanceLPRewardMetadataDoesNotBreakHealthyLiquidity(t *testing.T) {
+	fixture := newPendlePricingFixture(t)
+	staleMarket := common.HexToAddress("0x00000000000000000000000000000000000000d2")
+	brokenReward := common.HexToAddress("0x00000000000000000000000000000000000000d3")
+	fixture.stub.balances[fixture.market] = big.NewInt(111_565)
+	fixture.stub.balances[staleMarket] = new(big.Int)
+	fixture.stub.ytRewardTokens[staleMarket] = []common.Address{brokenReward}
+	fixture.stub.ytRewards[staleMarket] = []*big.Int{big.NewInt(1)}
+	indexer := &stubPendleIndexer{
+		refs: []pendlePositionRef{
+			{Token: staleMarket, Kind: pendleLP, PT: fixture.principal, CreatedBlock: 1},
+			{Token: fixture.market, Kind: pendleLP, PT: fixture.principal, CreatedBlock: 25_098_960},
+		},
+	}
+
+	groups := fixture.run(t, indexer)
+	if len(groups) != 1 || groups[0].ID != "lp:"+strings.ToLower(fixture.market.Hex()) {
+		t.Fatalf("groups = %#v, want only the healthy positive LP", groups)
+	}
+	if fixture.stub.stateCalls[staleMarket] != 0 {
+		t.Fatal("a zero-balance LP with broken reward metadata must not read market state")
+	}
+}
+
+// A positive dust LP can point at a stale or malformed market row. Its failed core reads are
+// isolated, so a separate healthy market remains visible.
+func TestPendleBrokenPositiveMarketDoesNotBreakHealthyLiquidity(t *testing.T) {
+	fixture := newPendlePricingFixture(t)
+	brokenMarket := common.HexToAddress("0x00000000000000000000000000000000000000d4")
+	fixture.stub.balances[fixture.market] = big.NewInt(111_565)
+	fixture.stub.balances[brokenMarket] = big.NewInt(1)
+	fixture.stub.rewardReverts[brokenMarket] = true
+	indexer := &stubPendleIndexer{
+		refs: []pendlePositionRef{
+			{Token: brokenMarket, Kind: pendleLP, PT: fixture.principal, CreatedBlock: 1},
+			{Token: fixture.market, Kind: pendleLP, PT: fixture.principal, CreatedBlock: 25_098_960},
+		},
+	}
+
+	groups := fixture.run(t, indexer)
+	if len(groups) != 1 || groups[0].ID != "lp:"+strings.ToLower(fixture.market.Hex()) {
+		t.Fatalf("groups = %#v, want only the healthy positive LP", groups)
+	}
+}
+
+// Reward discovery is optional to the reserve decomposition. A permissionless SY can make that
+// call revert, but the positive LP's SY and PT holdings must still be returned.
+func TestPendleRewardTokenRevertDoesNotDropPositiveLiquidity(t *testing.T) {
+	fixture := newPendlePricingFixture(t)
+	fixture.stub.balances[fixture.market] = big.NewInt(111_565)
+	fixture.stub.rewardReverts[fixture.market] = true
+	indexer := &stubPendleIndexer{
+		refs: []pendlePositionRef{{
+			Token: fixture.market, Kind: pendleLP, PT: fixture.principal,
+			CreatedBlock: 25_098_960,
+		}},
+	}
+
+	groups := fixture.run(t, indexer)
+	if len(groups) != 1 || len(groups[0].Components) < 2 {
+		t.Fatalf("groups = %#v, want LP reserve legs without rewards", groups)
+	}
+}
+
+// exchangeRate/assetInfo are valuation upgrades, not ownership prerequisites. A broken arbitrary
+// SY therefore remains as the exact raw reserve token and cannot erase another healthy market.
+func TestPendleBrokenSYStateKeepsRawLiquidityAndHealthyMarket(t *testing.T) {
+	fixture := newPendlePricingFixture(t)
+	brokenMarket := common.HexToAddress("0x00000000000000000000000000000000000000d5")
+	brokenSY := common.HexToAddress("0x00000000000000000000000000000000000000d6")
+	fixture.stub.balances[fixture.market] = big.NewInt(111_565)
+	fixture.stub.balances[brokenMarket] = big.NewInt(111_565)
+	fixture.stub.markets[brokenMarket] = fixture.stub.markets[fixture.market]
+	fixture.stub.marketTokens[brokenMarket] = [3]common.Address{
+		brokenSY, fixture.principal, fixture.yieldT,
+	}
+	fixture.stub.symbols[brokenSY] = "SY-BROKEN"
+	fixture.stub.decimals[brokenSY] = 18
+	indexer := &stubPendleIndexer{
+		refs: []pendlePositionRef{
+			{Token: brokenMarket, Kind: pendleLP, PT: fixture.principal, CreatedBlock: 1},
+			{Token: fixture.market, Kind: pendleLP, PT: fixture.principal, CreatedBlock: 25_098_960},
+		},
+	}
+
+	groups := fixture.run(t, indexer)
+	if len(groups) != 2 {
+		t.Fatalf("groups = %#v, want both positive LPs", groups)
+	}
+	foundRawSY := false
+	for _, group := range groups {
+		if group.ID != "lp:"+strings.ToLower(brokenMarket.Hex()) {
+			continue
+		}
+		for _, component := range group.Components {
+			if component.Token.Address == brokenSY {
+				foundRawSY = true
+			}
+		}
+	}
+	if !foundRawSY {
+		t.Fatalf("groups = %#v, broken SY's raw reserve leg is missing", groups)
+	}
+}
+
+// Bound hostile dynamic arrays before they multiply claim and metadata work.
+func TestPendleOversizedRewardListDoesNotFanOut(t *testing.T) {
+	fixture := newPendlePricingFixture(t)
+	fixture.stub.balances[fixture.market] = big.NewInt(111_565)
+	fixture.stub.ytRewardTokens[fixture.market] = make(
+		[]common.Address, pendleMaxRewardTokens+1,
+	)
+	indexer := &stubPendleIndexer{
+		refs: []pendlePositionRef{{
+			Token: fixture.market, Kind: pendleLP, PT: fixture.principal,
+			CreatedBlock: 25_098_960,
+		}},
+	}
+
+	groups := fixture.run(t, indexer)
+	if len(groups) != 1 {
+		t.Fatalf("groups = %#v, want the underlying LP position", groups)
+	}
+	if fixture.stub.rewardCalls[fixture.market] != 0 {
+		t.Fatalf("redeemRewards calls = %d, want zero for oversized token list",
+			fixture.stub.rewardCalls[fixture.market])
 	}
 }
 
@@ -920,6 +1426,261 @@ func TestPendleLiquidityPTLegPricesThroughTheSameAsset(t *testing.T) {
 	}
 	if indexer.marketsCalled {
 		t.Fatal("a liquidity position already reads its market and must not look one up")
+	}
+}
+
+// A standard SY's yield token is the holder's safest concrete claim and may use a different
+// decimal base from assetInfo. Monad SY-sUSDat is the live regression: SY and sUSDat use 18
+// decimals while the accounting asset uses 6; DeBank also reports the LP leg as sUSDat.
+func TestPendleLiquidityPrefersRedeemableYieldTokenAcrossDifferentAssetDecimals(t *testing.T) {
+	fixture := newPendlePricingFixture(t)
+	yieldToken := common.HexToAddress("0x00000000000000000000000000000000000000b1")
+	fixture.stub.decimals[fixture.sy] = 18
+	fixture.stub.decimals[fixture.asset] = 6
+	fixture.stub.decimals[yieldToken] = 18
+	fixture.stub.symbols[yieldToken] = "sUSDat"
+	fixture.stub.decimals[fixture.principal] = 6
+	fixture.stub.exchangeRates[fixture.sy] = big.NewInt(1_016_186)
+	fixture.stub.yieldTokens[fixture.sy] = yieldToken
+	fixture.stub.previewRates[fixture.sy] = pendleExchangeRateOne
+	fixture.stub.pyIndices[fixture.yieldT] = big.NewInt(1_016_186)
+	fixture.stub.markets[fixture.market] = pendleStubMarket{
+		totalPt:       new(big.Int),
+		totalSy:       big.NewInt(1_000_000_000_000_000_000),
+		totalLp:       big.NewInt(1),
+		expiry:        1_795_651_200,
+		lnImpliedRate: big.NewInt(47_125_524_316_414_759),
+	}
+	fixture.stub.balances[fixture.market] = big.NewInt(1)
+	indexer := &stubPendleIndexer{
+		refs: []pendlePositionRef{{
+			Token: fixture.market, Kind: pendleLP, PT: fixture.principal,
+			CreatedBlock: 25_098_960,
+		}},
+	}
+
+	groups := fixture.run(t, indexer)
+	if len(groups) != 1 || len(groups[0].Components) != 1 {
+		t.Fatalf("groups = %#v, want one liquidity asset component", groups)
+	}
+	component := groups[0].Components[0]
+	if component.Token.Address != yieldToken {
+		t.Fatalf("component token = %s, want redeemable yield token %s", component.Token.Address, yieldToken)
+	}
+	if component.Token.Decimals != 18 {
+		t.Fatalf("yield-token decimals = %d, want 18", component.Token.Decimals)
+	}
+	if component.AmountRaw != "1000000000000000000" {
+		t.Fatalf("yield-token amount = %s, want one natural token", component.AmountRaw)
+	}
+}
+
+// Some standard SYs deliberately have no accounting asset. Monad's official shMON market is the
+// live shape: assetInfo returns address(0), while yieldToken and previewRedeem are both usable.
+// That LP must report its redeemable shMON leg without querying zero-address ERC20 metadata; its
+// PT remains visible but unpriced because there is no accounting asset for a defensible basis.
+func TestPendleLiquiditySupportsAZeroAccountingAssetWithRedeemableYieldToken(t *testing.T) {
+	fixture := newPendlePricingFixture(t)
+	yieldToken := common.HexToAddress("0x1B68c5aA0c0512D1c5F07192C0266766D6B65FD5")
+	fixture.stub.assets[fixture.sy] = common.Address{}
+	fixture.stub.decimals[common.Address{}] = 18
+	fixture.stub.yieldTokens[fixture.sy] = yieldToken
+	fixture.stub.previewRates[fixture.sy] = pendleExchangeRateOne
+	fixture.stub.symbols[yieldToken] = "shMON"
+	fixture.stub.decimals[yieldToken] = 18
+	fixture.stub.balances[fixture.market] = big.NewInt(111_565)
+	indexer := &stubPendleIndexer{
+		refs: []pendlePositionRef{{
+			Token: fixture.market, Kind: pendleLP, PT: fixture.principal,
+			CreatedBlock: 25_098_960,
+		}},
+	}
+
+	groups := fixture.run(t, indexer)
+	if len(groups) != 1 || len(groups[0].Components) != 2 {
+		t.Fatalf("groups = %#v, want redeemable yield-token and PT legs", groups)
+	}
+	var yieldLeg, principalLeg *Component
+	for index := range groups[0].Components {
+		component := &groups[0].Components[index]
+		switch component.Token.Address {
+		case yieldToken:
+			yieldLeg = component
+		case fixture.principal:
+			principalLeg = component
+		}
+	}
+	if yieldLeg == nil {
+		t.Fatalf("components = %#v, want redeemable yield-token leg", groups[0].Components)
+	}
+	if principalLeg == nil || principalLeg.PriceBasis != nil {
+		t.Fatalf("PT component = %#v, want a visible but unpriced PT leg", principalLeg)
+	}
+}
+
+// A preview is only an upgrade when its result can actually be described as an ERC20. A
+// permissionless SY can return a token with broken metadata; retain the safe accounting-asset
+// conversion rather than failing the account or losing the reserve leg.
+func TestPendleLiquidityFallsBackWhenPreviewTokenMetadataIsBroken(t *testing.T) {
+	fixture := newPendlePricingFixture(t)
+	brokenYieldToken := common.HexToAddress("0x00000000000000000000000000000000000000ba")
+	fixture.stub.yieldTokens[fixture.sy] = brokenYieldToken
+	fixture.stub.previewRates[fixture.sy] = pendleExchangeRateOne
+	fixture.stub.balances[fixture.market] = big.NewInt(111_565)
+	indexer := &stubPendleIndexer{
+		refs: []pendlePositionRef{{
+			Token: fixture.market, Kind: pendleLP, PT: fixture.principal,
+			CreatedBlock: 25_098_960,
+		}},
+	}
+
+	groups := fixture.run(t, indexer)
+	if len(groups) != 1 {
+		t.Fatalf("groups = %#v, want one liquidity group", groups)
+	}
+	for _, component := range groups[0].Components {
+		if component.Token.Address == fixture.asset {
+			return
+		}
+	}
+	t.Fatalf("components = %#v, want accounting-asset fallback", groups[0].Components)
+}
+
+// The same broken preview token on a native-accounting SY has no assetInfo fallback. Preserve
+// the raw SY reserve share, which is still an exact on-chain holding.
+func TestPendleZeroAssetLiquidityFallsBackToRawSYWhenPreviewMetadataIsBroken(t *testing.T) {
+	fixture := newPendlePricingFixture(t)
+	brokenYieldToken := common.HexToAddress("0x00000000000000000000000000000000000000bb")
+	fixture.stub.assets[fixture.sy] = common.Address{}
+	fixture.stub.decimals[common.Address{}] = 18
+	fixture.stub.yieldTokens[fixture.sy] = brokenYieldToken
+	fixture.stub.previewRates[fixture.sy] = pendleExchangeRateOne
+	fixture.stub.balances[fixture.market] = big.NewInt(111_565)
+	indexer := &stubPendleIndexer{
+		refs: []pendlePositionRef{{
+			Token: fixture.market, Kind: pendleLP, PT: fixture.principal,
+			CreatedBlock: 25_098_960,
+		}},
+	}
+
+	groups := fixture.run(t, indexer)
+	if len(groups) != 1 {
+		t.Fatalf("groups = %#v, want one liquidity group", groups)
+	}
+	for _, component := range groups[0].Components {
+		if component.Token.Address == fixture.sy {
+			return
+		}
+	}
+	t.Fatalf("components = %#v, want raw SY fallback", groups[0].Components)
+}
+
+// A zero-accounting-asset SY may also reject the optional preview at a historical block. The
+// holder still owns the market's raw SY reserve share, so degrade to that token rather than
+// silently dropping the leg.
+func TestPendleLiquidityKeepsRawSYWhenZeroAssetPreviewReverts(t *testing.T) {
+	fixture := newPendlePricingFixture(t)
+	fixture.stub.assets[fixture.sy] = common.Address{}
+	fixture.stub.decimals[common.Address{}] = 18
+	delete(fixture.stub.previewRates, fixture.sy)
+	fixture.stub.balances[fixture.market] = big.NewInt(111_565)
+	indexer := &stubPendleIndexer{
+		refs: []pendlePositionRef{{
+			Token: fixture.market, Kind: pendleLP, PT: fixture.principal,
+			CreatedBlock: 25_098_960,
+		}},
+	}
+
+	groups := fixture.run(t, indexer)
+	if len(groups) != 1 {
+		t.Fatalf("groups = %#v, want one liquidity group", groups)
+	}
+	for _, component := range groups[0].Components {
+		if component.Token.Address == fixture.sy {
+			want := pendleReserveShare(
+				fixture.stub.balances[fixture.market],
+				fixture.stub.markets[fixture.market].totalSy,
+				fixture.stub.markets[fixture.market].totalLp,
+			)
+			if component.AmountRaw != want.String() {
+				t.Fatalf("raw SY amount = %s, want %s", component.AmountRaw, want)
+			}
+			return
+		}
+	}
+	t.Fatalf("components = %#v, want raw SY fallback", groups[0].Components)
+}
+
+// previewRedeem is best-effort and heterogeneous SY implementations can reject it. One such
+// failure must degrade only that reserve leg to the always-defined assetInfo/exchangeRate path,
+// not erase the LP or fail the account scan.
+func TestPendleLiquidityFallsBackToAccountingAssetWhenPreviewRedeemReverts(t *testing.T) {
+	fixture := newPendlePricingFixture(t)
+	fixture.stub.yieldTokens[fixture.sy] = common.HexToAddress("0x00000000000000000000000000000000000000b3")
+	delete(fixture.stub.previewRates, fixture.sy)
+	fixture.stub.balances[fixture.market] = big.NewInt(111_565)
+	indexer := &stubPendleIndexer{
+		refs: []pendlePositionRef{{
+			Token: fixture.market, Kind: pendleLP, PT: fixture.principal,
+			CreatedBlock: 25_098_960,
+		}},
+	}
+
+	groups := fixture.run(t, indexer)
+	if len(groups) != 1 {
+		t.Fatalf("groups = %#v, want one liquidity group", groups)
+	}
+	wantAmount := pendleSYToAsset(
+		pendleReserveShare(
+			fixture.stub.balances[fixture.market],
+			fixture.stub.markets[fixture.market].totalSy,
+			fixture.stub.markets[fixture.market].totalLp,
+		),
+		fixture.stub.exchangeRates[fixture.sy],
+	)
+	var fallback *Component
+	for index := range groups[0].Components {
+		if groups[0].Components[index].Token.Address == fixture.asset {
+			fallback = &groups[0].Components[index]
+		}
+	}
+	if fallback == nil {
+		t.Fatalf("components = %#v, want accounting-asset fallback", groups[0].Components)
+	}
+	if fallback.AmountRaw != wantAmount.String() {
+		t.Fatalf("fallback amount = %s, want %s", fallback.AmountRaw, wantAmount)
+	}
+}
+
+// Older or non-standard SY implementations may not expose yieldToken at the pinned block. That
+// optional convenience read must not erase the long-standing assetInfo/exchangeRate fallback.
+func TestPendleLiquidityFallsBackWhenYieldTokenIsUnavailable(t *testing.T) {
+	fixture := newPendlePricingFixture(t)
+	delete(fixture.stub.yieldTokens, fixture.sy)
+	fixture.stub.balances[fixture.market] = big.NewInt(111_565)
+	indexer := &stubPendleIndexer{
+		refs: []pendlePositionRef{{
+			Token: fixture.market, Kind: pendleLP, PT: fixture.principal,
+			CreatedBlock: 25_098_960,
+		}},
+	}
+
+	groups := fixture.run(t, indexer)
+	if len(groups) != 1 {
+		t.Fatalf("groups = %#v, want one liquidity group", groups)
+	}
+	for _, component := range groups[0].Components {
+		if component.Token.Address == fixture.asset {
+			return
+		}
+	}
+	t.Fatalf("components = %#v, want accounting-asset fallback", groups[0].Components)
+}
+
+func TestPendleSYToAssetConvertsDifferentRawDecimalBases(t *testing.T) {
+	amount := big.NewInt(1_000_000_000_000_000_000)
+	if got := pendleSYToAsset(amount, big.NewInt(1_016_186)); got.String() != "1016186" {
+		t.Fatalf("asset amount = %s, want 1016186 raw units", got)
 	}
 }
 

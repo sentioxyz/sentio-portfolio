@@ -138,15 +138,53 @@ func TestExpandedProtocolManifests(t *testing.T) {
 	}
 
 	euler := newEulerV2Adapter(SentioIndexerConfig{}).(*EulerV2Adapter)
-	if got := len(euler.Info().Chains); got != 4 || len(eulerV2ChainConfigs) != 4 {
-		t.Fatalf("Euler V2 chain coverage = %d/%d, want 4/4", got, len(eulerV2ChainConfigs))
+	if got := len(euler.Info().Chains); got != 8 || len(eulerV2ChainConfigs) != 8 {
+		t.Fatalf("Euler V2 chain coverage = %d/%d, want 8/8", got, len(eulerV2ChainConfigs))
 	}
-	for _, chainID := range []ChainID{Ethereum, BSC, Base, Arbitrum} {
+	for _, chainID := range []ChainID{Ethereum, BSC, Base, Arbitrum, Polygon, Monad, Plasma, Avalanche} {
 		config, exists := eulerV2ChainConfigs[chainID]
 		if !exists || config.ChainID != chainID || config.EVC == (common.Address{}) ||
 			config.EVaultFactory == (common.Address{}) || config.TrackingRewards == (common.Address{}) {
 			t.Fatalf("Euler V2 chain %d configuration is incomplete", chainID)
 		}
+	}
+}
+
+func TestEtherfiOptimismReceiptSuppressesWalletDuplicate(t *testing.T) {
+	adapter := newEtherfiAdapter(SentioIndexerConfig{}).(*EtherfiAdapter)
+	if !supportsChain(adapter.Info().Chains, Optimism) {
+		t.Fatal("Ether.fi does not advertise Optimism")
+	}
+	receipts := adapter.receipts[Optimism]
+	if len(receipts) != 1 || receipts[0].ActivationBlock != 120_917_167 {
+		t.Fatalf("Ether.fi Optimism receipts = %+v", receipts)
+	}
+	receipt := receipts[0]
+	protocolGroup := Group{
+		ID: "weeth",
+		Components: []Component{NewComponent(
+			"asset",
+			receipt.Token,
+			big.NewInt(7),
+			Source{Contract: receipt.BalanceContract, Method: "balanceOf"},
+		)},
+	}
+	walletGroup := Group{
+		ID: walletTokenGroupID(receipt.Token.Address),
+		Components: []Component{NewComponent(
+			"asset",
+			receipt.Token,
+			big.NewInt(7),
+			Source{Contract: receipt.Token.Address, Method: "balanceOf"},
+		)},
+		Metadata: map[string]any{"holding": "token"},
+	}
+	snapshots := suppressDuplicateHoldings([]Snapshot{
+		{ProtocolID: "etherfi", ChainID: Optimism, Groups: []Group{protocolGroup}},
+		{ProtocolID: walletProtocolID, ChainID: Optimism, Groups: []Group{walletGroup}},
+	})
+	if len(snapshots) != 1 || snapshots[0].ProtocolID != "etherfi" {
+		t.Fatalf("duplicate weETH wallet holding survived: %+v", snapshots)
 	}
 }
 

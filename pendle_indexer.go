@@ -36,7 +36,7 @@ type pendleIndexer struct {
 func newPendleIndexer(config SentioIndexerConfig) *pendleIndexer {
 	return &pendleIndexer{
 		api: newSentioAPIClient(), config: config,
-		requiredChains: []ChainID{Ethereum, BSC, Base, Arbitrum},
+		requiredChains: deploymentChains(pendleChainConfigs),
 	}
 }
 

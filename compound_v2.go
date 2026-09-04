@@ -2,9 +2,11 @@ package portfolio
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"sort"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
@@ -65,6 +67,20 @@ var compoundStakingModuleABI = MustABI(`[
   {"type":"function","name":"REWARD_TOKEN","stateMutability":"view","inputs":[],"outputs":[{"name":"token","type":"address"}]}
 ]`)
 
+var compoundDistributorStakingABI = MustABI(`[
+  {"type":"function","name":"balanceOf","stateMutability":"view","inputs":[{"name":"account","type":"address"}],"outputs":[{"name":"amount","type":"uint256"}]},
+  {"type":"function","name":"sonne","stateMutability":"view","inputs":[],"outputs":[{"name":"token","type":"address"}]},
+  {"type":"function","name":"withdrawal","stateMutability":"view","inputs":[{"name":"account","type":"address"}],"outputs":[{"name":"amount","type":"uint256"},{"name":"releaseTime","type":"uint256"}]},
+  {"type":"function","name":"tokens","stateMutability":"view","inputs":[{"name":"index","type":"uint256"}],"outputs":[{"name":"token","type":"address"}]},
+  {"type":"function","name":"getClaimable","stateMutability":"view","inputs":[{"name":"token","type":"address"},{"name":"account","type":"address"}],"outputs":[{"name":"amount","type":"uint256"}]}
+]`)
+
+const (
+	compoundDistributorRewardProbeSize = 8
+	compoundDistributorMaxRewards      = 64
+	compoundV2ExchangeRateDenominator  = "1000000000000000000"
+)
+
 type compoundRewardMetadata struct {
 	Balance   *big.Int
 	Votes     *big.Int
@@ -90,6 +106,14 @@ type compoundStakingModule struct {
 	Window         availabilityWindow
 }
 
+// compoundDistributorStakingModule is a 1:1 staking wrapper backed by a
+// Distributor reward index. Its public tokens array deliberately has no length
+// getter, so the adapter enumerates it with bounded tokens(index) probes.
+type compoundDistributorStakingModule struct {
+	Module common.Address
+	Window availabilityWindow
+}
+
 type compoundV2Deployment struct {
 	Comptroller            common.Address
 	ComptrollerWindow      availabilityWindow
@@ -101,6 +125,7 @@ type compoundV2Deployment struct {
 	MultiRewardDistributor common.Address
 	MultiRewardWindow      availabilityWindow
 	StakingModules         []compoundStakingModule
+	DistributorStaking     []compoundDistributorStakingModule
 }
 
 type CompoundV2Adapter struct {
@@ -113,14 +138,10 @@ func NewCompoundV2Adapter(
 	name string,
 	deployments map[ChainID]compoundV2Deployment,
 ) *CompoundV2Adapter {
-	chains := make([]ChainID, 0, len(deployments))
-	for _, chainID := range SupportedChainIDs {
-		if _, ok := deployments[chainID]; ok {
-			chains = append(chains, chainID)
-		}
-	}
 	return &CompoundV2Adapter{
-		adapterBase: adapterBase{info: ProtocolInfo{ID: id, Name: name, Chains: chains}},
+		adapterBase: adapterBase{info: ProtocolInfo{
+			ID: id, Name: name, Chains: deploymentChains(deployments),
+		}},
 		deployments: deployments,
 	}
 }
@@ -318,6 +339,259 @@ func compoundStakingGroups(
 	return groups, nil
 }
 
+func compoundDistributorRewardTokens(
+	ctx context.Context,
+	client *RPCClient,
+	block BlockRef,
+	distributor common.Address,
+) ([]common.Address, error) {
+	rewardTokens := make([]common.Address, 0)
+	seen := make(map[common.Address]struct{})
+	// Index zero is a sentinel installed by Distributor's constructor. Probe one
+	// element beyond the maximum and cap malformed or unexpectedly long lists;
+	// reward discovery must never suppress the independently readable principal.
+	for start := 0; start <= compoundDistributorMaxRewards+1; start += compoundDistributorRewardProbeSize {
+		end := min(
+			start+compoundDistributorRewardProbeSize,
+			compoundDistributorMaxRewards+2,
+		)
+		calls := make([]ContractCall, 0, end-start)
+		for index := start; index < end; index++ {
+			calls = append(calls, ContractCall{
+				Contract: distributor,
+				ABI:      compoundDistributorStakingABI,
+				Method:   "tokens",
+				Args:     []any{new(big.Int).SetUint64(uint64(index))},
+			})
+		}
+		rows, err := client.ParallelCallsAllowFailure(ctx, block, calls)
+		if err != nil {
+			return nil, fmt.Errorf("enumerate reward tokens %d-%d: %w", start, end-1, err)
+		}
+		for offset, row := range rows {
+			index := start + offset
+			if row.Error != nil {
+				return rewardTokens, nil
+			}
+			address, decodeErr := AddressAt(row.Values, 0)
+			if decodeErr != nil {
+				continue
+			}
+			if index == 0 {
+				continue
+			}
+			if address == (common.Address{}) {
+				continue
+			}
+			if len(rewardTokens) == compoundDistributorMaxRewards {
+				return rewardTokens, nil
+			}
+			if _, exists := seen[address]; exists {
+				continue
+			}
+			seen[address] = struct{}{}
+			rewardTokens = append(rewardTokens, address)
+		}
+	}
+	return rewardTokens, nil
+}
+
+func compoundDistributorStakingGroup(
+	ctx context.Context,
+	client *RPCClient,
+	block BlockRef,
+	module compoundDistributorStakingModule,
+	account common.Address,
+	tokenCache map[common.Address]Token,
+) (*Group, error) {
+	principalRows, err := client.ParallelCalls(ctx, block, []ContractCall{
+		{
+			Contract: module.Module,
+			ABI:      compoundDistributorStakingABI,
+			Method:   "balanceOf",
+			Args:     []any{account},
+		},
+		{
+			Contract: module.Module,
+			ABI:      compoundDistributorStakingABI,
+			Method:   "withdrawal",
+			Args:     []any{account},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("principal: %w", err)
+	}
+	stakedAmount, err := BigIntAt(principalRows[0], 0)
+	if err != nil {
+		return nil, fmt.Errorf("balance: %w", err)
+	}
+	pendingWithdrawal, err := BigIntAt(principalRows[1], 0)
+	if err != nil {
+		return nil, fmt.Errorf("pending withdrawal: %w", err)
+	}
+	releaseTime, err := BigIntAt(principalRows[1], 1)
+	if err != nil {
+		return nil, fmt.Errorf("withdrawal release time: %w", err)
+	}
+	var partialErr error
+	rewardTokens, rewardDiscoveryErr := compoundDistributorRewardTokens(
+		ctx,
+		client,
+		block,
+		module.Module,
+	)
+	if rewardDiscoveryErr != nil {
+		partialErr = errors.Join(partialErr, fmt.Errorf("reward discovery: %w", rewardDiscoveryErr))
+		rewardTokens = nil
+	}
+	rewardCalls := make([]ContractCall, 0, len(rewardTokens))
+	for _, rewardToken := range rewardTokens {
+		rewardCalls = append(rewardCalls, ContractCall{
+			Contract: module.Module,
+			ABI:      compoundDistributorStakingABI,
+			Method:   "getClaimable",
+			Args:     []any{rewardToken, account},
+		})
+	}
+	rewardRows, rewardCallsErr := client.ParallelCallsAllowFailure(ctx, block, rewardCalls)
+	if rewardCallsErr != nil {
+		partialErr = errors.Join(partialErr, fmt.Errorf("claimable rewards: %w", rewardCallsErr))
+		rewardRows = nil
+		rewardTokens = nil
+	}
+
+	readCachedToken := func(address common.Address) (Token, error) {
+		if cached, exists := tokenCache[address]; exists {
+			return cached, nil
+		}
+		metadata, metadataErr := readToken(ctx, client, block, address)
+		if metadataErr != nil {
+			return Token{}, metadataErr
+		}
+		tokenCache[address] = metadata
+		return metadata, nil
+	}
+
+	components := make([]Component, 0, 1+len(rewardRows))
+	principal := new(big.Int).Add(stakedAmount, pendingWithdrawal)
+	if principal.Sign() > 0 {
+		stakedTokenResult, tokenErr := client.Call(
+			ctx,
+			block,
+			module.Module,
+			compoundDistributorStakingABI,
+			"sonne",
+		)
+		if tokenErr != nil {
+			return nil, fmt.Errorf("staked token: %w", tokenErr)
+		}
+		stakedTokenAddress, tokenErr := AddressAt(stakedTokenResult, 0)
+		if tokenErr != nil {
+			return nil, fmt.Errorf("staked token: %w", tokenErr)
+		}
+		if stakedTokenAddress == (common.Address{}) {
+			return nil, fmt.Errorf("staked token is the zero address")
+		}
+		stakedToken, tokenErr := readCachedToken(stakedTokenAddress)
+		if tokenErr != nil {
+			return nil, fmt.Errorf("staked token metadata: %w", tokenErr)
+		}
+		component := NewComponent(
+			"asset",
+			stakedToken,
+			principal,
+			Source{Contract: module.Module, Method: "balanceOf+withdrawal"},
+		)
+		component.Metadata = map[string]any{
+			"stakedAmountRaw":            stakedAmount.String(),
+			"pendingWithdrawalAmountRaw": pendingWithdrawal.String(),
+			"withdrawalReleaseTime":      releaseTime.String(),
+		}
+		components = append(components, component)
+	}
+	for index, row := range rewardRows {
+		if row.Error != nil {
+			continue
+		}
+		amount, amountErr := BigIntAt(row.Values, 0)
+		if amountErr != nil {
+			continue
+		}
+		if amount.Sign() <= 0 {
+			continue
+		}
+		rewardToken, tokenErr := readCachedToken(rewardTokens[index])
+		if tokenErr != nil {
+			continue
+		}
+		components = append(components, NewComponent(
+			"reward",
+			rewardToken,
+			amount,
+			Source{Contract: module.Module, Method: "getClaimable"},
+		))
+	}
+	if len(components) == 0 {
+		return nil, partialErr
+	}
+	return &Group{
+		ID:         "staking:" + strings.ToLower(module.Module.Hex()),
+		Label:      "Staked",
+		Components: components,
+		Metadata:   map[string]any{"module": module.Module},
+	}, partialErr
+}
+
+func compoundDistributorStakingGroups(
+	ctx context.Context,
+	client *RPCClient,
+	block BlockRef,
+	modules []compoundDistributorStakingModule,
+	account common.Address,
+) ([]Group, error) {
+	if account == (common.Address{}) {
+		return nil, nil
+	}
+	groups := make([]Group, 0, len(modules))
+	tokenCache := make(map[common.Address]Token)
+	var partialErr error
+	for _, module := range modules {
+		if !module.Window.ActiveAt(block.Number) {
+			continue
+		}
+		group, err := compoundDistributorStakingGroup(
+			ctx,
+			client,
+			block,
+			module,
+			account,
+			tokenCache,
+		)
+		if err != nil {
+			partialErr = errors.Join(partialErr, fmt.Errorf("%s: %w", module.Module, err))
+		}
+		if group != nil {
+			groups = append(groups, *group)
+		}
+	}
+	return groups, partialErr
+}
+
+func compoundV2SupplyComponent(
+	token Token,
+	numerator *big.Int,
+	market common.Address,
+) Component {
+	component := NewComponent(
+		"asset",
+		token,
+		numerator,
+		Source{Contract: market, Method: "balanceOf*exchangeRateStored/1e18"},
+	)
+	component.AmountDenominatorRaw = compoundV2ExchangeRateDenominator
+	return component
+}
+
 func compoundV2MarketGroup(
 	ctx context.Context,
 	client *RPCClient,
@@ -388,10 +662,7 @@ func compoundV2MarketGroup(
 			return nil, fmt.Errorf("%s debt: %w", read.market, readErr)
 		}
 		resultIndex++
-		supply := new(big.Int).Quo(
-			new(big.Int).Mul(shares, exchangeRate),
-			big.NewInt(1_000_000_000_000_000_000),
-		)
+		supplyNumerator := new(big.Int).Mul(shares, exchangeRate)
 
 		var underlying common.Address
 		if !read.native {
@@ -401,7 +672,7 @@ func compoundV2MarketGroup(
 			}
 			resultIndex++
 		}
-		if supply.Sign() == 0 && debt.Sign() == 0 {
+		if supplyNumerator.Sign() == 0 && debt.Sign() == 0 {
 			continue
 		}
 
@@ -412,13 +683,11 @@ func compoundV2MarketGroup(
 				return nil, fmt.Errorf("%s metadata: %w", underlying, readErr)
 			}
 		}
-		if supply.Sign() > 0 {
-			components = append(components, NewComponent(
-				"asset",
-				underlyingToken,
-				supply,
-				Source{Contract: read.market, Method: "balanceOf*exchangeRateStored/1e18"},
-			))
+		if supplyNumerator.Sign() > 0 {
+			components = append(
+				components,
+				compoundV2SupplyComponent(underlyingToken, supplyNumerator, read.market),
+			)
 		}
 		if debt.Sign() > 0 {
 			components = append(components, NewComponent(
@@ -448,33 +717,35 @@ func (a *CompoundV2Adapter) Positions(
 	account common.Address,
 ) ([]Group, error) {
 	deployment, ok := a.deployments[block.ChainID]
-	if !ok || !deployment.ComptrollerWindow.ActiveAt(block.Number) {
+	if !ok {
 		return nil, nil
 	}
-	marketResult, err := client.Call(
-		ctx,
-		block,
-		deployment.Comptroller,
-		comptrollerABI,
-		"getAllMarkets",
-	)
-	if err != nil {
-		return nil, fmt.Errorf("enumerate markets: %w", err)
-	}
-	if len(marketResult) != 1 {
-		return nil, fmt.Errorf("getAllMarkets returned %d fields", len(marketResult))
-	}
-	markets, err := decodeAddresses(marketResult[0])
-	if err != nil {
-		return nil, err
-	}
-	groups := make([]Group, 0, 4)
-	lendingGroup, err := compoundV2MarketGroup(ctx, client, block, deployment, account, markets)
-	if err != nil {
-		return nil, err
-	}
-	if lendingGroup != nil {
-		groups = append(groups, *lendingGroup)
+	groups := make([]Group, 0, 4+len(deployment.DistributorStaking))
+	if deployment.ComptrollerWindow.ActiveAt(block.Number) {
+		marketResult, err := client.Call(
+			ctx,
+			block,
+			deployment.Comptroller,
+			comptrollerABI,
+			"getAllMarkets",
+		)
+		if err != nil {
+			return nil, fmt.Errorf("enumerate markets: %w", err)
+		}
+		if len(marketResult) != 1 {
+			return nil, fmt.Errorf("getAllMarkets returned %d fields", len(marketResult))
+		}
+		markets, err := decodeAddresses(marketResult[0])
+		if err != nil {
+			return nil, err
+		}
+		lendingGroup, err := compoundV2MarketGroup(ctx, client, block, deployment, account, markets)
+		if err != nil {
+			return nil, err
+		}
+		if lendingGroup != nil {
+			groups = append(groups, *lendingGroup)
+		}
 	}
 	stakingGroups, err := compoundStakingGroups(
 		ctx,
@@ -487,6 +758,17 @@ func (a *CompoundV2Adapter) Positions(
 		return nil, fmt.Errorf("staking: %w", err)
 	}
 	groups = append(groups, stakingGroups...)
+	distributorStakingGroups, err := compoundDistributorStakingGroups(
+		ctx,
+		client,
+		block,
+		deployment.DistributorStaking,
+		account,
+	)
+	groups = append(groups, distributorStakingGroups...)
+	if err != nil {
+		return groups, fmt.Errorf("distributor staking: %w", err)
+	}
 	if account != (common.Address{}) && deployment.RewardLens != (common.Address{}) &&
 		deployment.RewardLensWindow.ActiveAt(block.Number) {
 		rewardResult, rewardErr := client.Call(
@@ -602,6 +884,19 @@ func compoundV2Adapters() []Adapter {
 					},
 				},
 			},
+			Optimism: {
+				Comptroller:       common.HexToAddress("0xCa889f40aae37FFf165BccF69aeF1E82b5C511B9"),
+				ComptrollerWindow: availableFrom(122_531_304),
+				WrappedNative: token(
+					Optimism,
+					"0x4200000000000000000000000000000000000006",
+					"WETH",
+					18,
+				),
+				NativeMarkets:          addressSet(),
+				MultiRewardDistributor: common.HexToAddress("0xF9524bfa18C19C3E605FbfE8DFd05C6e967574Aa"),
+				MultiRewardWindow:      availableFrom(122_531_322),
+			},
 		}),
 		NewCompoundV2Adapter("flux-finance", "Flux Finance", map[ChainID]compoundV2Deployment{
 			Ethereum: {
@@ -627,6 +922,27 @@ func compoundV2Adapters() []Adapter {
 					18,
 				),
 				NativeMarkets: addressSet(),
+			},
+			Optimism: {
+				Comptroller:       common.HexToAddress("0x60CF091cD3f50420d50fD7f707414d0DF4751C58"),
+				ComptrollerWindow: availableFrom(26_050_163),
+				WrappedNative: token(
+					Optimism,
+					"0x4200000000000000000000000000000000000006",
+					"WETH",
+					18,
+				),
+				NativeMarkets: addressSet(),
+				DistributorStaking: []compoundDistributorStakingModule{
+					{
+						Module: common.HexToAddress("0xdc05d85069dc4aba65954008ff99f2d73ff12618"),
+						Window: availableFrom(25_840_175),
+					},
+					{
+						Module: common.HexToAddress("0x41279e29586eb20f9a4f65e031af09fced171166"),
+						Window: availableFrom(25_840_274),
+					},
+				},
 			},
 		}),
 		NewCompoundV2Adapter("lodestar", "Lodestar", map[ChainID]compoundV2Deployment{

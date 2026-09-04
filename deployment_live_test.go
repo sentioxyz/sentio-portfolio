@@ -57,7 +57,7 @@ type liveAvailabilityKey struct {
 }
 
 // These adapters are the ones whose previously unconditional root/component reads
-// motivated this migration. The complete 48-protocol/95-chain registry set is locked by
+// motivated this migration. The complete 48-protocol registry set is locked by
 // TestProtocolAvailabilityMatchesVerifiedBoundaries; repeating every adapter call here
 // would also require external indexer services and roughly two hundred archive scans.
 // Each selected probe wraps the real adapter, so a clean response cannot be mistaken for
@@ -67,6 +67,7 @@ var liveAdapterBoundaryProbes = map[liveAvailabilityKey]struct{}{
 	{protocolID: "moonwell", chainID: Base}:              {},
 	{protocolID: "flux-finance", chainID: Ethereum}:      {},
 	{protocolID: "sonne", chainID: Base}:                 {},
+	{protocolID: "sonne", chainID: Optimism}:             {},
 	{protocolID: "lodestar", chainID: Arbitrum}:          {},
 	{protocolID: "venus", chainID: Ethereum}:             {},
 	{protocolID: "venus", chainID: BSC}:                  {},
@@ -80,16 +81,21 @@ var liveAdapterBoundaryProbes = map[liveAvailabilityKey]struct{}{
 
 // TestProtocolAvailabilityBoundariesLive verifies the archive-RPC evidence for
 // adapters that previously attempted calls before their contracts or mandatory
-// views existed. It is opt-in because it requires four external archive RPCs.
+// views existed. It is opt-in because it requires all nine external archive RPCs.
 func TestProtocolAvailabilityBoundariesLive(t *testing.T) {
 	if os.Getenv("PORTFOLIO_DEPLOYMENT_WINDOWS_LIVE_TEST") != "1" {
 		t.Skip("set PORTFOLIO_DEPLOYMENT_WINDOWS_LIVE_TEST=1 to run archive-RPC boundary probes")
 	}
 	rpcURLs := map[ChainID]string{
-		Ethereum: os.Getenv("PORTFOLIO_ETH_RPC_URL"),
-		BSC:      os.Getenv("PORTFOLIO_BSC_RPC_URL"),
-		Base:     os.Getenv("PORTFOLIO_BASE_RPC_URL"),
-		Arbitrum: os.Getenv("PORTFOLIO_ARB_RPC_URL"),
+		Ethereum:  os.Getenv("PORTFOLIO_ETH_RPC_URL"),
+		BSC:       os.Getenv("PORTFOLIO_BSC_RPC_URL"),
+		Base:      os.Getenv("PORTFOLIO_BASE_RPC_URL"),
+		Arbitrum:  os.Getenv("PORTFOLIO_ARB_RPC_URL"),
+		Polygon:   os.Getenv("PORTFOLIO_POLYGON_RPC_URL"),
+		Monad:     os.Getenv("PORTFOLIO_MONAD_RPC_URL"),
+		Plasma:    os.Getenv("PORTFOLIO_PLASMA_RPC_URL"),
+		Avalanche: os.Getenv("PORTFOLIO_AVALANCHE_RPC_URL"),
+		Optimism:  os.Getenv("PORTFOLIO_OPTIMISM_RPC_URL"),
 	}
 	for chainID, endpoint := range rpcURLs {
 		if endpoint == "" {
@@ -199,10 +205,15 @@ func TestBeefyManifestDeploymentBoundariesLive(t *testing.T) {
 		t.Skip("set PORTFOLIO_BEEFY_DEPLOYMENT_WINDOWS_LIVE_TEST=1 to verify all Beefy vault boundaries")
 	}
 	rpcEnvironment := map[ChainID]string{
-		Ethereum: "PORTFOLIO_ETH_RPC_URL",
-		BSC:      "PORTFOLIO_BSC_RPC_URL",
-		Base:     "PORTFOLIO_BASE_RPC_URL",
-		Arbitrum: "PORTFOLIO_ARB_RPC_URL",
+		Ethereum:  "PORTFOLIO_ETH_RPC_URL",
+		BSC:       "PORTFOLIO_BSC_RPC_URL",
+		Base:      "PORTFOLIO_BASE_RPC_URL",
+		Arbitrum:  "PORTFOLIO_ARB_RPC_URL",
+		Polygon:   "PORTFOLIO_POLYGON_RPC_URL",
+		Monad:     "PORTFOLIO_MONAD_RPC_URL",
+		Plasma:    "PORTFOLIO_PLASMA_RPC_URL",
+		Avalanche: "PORTFOLIO_AVALANCHE_RPC_URL",
+		Optimism:  "PORTFOLIO_OPTIMISM_RPC_URL",
 	}
 	balanceCall, err := beefyVaultABI.Pack("balanceOf", common.Address{})
 	if err != nil {
@@ -367,6 +378,65 @@ func TestBeefyManifestDeploymentBoundariesLive(t *testing.T) {
 							price,
 							err,
 						)
+					}
+					if vault.DeactivationBlock == 0 {
+						continue
+					}
+					var finalBalance, finalPrice, afterBalance, afterPrice hexutil.Bytes
+					finalCalls := []rpc.BatchElem{
+						{
+							Method: "eth_call",
+							Args: []any{
+								map[string]any{"to": vault.Vault, "data": hexutil.Bytes(balanceCall)},
+								hexutil.EncodeUint64(vault.DeactivationBlock),
+							},
+							Result: &finalBalance,
+						},
+						{
+							Method: "eth_call",
+							Args: []any{
+								map[string]any{"to": vault.Vault, "data": hexutil.Bytes(priceCall)},
+								hexutil.EncodeUint64(vault.DeactivationBlock),
+							},
+							Result: &finalPrice,
+						},
+						{
+							Method: "eth_call",
+							Args: []any{
+								map[string]any{"to": vault.Vault, "data": hexutil.Bytes(balanceCall)},
+								hexutil.EncodeUint64(vault.DeactivationBlock + 1),
+							},
+							Result: &afterBalance,
+						},
+						{
+							Method: "eth_call",
+							Args: []any{
+								map[string]any{"to": vault.Vault, "data": hexutil.Bytes(priceCall)},
+								hexutil.EncodeUint64(vault.DeactivationBlock + 1),
+							},
+							Result: &afterPrice,
+						},
+					}
+					if err := client.batchCallTransport(context.Background(), finalCalls); err != nil {
+						t.Fatalf("vault %q deactivation boundary: %v", vault.ID, err)
+					}
+					finalPriceValues, finalPriceErr := beefyVaultABI.Unpack("getPricePerFullShare", finalPrice)
+					finalPricePositive := false
+					if finalPriceErr == nil && finalCalls[1].Error == nil {
+						finalPriceValue, valueErr := BigIntAt(finalPriceValues, 0)
+						finalPricePositive = valueErr == nil && finalPriceValue.Sign() > 0
+					}
+					if finalCalls[0].Error != nil || len(finalBalance) != 32 || !finalPricePositive {
+						t.Errorf("vault %q is not adapter-safe at final block %d", vault.ID, vault.DeactivationBlock)
+					}
+					afterPriceValues, afterPriceErr := beefyVaultABI.Unpack("getPricePerFullShare", afterPrice)
+					afterPricePositive := false
+					if afterPriceErr == nil && finalCalls[3].Error == nil {
+						afterPriceValue, valueErr := BigIntAt(afterPriceValues, 0)
+						afterPricePositive = valueErr == nil && afterPriceValue.Sign() > 0
+					}
+					if finalCalls[2].Error == nil && len(afterBalance) == 32 && afterPricePositive {
+						t.Errorf("vault %q remains adapter-safe after final block %d", vault.ID, vault.DeactivationBlock)
 					}
 				}
 			}

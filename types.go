@@ -13,13 +13,28 @@ import (
 type ChainID uint64
 
 const (
-	Ethereum ChainID = 1
-	BSC      ChainID = 56
-	Base     ChainID = 8453
-	Arbitrum ChainID = 42161
+	Ethereum  ChainID = 1
+	BSC       ChainID = 56
+	Base      ChainID = 8453
+	Arbitrum  ChainID = 42161
+	Polygon   ChainID = 137
+	Monad     ChainID = 143
+	Plasma    ChainID = 9745
+	Avalanche ChainID = 43114
+	Optimism  ChainID = 10
 )
 
-var SupportedChainIDs = []ChainID{Ethereum, BSC, Base, Arbitrum}
+var SupportedChainIDs = []ChainID{
+	Ethereum,
+	BSC,
+	Base,
+	Arbitrum,
+	Polygon,
+	Monad,
+	Plasma,
+	Avalanche,
+	Optimism,
+}
 
 type BlockRef struct {
 	ChainID   ChainID     `json:"chainId"`

@@ -92,10 +92,15 @@ var (
 	fluidNativeSentinel = common.HexToAddress("0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE")
 	fluidShareScale     = new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
 	fluidWrappedNative  = map[ChainID]common.Address{
-		Ethereum: common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"),
-		BSC:      common.HexToAddress("0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"),
-		Base:     common.HexToAddress("0x4200000000000000000000000000000000000006"),
-		Arbitrum: common.HexToAddress("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"),
+		Ethereum:  common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"),
+		BSC:       common.HexToAddress("0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"),
+		Base:      common.HexToAddress("0x4200000000000000000000000000000000000006"),
+		Arbitrum:  common.HexToAddress("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"),
+		Polygon:   common.HexToAddress("0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270"),
+		Monad:     common.HexToAddress("0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A"),
+		Plasma:    common.HexToAddress("0x6100E367285b01F48D07953803A2d8dCA5D19873"),
+		Avalanche: common.HexToAddress("0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7"),
+		Optimism:  common.HexToAddress("0x4200000000000000000000000000000000000006"),
 	}
 )
 
@@ -186,6 +191,26 @@ var fluidDeployments = map[ChainID]fluidDeployment{
 				Window:  deploymentWindow{ActivationBlock: 228_709_990},
 			},
 		},
+	},
+	Polygon: {
+		LendingResolver:        common.HexToAddress("0x48D32f49aFeAEC7AE66ad7B9264f446fc11a1569"),
+		VaultFactory:           common.HexToAddress("0x324c5Dc1fC42c7a4D43d92df1eBA58a54d13Bf2d"),
+		VaultResolver:          common.HexToAddress("0xA5C3E16523eeeDDcC34706b0E6bE88b4c6EA95cC"),
+		VaultPositionsResolver: common.HexToAddress("0xaA21a86030EAa16546A759d2d10fd3bF9D053Bc7"),
+		DexResolver:            common.HexToAddress("0x11D80CfF056Cef4F9E6d23da8672fE9873e5cC07"),
+		LendingWindow:          deploymentWindow{ActivationBlock: 79_090_648},
+		VaultWindow:            deploymentWindow{ActivationBlock: 82_362_638},
+		DexWindow:              deploymentWindow{ActivationBlock: 79_090_686},
+	},
+	Plasma: {
+		LendingResolver:        common.HexToAddress("0x48D32f49aFeAEC7AE66ad7B9264f446fc11a1569"),
+		VaultFactory:           common.HexToAddress("0x324c5Dc1fC42c7a4D43d92df1eBA58a54d13Bf2d"),
+		VaultResolver:          common.HexToAddress("0xA5C3E16523eeeDDcC34706b0E6bE88b4c6EA95cC"),
+		VaultPositionsResolver: common.HexToAddress("0xaA21a86030EAa16546A759d2d10fd3bF9D053Bc7"),
+		DexResolver:            common.HexToAddress("0xAf572EfC84d905926F7b05C1B7bE04e4E89542B0"),
+		LendingWindow:          deploymentWindow{ActivationBlock: 8_682_622},
+		VaultWindow:            deploymentWindow{ActivationBlock: 12_913_750},
+		DexWindow:              deploymentWindow{ActivationBlock: 8_682_664},
 	},
 }
 
@@ -283,7 +308,7 @@ type FluidAdapter struct {
 
 func newFluidAdapter() *FluidAdapter {
 	return &FluidAdapter{adapterBase: adapterBase{info: ProtocolInfo{
-		ID: "fluid", Name: "Fluid", Chains: append([]ChainID(nil), SupportedChainIDs...),
+		ID: "fluid", Name: "Fluid", Chains: deploymentChains(fluidDeployments),
 	}}}
 }
 

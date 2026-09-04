@@ -11,12 +11,25 @@ func TestEngineRegistersAaveV4(t *testing.T) {
 		if protocol.ID != "aave-v4" {
 			continue
 		}
-		if len(protocol.Chains) != 1 || protocol.Chains[0] != Ethereum {
-			t.Fatalf("aave-v4 chains = %v, want [Ethereum]", protocol.Chains)
+		want := []ChainID{Ethereum, Avalanche}
+		if len(protocol.Chains) != len(want) ||
+			protocol.Chains[0] != want[0] || protocol.Chains[1] != want[1] {
+			t.Fatalf("aave-v4 chains = %v, want %v", protocol.Chains, want)
 		}
 		return
 	}
 	t.Fatal("aave-v4 is not registered")
+}
+
+func TestAaveV4ReserveTokenUsesScannedChain(t *testing.T) {
+	underlying := common.HexToAddress("0x0000000000000000000000000000000000001234")
+	token := aaveV4ReserveToken(Avalanche, aaveV4ReserveData{
+		Underlying: underlying,
+		Decimals:   6,
+	})
+	if token.ChainID != Avalanche || token.Address != underlying || token.Decimals != 6 {
+		t.Fatalf("Avalanche reserve token = %+v", token)
+	}
 }
 
 func TestAaveV4HubDeploymentWindows(t *testing.T) {

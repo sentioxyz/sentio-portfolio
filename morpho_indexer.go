@@ -62,7 +62,7 @@ type morphoIndexer struct {
 func newMorphoIndexer(config SentioIndexerConfig) *morphoIndexer {
 	return &morphoIndexer{
 		api: newSentioAPIClient(), config: config,
-		requiredChains: append([]ChainID(nil), SupportedChainIDs...),
+		requiredChains: deploymentChains(morphoDeployments),
 	}
 }
 

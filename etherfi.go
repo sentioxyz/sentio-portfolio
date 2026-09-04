@@ -39,9 +39,9 @@ type EtherfiAdapter struct {
 }
 
 func newEtherfiAdapter(config SentioIndexerConfig) Adapter {
-	return &EtherfiAdapter{
+	adapter := &EtherfiAdapter{
 		adapterBase: adapterBase{info: ProtocolInfo{
-			ID: "etherfi", Name: "Ether.fi", Chains: []ChainID{Ethereum, BSC, Base, Arbitrum},
+			ID: "etherfi", Name: "Ether.fi",
 		}},
 		indexer: newOwnerTokenIndexer(config, []ChainID{Ethereum}),
 		receipts: map[ChainID][]convertedBalancePosition{
@@ -79,6 +79,12 @@ func newEtherfiAdapter(config SentioIndexerConfig) Adapter {
 				Token:           token(Arbitrum, "0x35751007a407ca6FEFfE80b3cB397736D2cf4dbe", "weETH", 18),
 				ActivationBlock: 156_547_814,
 			}},
+			Optimism: {{
+				ID: "weeth", Label: "Liquid staking · weETH",
+				BalanceContract: common.HexToAddress("0x5A7fACB970D094B6C7FF1df0eA68D99E6e73CBFF"),
+				Token:           token(Optimism, "0x5A7fACB970D094B6C7FF1df0eA68D99E6e73CBFF", "weETH", 18),
+				ActivationBlock: 120_917_167,
+			}},
 		},
 		vaults: map[ChainID][]etherfiVaultPosition{
 			Ethereum: {
@@ -109,6 +115,18 @@ func newEtherfiAdapter(config SentioIndexerConfig) Adapter {
 		},
 		withdraws: map[ChainID][]common.Address{Ethereum: {etherfiWithdrawalNFT}},
 	}
+	deployments := make(map[ChainID]struct{}, len(adapter.receipts)+len(adapter.vaults)+len(adapter.withdraws))
+	for chainID := range adapter.receipts {
+		deployments[chainID] = struct{}{}
+	}
+	for chainID := range adapter.vaults {
+		deployments[chainID] = struct{}{}
+	}
+	for chainID := range adapter.withdraws {
+		deployments[chainID] = struct{}{}
+	}
+	adapter.info.Chains = deploymentChains(deployments)
+	return adapter
 }
 
 func (a *EtherfiAdapter) Positions(

@@ -25,10 +25,15 @@ var walletNativeCoin = map[ChainID]struct {
 	Symbol  string
 	Wrapped common.Address
 }{
-	Ethereum: {Symbol: "ETH", Wrapped: common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")},
-	BSC:      {Symbol: "BNB", Wrapped: common.HexToAddress("0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c")},
-	Base:     {Symbol: "ETH", Wrapped: common.HexToAddress("0x4200000000000000000000000000000000000006")},
-	Arbitrum: {Symbol: "ETH", Wrapped: common.HexToAddress("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1")},
+	Ethereum:  {Symbol: "ETH", Wrapped: common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")},
+	BSC:       {Symbol: "BNB", Wrapped: common.HexToAddress("0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c")},
+	Base:      {Symbol: "ETH", Wrapped: common.HexToAddress("0x4200000000000000000000000000000000000006")},
+	Arbitrum:  {Symbol: "ETH", Wrapped: common.HexToAddress("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1")},
+	Polygon:   {Symbol: "POL", Wrapped: common.HexToAddress("0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270")},
+	Monad:     {Symbol: "MON", Wrapped: common.HexToAddress("0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A")},
+	Plasma:    {Symbol: "XPL", Wrapped: common.HexToAddress("0x6100E367285b01F48D07953803A2d8dCA5D19873")},
+	Avalanche: {Symbol: "AVAX", Wrapped: common.HexToAddress("0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7")},
+	Optimism:  {Symbol: "ETH", Wrapped: common.HexToAddress("0x4200000000000000000000000000000000000006")},
 }
 
 // walletTokenEntry is one ERC-20 the holdings adapter reads. Symbol and decimals are committed

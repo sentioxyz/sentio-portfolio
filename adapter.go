@@ -225,3 +225,19 @@ func supportsChain(chains []ChainID, chainID ChainID) bool {
 	}
 	return false
 }
+
+// deploymentChains returns map keys in the one canonical order exposed by the engine.
+// Adapter constructors use their own deployment maps rather than SupportedChainIDs directly:
+// adding an RPC network must never make an unrelated protocol claim a deployment there.
+func deploymentChains[T any](deployments map[ChainID]T) []ChainID {
+	chains := make([]ChainID, 0, len(deployments))
+	for _, chainID := range SupportedChainIDs {
+		if _, exists := deployments[chainID]; exists {
+			chains = append(chains, chainID)
+		}
+	}
+	if len(chains) != len(deployments) {
+		panic("deployment map contains an unsupported chain")
+	}
+	return chains
+}

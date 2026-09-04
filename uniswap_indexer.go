@@ -73,7 +73,16 @@ func (i *uniswapIndexer) chainStatuses(
 	ctx context.Context,
 	definition uniswapIndexerDefinition,
 ) (map[ChainID]sentioChainStatus, error) {
-	return i.api.chainStatuses(ctx, i.configs[definition.version], SupportedChainIDs, false)
+	var chains []ChainID
+	switch definition.version {
+	case uniswapV3:
+		chains = deploymentChains(uniswapV3Deployments)
+	case uniswapV4:
+		chains = deploymentChains(uniswapV4Deployments)
+	default:
+		return nil, fmt.Errorf("unsupported Uniswap generation %q", definition.version)
+	}
+	return i.api.chainStatuses(ctx, i.configs[definition.version], chains, false)
 }
 
 const uniswapWalletQuery = `

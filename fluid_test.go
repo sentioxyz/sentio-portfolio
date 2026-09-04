@@ -8,7 +8,7 @@ import (
 )
 
 func TestFluidDeploymentsCoverSupportedChains(t *testing.T) {
-	for _, chainID := range SupportedChainIDs {
+	for _, chainID := range deploymentChains(fluidDeployments) {
 		deployment, exists := fluidDeployments[chainID]
 		if !exists {
 			t.Fatalf("Fluid deployment is absent for chain %d", chainID)
