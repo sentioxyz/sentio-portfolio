@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -476,6 +477,7 @@ type pendleStubMarket struct {
 
 type pendleStubRPC struct {
 	t              *testing.T
+	chainID        ChainID
 	balances       map[common.Address]*big.Int
 	markets        map[common.Address]pendleStubMarket
 	marketTokens   map[common.Address][3]common.Address
@@ -649,7 +651,7 @@ func (s *pendleStubRPC) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		response := map[string]any{"jsonrpc": "2.0", "id": call.ID}
 		switch call.Method {
 		case "eth_chainId":
-			response["result"] = "0x1"
+			response["result"] = "0x" + strconv.FormatUint(uint64(s.chainID), 16)
 			return response
 		case "eth_call":
 		default:
@@ -725,7 +727,7 @@ func newPendlePricingFixture(t *testing.T) pendlePricingFixture {
 		t.Fatal("invalid balance fixture")
 	}
 	fixture.stub = &pendleStubRPC{
-		t: t,
+		t: t, chainID: fixture.block.ChainID,
 		balances: map[common.Address]*big.Int{
 			fixture.principal: balance,
 			fixture.yieldT:    balance,
@@ -776,7 +778,7 @@ func (f pendlePricingFixture) run(t *testing.T, indexer *stubPendleIndexer) []Gr
 	t.Helper()
 	server := httptest.NewServer(f.stub)
 	t.Cleanup(server.Close)
-	client, err := DialRPC(t.Context(), Ethereum, server.URL)
+	client, err := DialRPC(t.Context(), f.block.ChainID, server.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -860,6 +862,66 @@ func TestPendleDirectYTPricesAsTheComplementOfItsPT(t *testing.T) {
 	}
 	if component.PriceBasis.RatioRaw != "10969526824844534" {
 		t.Fatalf("basis ratio = %s", component.PriceBasis.RatioRaw)
+	}
+}
+
+// Plasma account 0x4271...8bbb retained 15 raw units of YT-syrupUSDT-29JAN2026
+// after redeeming 1,209,607,250,000 of its prior 1,209,607,250,015 raw balance. At
+// block 31,602,716 the six-decimal token was already expired and had no claimable interest or
+// rewards, but balanceOf still returned 15. A portfolio inventory must preserve that direct
+// holding instead of applying a display-value or dust threshold borrowed from an external oracle.
+func TestPendleExpiredDirectYTDustBalanceIsNotFiltered(t *testing.T) {
+	fixture := newPendlePricingFixture(t)
+	dustYT := common.HexToAddress("0x44920a786043f663693d2ea1c7de8551d90b3213")
+	dustPT := common.HexToAddress("0x8dfb9a39dfab16bffe77f15544b5bf03e377e419")
+	dustSY := common.HexToAddress("0xd8b49fba7054a6ee2c4bd6813cdd6064430db85c")
+	dustAsset := common.HexToAddress("0xb8ce59fc3717ada4c02eadf9682a9e934f625ebb")
+	dustYieldToken := common.HexToAddress("0xc4374775489cb9c56003bf2c9b12495fc64f0771")
+	account := common.HexToAddress("0x42715ba91deda3c692b9f540cee2fbb4dae78bbb")
+	const expiry = uint64(1_769_644_800)
+	fixture.block = BlockRef{
+		ChainID: Plasma, Number: 31_602_716, Timestamp: 1_788_543_283, Fixed: true,
+	}
+	fixture.account = account
+	fixture.stub.chainID = Plasma
+	fixture.stub.balances[dustYT] = big.NewInt(15)
+	fixture.stub.symbols[dustYT] = "YT-syrupUSDT-29JAN2026"
+	fixture.stub.decimals[dustYT] = 6
+	fixture.stub.decimals[dustAsset] = 6
+	fixture.stub.exchangeRates[dustSY] = big.NewInt(1_141_613_233_240_166_292)
+	fixture.stub.yieldTokens[dustSY] = dustYieldToken
+	fixture.stub.assets[dustSY] = dustAsset
+	fixture.stub.pyIndices[dustYT] = big.NewInt(1_135_641_111_437_893_889)
+	fixture.stub.ytInterests[dustYT] = new(big.Int)
+	fixture.stub.ytRewardTokens[dustYT] = []common.Address{}
+	fixture.stub.ytRewards[dustYT] = []*big.Int{}
+	indexer := &stubPendleIndexer{refs: []pendlePositionRef{{
+		Token: dustYT, Kind: pendleYT, PT: dustPT, SY: dustSY,
+		Expiry: expiry, CreatedBlock: 2_203_309,
+	}}}
+
+	groups := fixture.run(t, indexer)
+	if len(groups) != 1 || len(groups[0].Components) != 1 {
+		t.Fatalf("groups = %#v, want one direct dust holding and no claim components", groups)
+	}
+	if groups[0].ID != "yt:"+strings.ToLower(dustYT.Hex()) ||
+		groups[0].MarketID != strings.ToLower(dustPT.Hex()) {
+		t.Fatalf("group identity = %#v, want YT %s / PT %s", groups[0], dustYT, dustPT)
+	}
+	component := groups[0].Components[0]
+	if component.Kind != "asset" || component.Token.Address != dustYT ||
+		component.Token.Symbol != "YT-syrupUSDT-29JAN2026" ||
+		component.Token.Decimals != 6 || component.AmountRaw != "15" {
+		t.Fatalf("dust component = %#v, want 15 raw units of the six-decimal YT", component)
+	}
+	if component.Source.Contract != dustYT || component.Source.Method != "balanceOf" {
+		t.Fatalf("dust source = %#v, want pinned balanceOf", component.Source)
+	}
+	if component.PriceBasis != nil {
+		t.Fatalf("expired YT basis = %#v, want the zero-priced token left unpriced", component.PriceBasis)
+	}
+	if got := groups[0].Metadata["expiry"]; got != "1769644800" {
+		t.Fatalf("expiry metadata = %v, want 1769644800", got)
 	}
 }
 

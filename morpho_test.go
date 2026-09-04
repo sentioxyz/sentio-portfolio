@@ -236,6 +236,72 @@ func TestMorphoShareFractionMatchesDeBankBoundary(t *testing.T) {
 	}
 }
 
+func TestMorphoPolygonPinnedDebtAccrualMatchesProtocolMath(t *testing.T) {
+	// These values are fixed canonical state from Polygon block 93,225,488. Morpho's
+	// market() totals are stored before pending interest, so a position at the pinned
+	// timestamp must first use expectedMarketBalances and only then convert borrow shares.
+	block := BlockRef{
+		ChainID: Polygon, Number: 93_225_488, Timestamp: 1_788_543_265, Fixed: true,
+	}
+	state := morphoMarketState{
+		TotalSupplyAssets: big.NewInt(40_446_419_357),
+		TotalSupplyShares: big.NewInt(38_414_787_573_112_953),
+		TotalBorrowAssets: big.NewInt(30_143_460_275),
+		TotalBorrowShares: big.NewInt(28_431_000_979_763_039),
+		LastUpdate:        big.NewInt(1_788_461_172),
+		Fee:               new(big.Int),
+	}
+	if block.ChainID != Polygon || block.Number != 93_225_488 ||
+		block.Timestamp != 1_788_543_265 || !block.Fixed {
+		t.Fatalf("unexpected pinned block: %+v", block)
+	}
+	if elapsed := block.Timestamp - state.LastUpdate.Uint64(); elapsed != 82_093 {
+		t.Fatalf("elapsed = %d, want 82093", elapsed)
+	}
+
+	expected, pendingFeeShares := morphoExpectedMarketBalances(
+		state,
+		big.NewInt(1_375_896_501),
+		block.Timestamp-state.LastUpdate.Uint64(),
+	)
+	if expected.TotalBorrowAssets.String() != "30146865215" {
+		t.Fatalf("expected total borrow assets = %s, want 30146865215", expected.TotalBorrowAssets)
+	}
+	if expected.TotalBorrowShares.Cmp(state.TotalBorrowShares) != 0 {
+		t.Fatalf(
+			"expected total borrow shares = %s, want %s",
+			expected.TotalBorrowShares,
+			state.TotalBorrowShares,
+		)
+	}
+	if pendingFeeShares.Sign() != 0 {
+		t.Fatalf("pending fee shares = %s, want 0", pendingFeeShares)
+	}
+
+	borrowShares := big.NewInt(1_477_422_818_746_994)
+	numerator, denominator := morphoShareFraction(
+		borrowShares,
+		expected.TotalBorrowAssets,
+		expected.TotalBorrowShares,
+	)
+	if numerator.String() != "44539666583808426123160704" {
+		t.Fatalf(
+			"expected debt numerator = %s, want 44539666583808426123160704",
+			numerator,
+		)
+	}
+	if denominator.String() != "28431000980763039" {
+		t.Fatalf("expected debt denominator = %s, want 28431000980763039", denominator)
+	}
+	if roundedUp := morphoMulDivUp(
+		borrowShares,
+		new(big.Int).Add(expected.TotalBorrowAssets, big.NewInt(1)),
+		new(big.Int).Add(expected.TotalBorrowShares, big.NewInt(1_000_000)),
+	); roundedUp.String() != "1566588057" {
+		t.Fatalf("expected debt rounded up = %s, want 1566588057", roundedUp)
+	}
+}
+
 func TestMorphoCoreAccruesMarketToPinnedTimestamp(t *testing.T) {
 	account := common.HexToAddress("0x00000000000000000000000000000000000000a1")
 	fixture := newMorphoAccrualFixture(t, account, big.NewInt(1_000_000_000))

@@ -845,6 +845,36 @@ func TestComponentAvailabilityMatchesVerifiedBoundaries(t *testing.T) {
 	}
 }
 
+func TestEtherfiOptimismVaultComponentBoundaries(t *testing.T) {
+	want := map[string]uint64{
+		"liquid-eth": 123_081_511,
+		"liquid-usd": 149_698_252,
+		"liquid-btc": 149_698_606,
+		"sethfi":     149_699_007,
+		"ebtc":       149_699_299,
+		"eusd":       149_822_646,
+	}
+	positions := newEtherfiAdapter(SentioIndexerConfig{}).(*EtherfiAdapter).vaults[Optimism]
+	if got := len(positions); got != len(want) {
+		t.Fatalf("Ether.fi Optimism vault count = %d, want %d", got, len(want))
+	}
+	for _, position := range positions {
+		activation, exists := want[position.ID]
+		if !exists {
+			t.Fatalf("unexpected Ether.fi Optimism vault %q", position.ID)
+		}
+		if got := position.ActivationBlock; got != activation {
+			t.Fatalf("Ether.fi Optimism vault %q activation = %d, want %d", position.ID, got, activation)
+		}
+		if position.ActiveAt(activation - 1) {
+			t.Errorf("Ether.fi Optimism vault %q is active before block %d", position.ID, activation)
+		}
+		if !position.ActiveAt(activation) {
+			t.Errorf("Ether.fi Optimism vault %q is inactive at block %d", position.ID, activation)
+		}
+	}
+}
+
 type compoundZeroAccountRPCServer struct {
 	t                *testing.T
 	comptroller      common.Address
