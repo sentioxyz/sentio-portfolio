@@ -102,11 +102,14 @@ query WalletPositions(
     orderBy: id
     orderDirection: asc
     block: { number: $block }
-    where: { id_starts_with: $prefix, id_gt: $after }
+    where: { id_starts_with: $prefix, id_gt: $after, balance_not: 0 }
   ) {
     id
+    chainId
+    owner
     tokenId
     manager
+    balance
   }
 }`
 
@@ -118,8 +121,11 @@ type uniswapGraphQLResponse struct {
 		} `json:"indexerCheckpoints"`
 		Positions []struct {
 			ID      string `json:"id"`
+			ChainID int    `json:"chainId"`
+			Owner   string `json:"owner"`
 			TokenID string `json:"tokenId"`
 			Manager string `json:"manager"`
+			Balance string `json:"balance"`
 		} `json:"positions"`
 	} `json:"data"`
 	Errors []struct {
@@ -134,10 +140,42 @@ type uniswapGraphQLPage struct {
 	IDs             []string
 }
 
+func uniswapPositionRowID(
+	chainID ChainID,
+	owner common.Address,
+	manager common.Address,
+	tokenID *big.Int,
+) string {
+	return fmt.Sprintf(
+		"%d:%s:%s:%s",
+		chainID,
+		strings.ToLower(owner.Hex()),
+		strings.ToLower(manager.Hex()),
+		tokenID.String(),
+	)
+}
+
+func uniswapExpectedManager(
+	version uniswapGeneration,
+	chainID ChainID,
+) (common.Address, bool) {
+	switch version {
+	case uniswapV3:
+		deployment, exists := uniswapV3Deployments[chainID]
+		return deployment.Manager, exists
+	case uniswapV4:
+		deployment, exists := uniswapV4Deployments[chainID]
+		return deployment.Manager, exists
+	default:
+		return common.Address{}, false
+	}
+}
+
 func (i *uniswapIndexer) graphqlPage(
 	ctx context.Context,
 	definition uniswapIndexerDefinition,
 	chainID ChainID,
+	owner common.Address,
 	prefix string,
 	after string,
 	first int,
@@ -190,21 +228,42 @@ func (i *uniswapIndexer) graphqlPage(
 		Positions:       make([]uniswapIndexedNFT, 0, len(payload.Data.Positions)),
 		IDs:             make([]string, 0, len(payload.Data.Positions)),
 	}
+	expectedOwner := strings.ToLower(owner.Hex())
+	expectedManager, exists := uniswapExpectedManager(definition.version, chainID)
+	if !exists {
+		return uniswapGraphQLPage{}, fmt.Errorf(
+			"Uniswap %s has no deployment on chain %d",
+			definition.version,
+			chainID,
+		)
+	}
 	for _, row := range payload.Data.Positions {
-		if !strings.HasPrefix(row.ID, prefix) || row.ID <= after {
-			return uniswapGraphQLPage{}, fmt.Errorf("GraphQL returned invalid owner row %q", row.ID)
+		if row.ChainID != int(chainID) || row.Owner != expectedOwner || row.ID <= after {
+			return uniswapGraphQLPage{}, fmt.Errorf("GraphQL returned malformed position row %q", row.ID)
 		}
 		tokenID, ok := new(big.Int).SetString(row.TokenID, 10)
-		if !ok || tokenID.Sign() < 0 {
-			return uniswapGraphQLPage{}, fmt.Errorf("GraphQL returned invalid token ID %q", row.TokenID)
+		if !ok || tokenID.Sign() < 0 || tokenID.BitLen() > 256 || row.TokenID != tokenID.String() {
+			return uniswapGraphQLPage{}, fmt.Errorf("GraphQL returned malformed position row %q", row.ID)
 		}
 		if !common.IsHexAddress(row.Manager) {
-			return uniswapGraphQLPage{}, fmt.Errorf("GraphQL returned invalid manager %q", row.Manager)
+			return uniswapGraphQLPage{}, fmt.Errorf("GraphQL returned malformed position row %q", row.ID)
+		}
+		manager := common.HexToAddress(row.Manager)
+		if row.Manager != strings.ToLower(manager.Hex()) || manager != expectedManager {
+			return uniswapGraphQLPage{}, fmt.Errorf("GraphQL returned malformed position row %q", row.ID)
+		}
+		balance, ok := new(big.Int).SetString(row.Balance, 10)
+		if !ok || row.Balance != balance.String() || balance.Cmp(big.NewInt(1)) != 0 {
+			return uniswapGraphQLPage{}, fmt.Errorf("GraphQL returned malformed position row %q", row.ID)
+		}
+		if row.ID != uniswapPositionRowID(chainID, owner, manager, tokenID) ||
+			!strings.HasPrefix(row.ID, prefix) {
+			return uniswapGraphQLPage{}, fmt.Errorf("GraphQL returned malformed position row %q", row.ID)
 		}
 		page.IDs = append(page.IDs, row.ID)
 		page.Positions = append(page.Positions, uniswapIndexedNFT{
 			TokenID: tokenID,
-			Manager: common.HexToAddress(row.Manager),
+			Manager: manager,
 		})
 	}
 	return page, nil
@@ -280,6 +339,7 @@ func (i *uniswapIndexer) indexedNFTs(
 			ctx,
 			definition,
 			block.ChainID,
+			account,
 			prefix,
 			after,
 			first,

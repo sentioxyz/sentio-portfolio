@@ -124,6 +124,7 @@ go_test(
         "stader_test.go",
         "stakewise_test.go",
         "types_test.go",
+        "uniswap_indexer_test.go",
         "uniswap_live_test.go",
         "uniswap_test.go",
         "valuation_test.go",
