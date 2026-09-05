@@ -59,6 +59,7 @@ type sentioStatusCache struct {
 type sentioAPIClient struct {
 	apiKey     string
 	httpClient *http.Client
+	httpMu     sync.Mutex
 	statusMu   sync.Mutex
 	statuses   map[string]sentioStatusCache
 }
@@ -68,10 +69,29 @@ func newSentioAPIClient() *sentioAPIClient {
 	if apiKey == "" {
 		apiKey = os.Getenv("NEXT_PUBLIC_SENTIO_API_KEY")
 	}
+	httpClient := &http.Client{Timeout: 25 * time.Second}
+	if transport, ok := http.DefaultTransport.(*http.Transport); ok {
+		httpClient.Transport = transport.Clone()
+	}
 	return &sentioAPIClient{
-		apiKey: apiKey, httpClient: &http.Client{Timeout: 25 * time.Second},
+		apiKey: apiKey, httpClient: httpClient,
 		statuses: make(map[string]sentioStatusCache),
 	}
+}
+
+func freshSentioHTTPClient(client *http.Client) *http.Client {
+	client.CloseIdleConnections()
+	transport := client.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	httpTransport, ok := transport.(*http.Transport)
+	if !ok {
+		return client
+	}
+	fresh := *client
+	fresh.Transport = httpTransport.Clone()
+	return &fresh
 }
 
 func (c *sentioAPIClient) doJSON(
@@ -84,7 +104,10 @@ func (c *sentioAPIClient) doJSON(
 	if c.apiKey == "" {
 		return fmt.Errorf("Sentio API key is not configured")
 	}
+	c.httpMu.Lock()
+	defer c.httpMu.Unlock()
 	var last error
+	httpClient := c.httpClient
 	for attempt := 0; attempt < 3; attempt++ {
 		var reader io.Reader
 		if body != nil {
@@ -104,12 +127,14 @@ func (c *sentioAPIClient) doJSON(
 		if body != nil {
 			request.Header.Set("content-type", "application/json")
 		}
-		response, err := c.httpClient.Do(request)
+		response, err := httpClient.Do(request)
+		transportFailed := err != nil
 		if err == nil {
 			payload, readErr := io.ReadAll(io.LimitReader(response.Body, 4<<20))
 			response.Body.Close()
 			if readErr != nil {
 				err = readErr
+				transportFailed = true
 			} else if response.StatusCode != http.StatusOK {
 				err = fmt.Errorf(
 					"HTTP %d: %s",
@@ -125,6 +150,13 @@ func (c *sentioAPIClient) doJSON(
 			} else {
 				return nil
 			}
+		}
+		if transportFailed {
+			// A canceled HTTP/2 stream can leave its underlying connection alive but
+			// unable to serve subsequent streams. Retrying on that same connection
+			// only repeats the timeout, so force the next attempt onto a fresh one.
+			httpClient = freshSentioHTTPClient(httpClient)
+			c.httpClient = httpClient
 		}
 		last = err
 		if attempt < 2 {
