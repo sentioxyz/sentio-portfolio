@@ -6,19 +6,28 @@ latest/fixed-block RPC reads, account attribution, index-backed position reads,
 and valuation aggregation.
 
 Plain holdings — the native coin and ERC-20s an account holds outside any
-protocol — are reported by the `wallet` adapter. For live scans a host-injected,
-provider-neutral `WalletBalanceProvider` discovers tokens and supplies metadata.
-The RPC-settled block remains authoritative: provider amounts are used directly
-only when their block number and hash match it; otherwise every discovered
-balance is re-read at that settled block and discovery is unioned with the
-generated `wallet-tokens.json` manifest. Fixed-block scans and missing provider
-results also use that manifest. This pins every reported quantity and preserves
-the previous curated coverage baseline, but a live discovery API without a
-historical selector cannot prove the complete long-tail token universe at an
-earlier settled block: a token cleared before the live sample and absent from
-the manifest may be omitted. A token an adapter already reads as a position is
-never counted twice, and final USD valuation always comes from the host's
-`PriceProvider`.
+protocol — are reported by the `wallet` adapter. A host-injected
+`WalletBalanceProvider` is the sole source of ERC-20 candidates for both live
+and fixed-block scans. There is no static token list or metadata registry.
+Provider metadata is used when complete; otherwise metadata is read on-chain.
+
+The RPC-settled block remains authoritative. Provider amounts are used directly
+only when their block number and hash match that pin; otherwise every discovered
+balance is re-read at the settled block, including provider rows reporting zero.
+Providers may supply per-account block metadata when address batches sample
+different blocks. A candidate whose successful `balanceOf` returns empty data
+is omitted; reverts, RPC failures, and malformed non-empty results remain errors.
+
+Unavailable discovery, unsupported chains, and missing account results produce
+explicit coverage errors. Native balances can still be read independently over
+RPC. Historical scans using a provider sample from another block report that
+token discovery is incomplete: a token held only at the historical block may be
+absent from current discovery. Returned quantities remain pinned, but the
+response does not claim a complete historical token universe.
+
+A token already counted by a protocol adapter is suppressed from wallet holdings
+by its source contract and attributed account. Final USD valuation always comes
+from the host's `PriceProvider`.
 
 The repository deliberately does not own an HTTP or gRPC API, protobufs,
 deployment configuration, authentication, or a concrete price service. A host

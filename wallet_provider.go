@@ -18,7 +18,7 @@ import (
 // pagination, retries and rate limits.
 //
 // The engine's RPC-settled block remains canonical. Implementations must return the exact block
-// number and hash shared by every page and account for one chain: the kernel uses amounts directly
+// number and hash for each account's sample: the kernel uses amounts directly
 // only when that block matches its settled pin. Otherwise the result is token discovery and every
 // discovered amount is re-read through RPC at the settled block.
 type WalletBalanceProvider interface {
@@ -33,48 +33,31 @@ type WalletBalanceTarget struct {
 }
 
 type WalletBalanceRequest struct {
-	// RootAccount is the address passed to Engine.Scan. A provider with a smaller address batch
-	// limit than Targets must always keep this account and may omit attributed accounts.
+	// RootAccount is the address passed to Engine.Scan. Providers should request it
+	// first, batch all remaining targets, and report any uncovered target as a failure.
 	RootAccount common.Address
 	Targets     []WalletBalanceTarget
 }
 
-// WalletBalanceResult may contain verified account results together with failures and explicit
-// clean fallbacks. A missing account result is not an empty wallet: WalletBalanceAccount with an
+// WalletBalanceResult may contain verified account results together with failures.
+// A missing account result is not an empty wallet: WalletBalanceAccount with an
 // empty Balances slice is the successful representation of an account with no holdings.
 type WalletBalanceResult struct {
-	Chains          []WalletBalanceChain
-	Failures        []WalletBalanceFailure
-	FallbackTargets []WalletBalanceFallback
+	Chains   []WalletBalanceChain
+	Failures []WalletBalanceFailure
 }
 
-// WalletBalanceFallbackReason explains why the provider deliberately left a requested target to
-// the kernel's committed-manifest RPC path. Values are closed so a typo cannot silently suppress
-// a missing-result error.
-type WalletBalanceFallbackReason string
-
-const (
-	WalletBalanceFallbackUnsupportedChain WalletBalanceFallbackReason = "unsupported_chain"
-	WalletBalanceFallbackAddressLimit     WalletBalanceFallbackReason = "address_limit"
-)
-
-// WalletBalanceFallback is an explicit, successful provider hand-off for exactly one requested
-// account. Unsupported chains may include the root account. Address-limit fallback is reserved
-// for attributed accounts: providers must always retain WalletBalanceRequest.RootAccount on a
-// chain they support.
-type WalletBalanceFallback struct {
-	ChainID ChainID
-	Account common.Address
-	Reason  WalletBalanceFallbackReason
-}
-
-// WalletBalanceChain groups every account result that was observed at one provider block.
+// WalletBalanceChain supplies a default sample block for accounts on one chain.
+// An account can override it when the provider used separate request batches.
 type WalletBalanceChain struct {
 	Block    BlockRef
 	Accounts []WalletBalanceAccount
 }
 
 type WalletBalanceAccount struct {
+	// Block overrides the chain's shared sample when accounts were fetched in
+	// separate batches. Nil uses WalletBalanceChain.Block.
+	Block    *BlockRef
 	Account  common.Address
 	Balances []WalletBalance
 }
@@ -84,8 +67,8 @@ type WalletBalanceAccount struct {
 // and provider metadata are ignored while Token.ChainID must still match the enclosing chain.
 //
 // MetadataComplete distinguishes a legitimate zero-decimal ERC-20 from a provider response
-// whose decimals were absent. When metadata is incomplete, the kernel first consults its
-// committed manifest and otherwise reads the token at the verified canonical block.
+// whose decimals were absent. When metadata is incomplete, the kernel reads the
+// token metadata at the verified canonical block.
 type WalletBalance struct {
 	Token            Token
 	AmountRaw        string
@@ -108,17 +91,21 @@ type walletProviderAccount struct {
 	exactBlock bool
 }
 
-// configureLiveWalletBalances installs provider results as either exact balances or discovery.
+// configureWalletBalances installs live or historical provider results as either exact balances or discovery.
 // The RPC-settled block remains authoritative: only a provider result with the same number and
 // hash may supply amounts directly. Results from a newer block still discover token addresses,
 // whose balances the wallet adapter re-reads at the settled block.
-func configureLiveWalletBalances(
+func configureWalletBalances(
 	ctx context.Context,
 	provider WalletBalanceProvider,
 	root common.Address,
 	chains map[ChainID]*chainScan,
 ) {
 	if provider == nil {
+		for _, chain := range chains {
+			chain.walletProviderErrors = append(chain.walletProviderErrors,
+				errors.New("wallet token discovery provider is not configured"))
+		}
 		return
 	}
 
@@ -126,7 +113,7 @@ func configureLiveWalletBalances(
 	requested := make(map[ChainID]map[common.Address]attributedAccount)
 	for _, chainID := range SupportedChainIDs {
 		chain := chains[chainID]
-		if chain == nil || chain.block.Fixed {
+		if chain == nil {
 			continue
 		}
 		requested[chainID] = make(map[common.Address]attributedAccount, len(chain.accounts))
@@ -158,7 +145,7 @@ func configureLiveWalletBalances(
 			)
 		}
 		// A request-level error cannot prove which parts of a returned payload are complete.
-		// Keep the existing manifest path for every target rather than trusting partial data.
+		// Keep only independently read native balances rather than trusting partial data.
 		return
 	}
 
@@ -177,63 +164,11 @@ func configureLiveWalletBalances(
 			)
 		}
 	}
-	requestedTarget := func(target WalletBalanceTarget) bool {
-		accounts := requested[target.ChainID]
-		if accounts == nil {
-			return false
-		}
-		_, exists := accounts[target.Account]
-		return exists
-	}
-	fallbackReasons := make(map[WalletBalanceTarget]WalletBalanceFallbackReason)
-	invalidTargets := make(map[WalletBalanceTarget]struct{})
-	seenFallbacks := make(map[WalletBalanceTarget]struct{})
-	for _, fallback := range result.FallbackTargets {
-		target := WalletBalanceTarget{ChainID: fallback.ChainID, Account: fallback.Account}
-		if !requestedTarget(target) {
-			providerContractError(
-				fallback.ChainID,
-				fmt.Sprintf("fallback target %d/%s was not requested", fallback.ChainID, fallback.Account.Hex()),
-			)
-			continue
-		}
-		if _, duplicate := seenFallbacks[target]; duplicate {
-			delete(fallbackReasons, target)
-			invalidTargets[target] = struct{}{}
-			providerContractError(
-				fallback.ChainID,
-				fmt.Sprintf("duplicate fallback target %d/%s", fallback.ChainID, fallback.Account.Hex()),
-			)
-			continue
-		}
-		seenFallbacks[target] = struct{}{}
-		switch fallback.Reason {
-		case WalletBalanceFallbackUnsupportedChain:
-			fallbackReasons[target] = fallback.Reason
-		case WalletBalanceFallbackAddressLimit:
-			if fallback.Account == root {
-				invalidTargets[target] = struct{}{}
-				providerContractError(
-					fallback.ChainID,
-					fmt.Sprintf("root account %s cannot use address-limit fallback", root.Hex()),
-				)
-				continue
-			}
-			fallbackReasons[target] = fallback.Reason
-		default:
-			invalidTargets[target] = struct{}{}
-			providerContractError(
-				fallback.ChainID,
-				fmt.Sprintf("fallback target %d/%s has an unknown reason", fallback.ChainID, fallback.Account.Hex()),
-			)
-		}
-	}
-
 	failedChains := make(map[ChainID]struct{})
 	failedAccounts := make(map[ChainID]map[common.Address]struct{})
 	for _, failure := range result.Failures {
 		chain := chains[failure.ChainID]
-		if chain == nil || chain.block.Fixed || requested[failure.ChainID] == nil {
+		if chain == nil || requested[failure.ChainID] == nil {
 			continue
 		}
 		chain.walletProviderErrors = append(
@@ -242,27 +177,7 @@ func configureLiveWalletBalances(
 		)
 		if failure.Account == (common.Address{}) {
 			failedChains[failure.ChainID] = struct{}{}
-			for target := range fallbackReasons {
-				if target.ChainID != failure.ChainID {
-					continue
-				}
-				delete(fallbackReasons, target)
-				invalidTargets[target] = struct{}{}
-				providerContractError(
-					failure.ChainID,
-					fmt.Sprintf("fallback target %d/%s overlaps a chain failure", target.ChainID, target.Account.Hex()),
-				)
-			}
 			continue
-		}
-		target := WalletBalanceTarget{ChainID: failure.ChainID, Account: failure.Account}
-		if _, overlaps := fallbackReasons[target]; overlaps {
-			delete(fallbackReasons, target)
-			invalidTargets[target] = struct{}{}
-			providerContractError(
-				failure.ChainID,
-				fmt.Sprintf("fallback target %d/%s overlaps a failure", target.ChainID, target.Account.Hex()),
-			)
 		}
 		if failedAccounts[failure.ChainID] == nil {
 			failedAccounts[failure.ChainID] = make(map[common.Address]struct{})
@@ -284,13 +199,6 @@ func configureLiveWalletBalances(
 		byChain[chainID] = providerChain
 	}
 	targetHandledWithoutResult := func(chainID ChainID, account common.Address) bool {
-		target := WalletBalanceTarget{ChainID: chainID, Account: account}
-		if _, fallback := fallbackReasons[target]; fallback {
-			return true
-		}
-		if _, invalid := invalidTargets[target]; invalid {
-			return true
-		}
 		_, failed := failedAccounts[chainID][account]
 		return failed
 	}
@@ -334,19 +242,6 @@ func configureLiveWalletBalances(
 				)
 				continue
 			}
-			target := WalletBalanceTarget{ChainID: chainID, Account: resultAccount.Account}
-			if _, fallback := fallbackReasons[target]; fallback {
-				delete(fallbackReasons, target)
-				invalidTargets[target] = struct{}{}
-				providerContractError(
-					chainID,
-					fmt.Sprintf("fallback target %d/%s also has an account result", chainID, resultAccount.Account.Hex()),
-				)
-				continue
-			}
-			if _, invalid := invalidTargets[target]; invalid {
-				continue
-			}
 			if _, failed := failedAccounts[chainID][resultAccount.Account]; failed {
 				continue
 			}
@@ -384,47 +279,26 @@ func configureLiveWalletBalances(
 			continue
 		}
 
-		blockMetadataComplete := providerChain.Block.Number != 0 &&
-			providerChain.Block.Hash != (common.Hash{})
-		if !blockMetadataComplete {
-			chain.walletProviderErrors = append(
-				chain.walletProviderErrors,
-				errors.New("wallet balance provider returned incomplete block metadata"),
-			)
-		}
-		exactBlock := blockMetadataComplete &&
-			providerChain.Block.Number == chain.block.Number &&
-			providerChain.Block.Hash == chain.block.Hash
-		// A different height is the expected live case. The same height with another hash is a
-		// reorg or inconsistent response and deserves an explicit partial error.
-		if blockMetadataComplete && providerChain.Block.Number == chain.block.Number &&
-			providerChain.Block.Hash != chain.block.Hash {
-			chain.walletProviderErrors = append(
-				chain.walletProviderErrors,
-				fmt.Errorf(
-					"wallet balance block hash mismatch at block %d",
-					providerChain.Block.Number,
-				),
-			)
-		}
-		if exactBlock && providerChain.Block.Timestamp != 0 &&
-			providerChain.Block.Timestamp != chain.block.Timestamp {
-			chain.walletProviderErrors = append(
-				chain.walletProviderErrors,
-				fmt.Errorf(
-					"wallet balance block timestamp mismatch at block %d",
-					providerChain.Block.Number,
-				),
-			)
-			exactBlock = false
-		}
-
 		providerAccounts := make(map[common.Address]walletProviderAccount, len(resultAccounts))
+		historicalCoverageGap := false
 		for account, resultAccount := range resultAccounts {
-			providerAccounts[account] = walletProviderAccount{
-				balances:   resultAccount.Balances,
-				exactBlock: exactBlock,
+			providerBlock := providerChain.Block
+			if resultAccount.Block != nil {
+				providerBlock = *resultAccount.Block
+				if providerBlock.ChainID != chainID {
+					providerContractError(chainID, "account block belongs to another chain")
+					continue
+				}
 			}
+			exactBlock := walletProviderBlockMatches(chain, providerBlock)
+			providerAccounts[account] = walletProviderAccount{
+				balances: resultAccount.Balances, exactBlock: exactBlock,
+			}
+			historicalCoverageGap = historicalCoverageGap || (chain.block.Fixed && !exactBlock)
+		}
+		if historicalCoverageGap {
+			chain.walletProviderErrors = append(chain.walletProviderErrors,
+				errors.New("historical wallet token discovery is incomplete: provider holdings are from a different block; tokens held only at the requested block may be missing"))
 		}
 		chain.walletProviderAccounts = providerAccounts
 		for _, account := range chain.accounts {
@@ -445,6 +319,31 @@ func configureLiveWalletBalances(
 			}
 		}
 	}
+
+}
+
+// walletProviderBlockMatches validates metadata independently for each account,
+// since a provider may batch accounts in separate requests sampled at different blocks.
+func walletProviderBlockMatches(chain *chainScan, block BlockRef) bool {
+	if block.Number == 0 || block.Hash == (common.Hash{}) {
+		chain.walletProviderErrors = append(chain.walletProviderErrors,
+			errors.New("wallet balance provider returned incomplete block metadata"))
+		return false
+	}
+	if block.Number != chain.block.Number {
+		return false
+	}
+	if block.Hash != chain.block.Hash {
+		chain.walletProviderErrors = append(chain.walletProviderErrors,
+			fmt.Errorf("wallet balance block hash mismatch at block %d", block.Number))
+		return false
+	}
+	if block.Timestamp != 0 && block.Timestamp != chain.block.Timestamp {
+		chain.walletProviderErrors = append(chain.walletProviderErrors,
+			fmt.Errorf("wallet balance block timestamp mismatch at block %d", block.Number))
+		return false
+	}
+	return true
 }
 
 func walletBalanceFailureError(failure WalletBalanceFailure) error {
@@ -590,8 +489,6 @@ func directProviderWalletGroups(
 // discoveredProviderWalletGroups treats provider rows as token discovery only and re-reads
 // every amount at the engine's settled block. Zero provider rows remain candidates: the balance
 // may be non-zero at the earlier settled block even when it is zero at the provider's latest.
-// The manifest is unioned into discovery so this path can never cover fewer known assets than the
-// pre-provider implementation.
 func discoveredProviderWalletGroups(
 	ctx context.Context,
 	client *RPCClient,
@@ -663,20 +560,6 @@ func discoveredProviderWalletGroups(
 		seen[balance.Token.Address] = struct{}{}
 		candidates = append(candidates, balance)
 	}
-	for _, entry := range walletTokens.Tokens {
-		if entry.ChainID != chainID {
-			continue
-		}
-		if _, exists := seen[entry.Address]; exists {
-			continue
-		}
-		seen[entry.Address] = struct{}{}
-		candidates = append(candidates, WalletBalance{
-			Token:            entry.token(),
-			AmountRaw:        "0",
-			MetadataComplete: true,
-		})
-	}
 	if len(candidates) == 0 {
 		sort.Slice(groups, func(left, right int) bool { return groups[left].ID < groups[right].ID })
 		return groups, errors.Join(failures...)
@@ -701,6 +584,13 @@ func discoveredProviderWalletGroups(
 	for index, row := range rows {
 		candidate := candidates[index]
 		if row.Error != nil {
+			// Discovery can include contracts that emit token-like events but do
+			// not implement balanceOf. Empty successful calls disqualify only
+			// these unverified candidates; other failures must still report gaps
+			// rather than silently shrinking the portfolio.
+			if errors.Is(row.Error, errEmptyContractResult) {
+				continue
+			}
 			failures = append(failures, fmt.Errorf(
 				"%s balance: %w",
 				candidate.Token.Address.Hex(),
@@ -751,15 +641,6 @@ func discoveredProviderWalletGroups(
 	return groups, errors.Join(failures...)
 }
 
-var walletManifestTokens = func() map[AssetID]Token {
-	tokens := make(map[AssetID]Token, len(walletTokens.Tokens))
-	for _, entry := range walletTokens.Tokens {
-		token := entry.token()
-		tokens[AssetForToken(token)] = token
-	}
-	return tokens
-}()
-
 const maxWalletTokenSymbolBytes = 64
 
 func providerWalletToken(
@@ -769,9 +650,6 @@ func providerWalletToken(
 	provided Token,
 	metadataComplete bool,
 ) (Token, error) {
-	if token, exists := walletManifestTokens[AssetForToken(provided)]; exists {
-		return token, nil
-	}
 	if metadataComplete && provided.Decimals <= 36 {
 		symbol, err := validatedWalletTokenSymbol(provided.Symbol)
 		if err == nil {
