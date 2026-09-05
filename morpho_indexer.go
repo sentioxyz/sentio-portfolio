@@ -348,7 +348,7 @@ func (i *morphoIndexer) indexedRefs(
 	account common.Address,
 	includeFeeMarkets bool,
 ) (morphoPositionRefs, error) {
-	statuses, err := i.api.chainStatuses(ctx, i.config, i.requiredChains, false)
+	statuses, err := i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, false)
 	if err != nil {
 		return morphoPositionRefs{}, err
 	}
@@ -360,7 +360,7 @@ func (i *morphoIndexer) indexedRefs(
 		)
 	}
 	if block.Number > status.ProcessedBlock && block.Number-status.ProcessedBlock > morphoMaxRPCTailBlocks {
-		statuses, err = i.api.chainStatuses(ctx, i.config, i.requiredChains, true)
+		statuses, err = i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, true)
 		if err != nil {
 			return morphoPositionRefs{}, err
 		}

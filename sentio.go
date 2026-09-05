@@ -49,6 +49,7 @@ type sentioChainStatus struct {
 	State           string
 	ProcessedBlock  uint64
 	EstimatedLatest uint64
+	err             error
 }
 
 type sentioStatusCache struct {
@@ -193,6 +194,37 @@ type sentioIndexerStatusResponse struct {
 	} `json:"processors"`
 }
 
+// A scan needs only its own chain to be ready. Keep the configured-chain bound
+// while allowing other chains in the same version to backfill or report errors.
+func (c *sentioAPIClient) chainStatusesForScan(
+	ctx context.Context,
+	config SentioIndexerConfig,
+	configuredChains []ChainID,
+	chainID ChainID,
+	forceRefresh bool,
+) (map[ChainID]sentioChainStatus, error) {
+	if !supportsChain(configuredChains, chainID) {
+		return nil, fmt.Errorf("indexer is not configured for chain %d", chainID)
+	}
+	return c.chainStatuses(ctx, config, []ChainID{chainID}, forceRefresh)
+}
+
+func validateSentioChainStatuses(
+	chains map[ChainID]sentioChainStatus,
+	requiredChains []ChainID,
+) (map[ChainID]sentioChainStatus, error) {
+	for _, chainID := range requiredChains {
+		status, exists := chains[chainID]
+		if !exists {
+			return nil, fmt.Errorf("processor status omitted chain %d", chainID)
+		}
+		if status.err != nil {
+			return nil, status.err
+		}
+	}
+	return chains, nil
+}
+
 func (c *sentioAPIClient) chainStatuses(
 	ctx context.Context,
 	config SentioIndexerConfig,
@@ -207,7 +239,7 @@ func (c *sentioAPIClient) chainStatuses(
 	cacheKey := config.StatusURL + "@" + config.ProcessorVersion
 	if !forceRefresh {
 		if cached, exists := c.statuses[cacheKey]; exists && time.Since(cached.At) < sentioStatusCacheTTL {
-			return cached.Chains, nil
+			return validateSentioChainStatuses(cached.Chains, requiredChains)
 		}
 	}
 
@@ -230,19 +262,28 @@ func (c *sentioAPIClient) chainStatuses(
 				return nil, fmt.Errorf("processor returned invalid chain ID %q", state.ChainID)
 			}
 			chainID := ChainID(chainNumber)
-			if _, duplicate := chains[chainID]; duplicate {
-				return nil, fmt.Errorf("processor returned duplicate chain %d", chainID)
+			if previous, duplicate := chains[chainID]; duplicate {
+				previous.err = fmt.Errorf("processor returned duplicate chain %d", chainID)
+				chains[chainID] = previous
+				continue
 			}
+			chainStatus := sentioChainStatus{State: state.Status.State}
 			if state.Status.ErrorRecord.Message != "" {
-				return nil, fmt.Errorf("processor chain %d error: %s", chainID, state.Status.ErrorRecord.Message)
+				chainStatus.err = redactEndpoints(fmt.Errorf("processor chain %d error: %s", chainID, state.Status.ErrorRecord.Message))
+				chains[chainID] = chainStatus
+				continue
 			}
 			processed, err := strconv.ParseUint(state.ProcessedBlock, 10, 64)
 			if err != nil {
-				return nil, fmt.Errorf("processor returned invalid block %q", state.ProcessedBlock)
+				chainStatus.err = fmt.Errorf("processor chain %d returned invalid block %q", chainID, state.ProcessedBlock)
+				chains[chainID] = chainStatus
+				continue
 			}
 			estimated, err := strconv.ParseUint(state.EstimatedLatest, 10, 64)
 			if err != nil {
-				return nil, fmt.Errorf("processor returned invalid latest block %q", state.EstimatedLatest)
+				chainStatus.err = fmt.Errorf("processor chain %d returned invalid latest block %q", chainID, state.EstimatedLatest)
+				chains[chainID] = chainStatus
+				continue
 			}
 			chains[chainID] = sentioChainStatus{
 				State: state.Status.State, ProcessedBlock: processed, EstimatedLatest: estimated,
@@ -256,11 +297,6 @@ func (c *sentioAPIClient) chainStatuses(
 			config.ProcessorVersion,
 		)
 	}
-	for _, chainID := range requiredChains {
-		if _, exists := chains[chainID]; !exists {
-			return nil, fmt.Errorf("processor status omitted chain %d", chainID)
-		}
-	}
 	c.statuses[cacheKey] = sentioStatusCache{At: time.Now(), Chains: chains}
-	return chains, nil
+	return validateSentioChainStatuses(chains, requiredChains)
 }

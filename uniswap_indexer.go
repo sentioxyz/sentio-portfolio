@@ -72,6 +72,7 @@ func newUniswapIndexer(
 func (i *uniswapIndexer) chainStatuses(
 	ctx context.Context,
 	definition uniswapIndexerDefinition,
+	chainID ChainID,
 ) (map[ChainID]sentioChainStatus, error) {
 	var chains []ChainID
 	switch definition.version {
@@ -82,7 +83,7 @@ func (i *uniswapIndexer) chainStatuses(
 	default:
 		return nil, fmt.Errorf("unsupported Uniswap generation %q", definition.version)
 	}
-	return i.api.chainStatuses(ctx, i.configs[definition.version], chains, false)
+	return i.api.chainStatusesForScan(ctx, i.configs[definition.version], chains, chainID, false)
 }
 
 const uniswapWalletQuery = `
@@ -307,7 +308,7 @@ func (i *uniswapIndexer) indexedNFTs(
 
 	sentioQueryMu.Lock()
 	defer sentioQueryMu.Unlock()
-	statuses, err := i.chainStatuses(ctx, definition)
+	statuses, err := i.chainStatuses(ctx, definition, block.ChainID)
 	if err != nil {
 		return uniswapIndexedNFTs{}, err
 	}
