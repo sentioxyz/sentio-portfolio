@@ -69,7 +69,6 @@ go_library(
         "lista-markets.json",
         "stakewise-vaults.json",
         "vesper-pools.json",
-        "wallet-tokens.json",
         "yearn_v3_arbitrum_markets.json",
         "yearn_v3_base_markets.json",
         "yearn_v3_markets.json",

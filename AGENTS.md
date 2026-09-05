@@ -19,48 +19,35 @@ single processor:
 
 ## Wallet holdings
 
-For live scans, a host-injected `WalletBalanceProvider` discovers holdings and
-supplies token metadata. It is a discovery layer, not the source of the scan's
-block: the existing RPC-settled block remains authoritative. Provider amounts
-may be used only when the provider block number and hash exactly match that
-settled pin. A newer provider block is expected; in that case re-read native and
-every discovered ERC-20 `balanceOf` at the settled block, including provider
-rows whose reported amount is zero, and union those addresses with the chain's
-manifest tokens. Never label a latest provider amount with the earlier settled
-`BlockRef`.
+A host-injected `WalletBalanceProvider` is the only ERC-20 discovery source for
+live and historical scans. Do not add static token lists, token-list unions,
+static metadata lookups, or an ERC-20 fallback when discovery fails.
 
-`wallet-tokens.json` is the generated fallback list used by fixed-block scans and
-for accounts or networks the live provider did not return. It is generated rather
-than hand-edited. Two rules decide what belongs in it:
+The RPC-settled block remains authoritative. Provider amounts may be used only
+when the provider block number and hash exactly match that pin. Per-account
+block metadata overrides the shared chain sample when accounts were queried in
+separate batches. Otherwise re-read native and every discovered ERC-20 balance
+at the settled block, including provider rows whose latest amount is zero.
+Never label a latest provider amount with an earlier `BlockRef`.
 
-- **every token must be quotable by the host's price provider.** The kernel has no
-  price service, so an unquotable token is not extra coverage — it reports an amount
-  the response cannot value and adds a pricing failure to every scan of every
-  account. Only the host can decide that, and it does: it runs the committed list
-  through the price provider production uses and prunes what cannot be quoted;
-- **never list a token an adapter already reads.** LSTs, vault shares, aTokens and
-  LP tokens are positions, not holdings. `suppressDuplicateHoldings` enforces this
-  at runtime from the `Source` each component records, so an adapter that reads a
-  wallet balance must keep the contract it read in `Source.Contract` — that field is
-  what stops the same balance being counted twice.
+Filter zero amounts before metadata enrichment when blocks match. When they
+differ, first re-read the balance, then enrich non-zero results from provider
+metadata or on-chain `symbol` and `decimals` (including bytes32 symbols). Never
+invent either field or obtain it from a static token registry.
 
-Provider token metadata can be absent even on a successful row. Filter zero
-amounts before enrichment when blocks match. When blocks differ, first re-read
-the discovered balance at the settled pin, then enrich only non-zero results:
-prefer committed manifest metadata by chain and address, otherwise read
-`symbol` and `decimals` at that same block (including the bytes32 symbol fallback).
-Never guess either field.
+An empty successful `balanceOf` return disqualifies a discovery candidate for
+that scan. Reverts, RPC failures, and malformed non-empty results remain errors.
+Do not implement an address blacklist or silently turn failed reads into zero.
 
-The holdings provider is not a price source for the kernel. The host may need to
-accept or ignore prices present in its transport response, but `PriceProvider`
-remains the only input to `Response.Prices`, `Component.PriceUSD`, and valuation.
+Provider failure, unsupported chains, and missing account results must surface
+explicit coverage errors; native balances can still be read independently.
+Historical scans with discovery sampled at another block must report incomplete
+token discovery: assets held only at the requested block may be absent. Pinned
+quantities do not establish a complete historical token universe.
 
-Pinned quantities do not prove a historically complete token universe. A live
-discovery service without a historical selector cannot reveal a long-tail token
-that was held at the settled pin but cleared before the provider's newer sample.
-The manifest union preserves the old curated baseline; any additional discovered
-tokens extend it, but the response must not claim complete historical long-tail
-coverage.
+The provider is not the price source. `PriceProvider` alone supplies valuation.
+`suppressDuplicateHoldings` uses `Source.Contract` and the attributed account to
+avoid counting tokens already read by protocol adapters, so preserve provenance.
 
 ## Pricing a token nothing quotes
 
