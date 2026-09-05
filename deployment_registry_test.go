@@ -461,6 +461,7 @@ var verifiedProtocolAvailabilityWindows = []expectedProtocolAvailabilityWindow{
 	{protocolID: "crvusd", chainID: Ethereum, activationBlock: 17_257_955},
 	{protocolID: "curve-lending", chainID: Ethereum, activationBlock: 19_422_660},
 	{protocolID: "curve-lending", chainID: Arbitrum, activationBlock: 193_652_535},
+	{protocolID: "curve-lending", chainID: Optimism, activationBlock: 125_072_267},
 	{protocolID: "vesper", chainID: Ethereum, activationBlock: 11_407_993},
 	{protocolID: "vesper", chainID: Base, activationBlock: 15_153_629},
 	{protocolID: "yearn-v3", chainID: Ethereum, activationBlock: 18_817_046},
@@ -470,6 +471,11 @@ var verifiedProtocolAvailabilityWindows = []expectedProtocolAvailabilityWindow{
 	{protocolID: "beefy", chainID: BSC, activationBlock: 1_174_856},
 	{protocolID: "beefy", chainID: Base, activationBlock: 2_572_135},
 	{protocolID: "beefy", chainID: Arbitrum, activationBlock: 3_005_534},
+	{protocolID: "beefy", chainID: Polygon, activationBlock: 14_272_076},
+	{protocolID: "beefy", chainID: Monad, activationBlock: 38_165_449},
+	{protocolID: "beefy", chainID: Plasma, activationBlock: 2_013_105},
+	{protocolID: "beefy", chainID: Avalanche, activationBlock: 3_052_900},
+	{protocolID: "beefy", chainID: Optimism, activationBlock: 17_722_021},
 	{protocolID: "stakewise", chainID: Ethereum, activationBlock: 18_470_152},
 	{protocolID: "lista", chainID: Ethereum, activationBlock: 23_445_769},
 	{protocolID: "lista", chainID: BSC, activationBlock: 20_324_823},
@@ -497,10 +503,58 @@ var verifiedProtocolAvailabilityWindows = []expectedProtocolAvailabilityWindow{
 	{protocolID: "uniswap-v4", chainID: BSC, activationBlock: 45_970_613},
 	{protocolID: "uniswap-v4", chainID: Base, activationBlock: 25_350_993},
 	{protocolID: "uniswap-v4", chainID: Arbitrum, activationBlock: 297_842_893},
+	{protocolID: "aave-v3", chainID: Polygon, activationBlock: 25_826_028},
+	{protocolID: "aave-v3", chainID: Monad, activationBlock: 81_909_763},
+	{protocolID: "aave-v3", chainID: Plasma, activationBlock: 489_197},
+	{protocolID: "aave-v3", chainID: Avalanche, activationBlock: 11_970_506},
+	{protocolID: "aave-v3", chainID: Optimism, activationBlock: 4_365_693},
+	{protocolID: "aave-v2", chainID: Polygon, activationBlock: 12_687_302},
+	{protocolID: "aave-v2", chainID: Avalanche, activationBlock: 4_607_174},
+	{protocolID: "spark", chainID: Avalanche, activationBlock: 69_983_672},
+	{protocolID: "spark", chainID: Optimism, activationBlock: 136_322_256},
+	{protocolID: "moonwell", chainID: Optimism, activationBlock: 122_531_304},
+	{protocolID: "sonne", chainID: Optimism, activationBlock: 25_840_175},
+	{protocolID: "venus", chainID: Optimism, activationBlock: 126_048_098},
+	{protocolID: "compound-v3", chainID: Polygon, activationBlock: 39_412_367},
+	{protocolID: "compound-v3", chainID: Optimism, activationBlock: 118_406_276},
+	{protocolID: "etherfi", chainID: Optimism, activationBlock: 120_917_167},
+	{protocolID: "stader", chainID: Polygon, activationBlock: staderPolygonDeployment.tokenActivationBlock},
+	{protocolID: "aave-v4", chainID: Avalanche, activationBlock: 89_721_368},
+	{protocolID: "vesper", chainID: Avalanche, activationBlock: 9_452_892},
+	{protocolID: "vesper", chainID: Optimism, activationBlock: 75_560_596},
+	{protocolID: "yearn-v3", chainID: Polygon, activationBlock: 48_951_031},
+	{protocolID: "euler-v2", chainID: Polygon, activationBlock: 86_932_963},
+	{protocolID: "euler-v2", chainID: Monad, activationBlock: 30_858_592},
+	{protocolID: "euler-v2", chainID: Plasma, activationBlock: 511_021},
+	{protocolID: "euler-v2", chainID: Avalanche, activationBlock: 56_805_710},
+	{protocolID: "morpho-blue", chainID: Polygon, activationBlock: 66_931_042},
+	{protocolID: "morpho-blue", chainID: Monad, activationBlock: 31_907_457},
+	{protocolID: "morpho-blue", chainID: Plasma, activationBlock: 2_919_883},
+	{protocolID: "morpho-blue", chainID: Avalanche, activationBlock: 75_313_888},
+	{protocolID: "morpho-blue", chainID: Optimism, activationBlock: 130_770_075},
+	{protocolID: "pendle", chainID: Monad, activationBlock: 75_580_673},
+	{protocolID: "pendle", chainID: Plasma, activationBlock: 1_887_231},
+	{protocolID: "pendle", chainID: Optimism, activationBlock: 108_061_318},
+	{protocolID: "fluid", chainID: Polygon, activationBlock: 79_090_648},
+	{protocolID: "fluid", chainID: Plasma, activationBlock: 8_682_622},
+	{protocolID: "uniswap-v3", chainID: Polygon, activationBlock: 22_760_586},
+	{protocolID: "uniswap-v3", chainID: Monad, activationBlock: 29_255_879},
+	{protocolID: "uniswap-v3", chainID: Plasma, activationBlock: 430_178},
+	{protocolID: "uniswap-v3", chainID: Avalanche, activationBlock: 27_833_025},
+	{protocolID: "uniswap-v3", chainID: Optimism, fromGenesis: true},
+	{protocolID: "uniswap-v4", chainID: Polygon, activationBlock: 66_980_399},
+	{protocolID: "uniswap-v4", chainID: Monad, activationBlock: 29_255_924},
+	{protocolID: "uniswap-v4", chainID: Avalanche, activationBlock: 56_195_389},
+	{protocolID: "uniswap-v4", chainID: Optimism, activationBlock: 130_947_685},
 	{protocolID: "wallet", chainID: Ethereum, fromGenesis: true},
 	{protocolID: "wallet", chainID: BSC, fromGenesis: true},
 	{protocolID: "wallet", chainID: Base, fromGenesis: true},
 	{protocolID: "wallet", chainID: Arbitrum, fromGenesis: true},
+	{protocolID: "wallet", chainID: Polygon, fromGenesis: true},
+	{protocolID: "wallet", chainID: Monad, fromGenesis: true},
+	{protocolID: "wallet", chainID: Plasma, fromGenesis: true},
+	{protocolID: "wallet", chainID: Avalanche, fromGenesis: true},
+	{protocolID: "wallet", chainID: Optimism, fromGenesis: true},
 }
 
 func TestProtocolAvailabilityMatchesVerifiedBoundaries(t *testing.T) {
@@ -575,6 +629,38 @@ func TestProtocolAvailabilityMatchesVerifiedBoundaries(t *testing.T) {
 				expected.deactivationBlock,
 			)
 		}
+		if expected.fromGenesis {
+			if !window.ActiveAt(0) {
+				t.Errorf("protocol %q chain %d is inactive at genesis", expected.protocolID, expected.chainID)
+			}
+		} else {
+			if window.ActiveAt(expected.activationBlock - 1) {
+				t.Errorf(
+					"protocol %q chain %d is active before block %d",
+					expected.protocolID,
+					expected.chainID,
+					expected.activationBlock,
+				)
+			}
+			if !window.ActiveAt(expected.activationBlock) {
+				t.Errorf(
+					"protocol %q chain %d is inactive at block %d",
+					expected.protocolID,
+					expected.chainID,
+					expected.activationBlock,
+				)
+			}
+		}
+		if expected.deactivationBlock != 0 {
+			if !window.ActiveAt(expected.deactivationBlock) || window.ActiveAt(expected.deactivationBlock+1) {
+				t.Errorf(
+					"protocol %q chain %d has an invalid closing boundary at block %d",
+					expected.protocolID,
+					expected.chainID,
+					expected.deactivationBlock,
+				)
+			}
+		}
 	}
 
 	actualChainCount := 0
@@ -617,6 +703,9 @@ func requireExactComponentAvailability(
 	if got := window.deploymentWindow.DeactivationBlock; got != 0 {
 		t.Fatalf("%s deactivation block = %d, want open-ended", name, got)
 	}
+	if window.ActiveAt(activationBlock-1) || !window.ActiveAt(activationBlock) {
+		t.Fatalf("%s does not switch on at block %d", name, activationBlock)
+	}
 }
 
 func TestComponentAvailabilityMatchesVerifiedBoundaries(t *testing.T) {
@@ -648,6 +737,9 @@ func TestComponentAvailabilityMatchesVerifiedBoundaries(t *testing.T) {
 		t.Fatalf("Moonwell staking modules = %d, want %d", got, want)
 	}
 	requireExactComponentAvailability(t, "Moonwell staking", moonwell.StakingModules[0].Window, 12_187_715)
+	moonwellOptimism := compoundDeployment("moonwell", Optimism)
+	requireExactComponentAvailability(t, "Moonwell Optimism comptroller", moonwellOptimism.ComptrollerWindow, 122_531_304)
+	requireExactComponentAvailability(t, "Moonwell Optimism rewards", moonwellOptimism.MultiRewardWindow, 122_531_322)
 	requireExactComponentAvailability(
 		t,
 		"Flux Finance comptroller",
@@ -659,6 +751,28 @@ func TestComponentAvailabilityMatchesVerifiedBoundaries(t *testing.T) {
 		"Sonne comptroller",
 		compoundDeployment("sonne", Base).ComptrollerWindow,
 		2_492_954,
+	)
+	requireExactComponentAvailability(
+		t,
+		"Sonne Optimism comptroller",
+		compoundDeployment("sonne", Optimism).ComptrollerWindow,
+		26_050_163,
+	)
+	sonneOptimism := compoundDeployment("sonne", Optimism)
+	if got, want := len(sonneOptimism.DistributorStaking), 2; got != want {
+		t.Fatalf("Sonne Optimism distributor staking modules = %d, want %d", got, want)
+	}
+	requireExactComponentAvailability(
+		t,
+		"Sonne Optimism sSONNE staking",
+		sonneOptimism.DistributorStaking[0].Window,
+		25_840_175,
+	)
+	requireExactComponentAvailability(
+		t,
+		"Sonne Optimism uSONNE staking",
+		sonneOptimism.DistributorStaking[1].Window,
+		25_840_274,
 	)
 	requireExactComponentAvailability(
 		t,
@@ -686,6 +800,7 @@ func TestComponentAvailabilityMatchesVerifiedBoundaries(t *testing.T) {
 			chainID: Arbitrum, poolRegistry: 216_184_381,
 			poolLens: 216_184_982, xvsVault: 215_551_349,
 		},
+		{chainID: Optimism, poolRegistry: 126_048_098, poolLens: 126_660_792},
 	} {
 		deployment, exists := venus.deployments[expected.chainID]
 		if !exists {
@@ -694,7 +809,11 @@ func TestComponentAvailabilityMatchesVerifiedBoundaries(t *testing.T) {
 		prefix := fmt.Sprintf("Venus chain %d", expected.chainID)
 		requireExactComponentAvailability(t, prefix+" pool registry", deployment.PoolRegistryWindow, expected.poolRegistry)
 		requireExactComponentAvailability(t, prefix+" pool lens", deployment.PoolLensWindow, expected.poolLens)
-		requireExactComponentAvailability(t, prefix+" XVS vault", deployment.XVSVaultWindow, expected.xvsVault)
+		if expected.xvsVault != 0 {
+			requireExactComponentAvailability(t, prefix+" XVS vault", deployment.XVSVaultWindow, expected.xvsVault)
+		} else if deployment.XVSVault != (common.Address{}) || deployment.XVSVaultWindow.configured {
+			t.Fatalf("%s unexpectedly configures an XVS vault", prefix)
+		}
 		if expected.coreComptroller != 0 {
 			if deployment.Core == nil {
 				t.Fatalf("%s core deployment is missing", prefix)
@@ -723,6 +842,36 @@ func TestComponentAvailabilityMatchesVerifiedBoundaries(t *testing.T) {
 	lst := lstAdapters()[0].(*ConvertedBalanceAdapter)
 	if got, want := lst.positions[Ethereum][0].ActivationBlock, uint64(15_676_402); got != want {
 		t.Fatalf("Liquid Collective activation block = %d, want %d", got, want)
+	}
+}
+
+func TestEtherfiOptimismVaultComponentBoundaries(t *testing.T) {
+	want := map[string]uint64{
+		"liquid-eth": 123_081_511,
+		"liquid-usd": 149_698_252,
+		"liquid-btc": 149_698_606,
+		"sethfi":     149_699_007,
+		"ebtc":       149_699_299,
+		"eusd":       149_822_646,
+	}
+	positions := newEtherfiAdapter(SentioIndexerConfig{}).(*EtherfiAdapter).vaults[Optimism]
+	if got := len(positions); got != len(want) {
+		t.Fatalf("Ether.fi Optimism vault count = %d, want %d", got, len(want))
+	}
+	for _, position := range positions {
+		activation, exists := want[position.ID]
+		if !exists {
+			t.Fatalf("unexpected Ether.fi Optimism vault %q", position.ID)
+		}
+		if got := position.ActivationBlock; got != activation {
+			t.Fatalf("Ether.fi Optimism vault %q activation = %d, want %d", position.ID, got, activation)
+		}
+		if position.ActiveAt(activation - 1) {
+			t.Errorf("Ether.fi Optimism vault %q is active before block %d", position.ID, activation)
+		}
+		if !position.ActiveAt(activation) {
+			t.Errorf("Ether.fi Optimism vault %q is inactive at block %d", position.ID, activation)
+		}
 	}
 }
 

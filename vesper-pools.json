@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-08-14T00:00:00Z",
+  "generatedAt": "2026-09-04T16:05:24Z",
   "source": "https://github.com/vesperfi/metadata",
   "sourceCommit": "7334bb44adcce9de3e318e0322218197c932fee0",
   "pools": [
@@ -843,6 +843,18 @@
         "symbol": "USDC",
         "decimals": 6
       }
-    }
+    },
+    {"chainId":43114,"name":"vaUSDC","address":"0x4378041dceF18713CE30E36A6b9c8aA41C0dB631","activationBlock":13887382,"version":5,"status":"retired","type":"grow","token":{"address":"0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E","symbol":"USDC","decimals":6}},
+    {"chainId":43114,"name":"vaQI","address":"0x4b915EaB9d1dd1def39E1E8aF16CB6A28375e5F6","activationBlock":13671493,"version":5,"status":"retired","type":"grow","token":{"address":"0x8729438EB15e2C8B576fCc6AeCdA6A148776C0F5","symbol":"QI","decimals":18}},
+    {"chainId":43114,"name":"vaAVAX","address":"0xEa94eBB08E9604AFD225f2c61fa61401F1ed1047","activationBlock":13026570,"version":5,"status":"retired","type":"grow","token":{"address":"0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7","symbol":"WAVAX","decimals":18}},
+    {"chainId":43114,"name":"vaUSDC.e","address":"0x13AECC59A88A65F02E053eEce29d743a952D6f1e","activationBlock":10174004,"version":5,"status":"retired","type":"grow","token":{"address":"0xA7D7079b0FEaD91F3e65f86E8915Cb59c1a4C664","symbol":"USDC.e","decimals":6}},
+    {"chainId":43114,"name":"vaWBTC.e","address":"0xba3Fb2277c7b33D1C3E1b558cf8060bc7443b13d","activationBlock":10171078,"version":5,"status":"retired","type":"grow","token":{"address":"0x50b7545627a5162F82A992c33b87aDc75187B218","symbol":"WBTC.e","decimals":8}},
+    {"chainId":43114,"name":"vaAVAX","address":"0x148a829492bEc827FE9638c690Ee6A71De6f1736","activationBlock":10085848,"version":4,"status":"retired","type":"grow","token":{"address":"0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7","symbol":"WAVAX","decimals":18}},
+    {"chainId":43114,"name":"vaWETH.e","address":"0x2B6c40Ef15Db0D78D08A7D1b4E12d57E88a3e324","activationBlock":9822229,"version":5,"status":"retired","type":"grow","token":{"address":"0x49D5c2BdFfac6CE2BFdB6640F4F80f226bc10bAB","symbol":"WETH.e","decimals":18}},
+    {"chainId":43114,"name":"vaDAI.e","address":"0x5323F445A8665239222b117aE095423a238F5706","activationBlock":9452892,"version":5,"status":"retired","type":"grow","token":{"address":"0xd586E7F844cEa2F87f50152665BCbc2C279D8d70","symbol":"DAI.e","decimals":18}},
+    {"chainId":10,"name":"vawstETH","address":"0xdd63ae655b388Cd782681b7821Be37fdB6d0E78d","activationBlock":89558178,"version":5,"status":"prod","type":"grow","token":{"address":"0x1F32b1c2345538c0c6f582fCB022739c4A194Ebb","symbol":"wstETH","decimals":18}},
+    {"chainId":10,"name":"vaOP","address":"0x19382707d5a47E74f60053b652Ab34b6e30Febad","activationBlock":88760761,"version":5,"status":"prod","type":"grow","token":{"address":"0x4200000000000000000000000000000000000042","symbol":"OP","decimals":18}},
+    {"chainId":10,"name":"vaUSDC","address":"0x539505Dde2B9771dEBE0898a84441c5E7fDF6BC0","activationBlock":75786499,"version":5,"status":"prod","type":"grow","token":{"address":"0x7F5c764cBc14f9669B88837ca1490cCa17c31607","symbol":"USDC","decimals":6}},
+    {"chainId":10,"name":"vaETH","address":"0xCcF3d1AcF799bAe67F6e354d685295557cf64761","activationBlock":75560596,"version":5,"status":"prod","type":"grow","token":{"address":"0x4200000000000000000000000000000000000006","symbol":"WETH","decimals":18}}
   ]
 }

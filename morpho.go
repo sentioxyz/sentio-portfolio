@@ -84,6 +84,53 @@ var morphoDeployments = map[ChainID]morphoDeployment{
 			{Address: common.HexToAddress("0x6b46fa3cc9EBF8aB230aBAc664E37F2966Bf7971"), Version: morphoVaultV2, Window: deploymentWindow{ActivationBlock: 387_016_724}},
 		},
 	},
+	Polygon: {
+		Morpho: common.HexToAddress("0x1bF0c2541F820E775182832f06c0B7Fc27A25f67"),
+		Window: deploymentWindow{ActivationBlock: 66_931_042},
+		VaultV1Factories: []morphoVaultFactory{
+			{Address: common.HexToAddress("0xa9c87daB340631C34BB738625C70499e29ddDC98"), Version: morphoVaultV1, Window: deploymentWindow{ActivationBlock: 66_931_118}},
+		},
+		VaultV2Factories: []morphoVaultFactory{
+			{Address: common.HexToAddress("0xC11a53eE9B1eCc7a068D8e40F8F17926584F97Cf"), Version: morphoVaultV2, Window: deploymentWindow{ActivationBlock: 77_371_907}},
+		},
+	},
+	Monad: {
+		Morpho: common.HexToAddress("0xD5D960E8C380B724a48AC59E2DfF1b2CB4a1eAee"),
+		Window: deploymentWindow{ActivationBlock: 31_907_457},
+		VaultV1Factories: []morphoVaultFactory{
+			{Address: common.HexToAddress("0x33f20973275B2F574488b18929cd7DCBf1AbF275"), Version: morphoVaultV1, Window: deploymentWindow{ActivationBlock: 32_320_327}},
+		},
+		VaultV2Factories: []morphoVaultFactory{
+			{Address: common.HexToAddress("0x8B2F922162FBb60A6a072cC784A2E4168fB0bb0c"), Version: morphoVaultV2, Window: deploymentWindow{ActivationBlock: 32_321_811}},
+		},
+	},
+	Plasma: {
+		Morpho: common.HexToAddress("0x2fF74A46536f5c67ef5A42FD5B4e2Ed8A2cee249"),
+		Window: deploymentWindow{ActivationBlock: 2_919_883},
+		VaultV1Factories: []morphoVaultFactory{
+			{Address: common.HexToAddress("0x69410429099018fa1586aAB0aFADC525314f5830"), Version: morphoVaultV1, Window: deploymentWindow{ActivationBlock: 2_920_140}},
+		},
+		VaultV2Factories: []morphoVaultFactory{
+			{Address: common.HexToAddress("0xD7373D3597C26e7340B0612C938EEFE6DE02Ab30"), Version: morphoVaultV2, Window: deploymentWindow{ActivationBlock: 2_921_253}},
+		},
+	},
+	Avalanche: {
+		Morpho: common.HexToAddress("0x895383274303AA19fe978AFB4Ac55C7f094f982C"),
+		Window: deploymentWindow{ActivationBlock: 75_313_888},
+		VaultV2Factories: []morphoVaultFactory{
+			{Address: common.HexToAddress("0xf7b1d9e43BAeA3705f2B303693766ACbcfec6A55"), Version: morphoVaultV2, Window: deploymentWindow{ActivationBlock: 75_315_994}},
+		},
+	},
+	Optimism: {
+		Morpho: common.HexToAddress("0xce95AfbB8EA029495c66020883F87aaE8864AF92"),
+		Window: deploymentWindow{ActivationBlock: 130_770_075},
+		VaultV1Factories: []morphoVaultFactory{
+			{Address: common.HexToAddress("0x3Bb6A6A0Bc85b367EFE0A5bAc81c5E52C892839a"), Version: morphoVaultV1, Window: deploymentWindow{ActivationBlock: 130_770_189}},
+		},
+		VaultV2Factories: []morphoVaultFactory{
+			{Address: common.HexToAddress("0x6128b680b277Bf4Df80DFE9D8c55A498660870ef"), Version: morphoVaultV2, Window: deploymentWindow{ActivationBlock: 142_122_059}},
+		},
+	},
 }
 
 type morphoCorePosition struct {
@@ -152,7 +199,7 @@ func newMorphoAdapter(config SentioIndexerConfig) *MorphoAdapter {
 func newMorphoAdapterWithIndexer(indexer morphoPositionIndexer) *MorphoAdapter {
 	return &MorphoAdapter{
 		adapterBase: adapterBase{info: ProtocolInfo{
-			ID: "morpho-blue", Name: "Morpho Blue", Chains: append([]ChainID(nil), SupportedChainIDs...),
+			ID: "morpho-blue", Name: "Morpho Blue", Chains: deploymentChains(morphoDeployments),
 		}},
 		indexer: indexer,
 	}

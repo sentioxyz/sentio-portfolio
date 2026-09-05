@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "generatedAt": "2026-08-28T11:31:01Z",
+  "generatedAt": "2026-09-04T15:47:14Z",
   "source": "CoinGecko top-500 market caps resolved through CoinQuote identities, plus the wrapped and blue-chip assets a market-cap ranking hides; symbol and decimals read from each chain",
   "scope": "plain holdings only - base assets an account holds outright, never a token an adapter already reads as a position",
   "coinQuote": {
     "method": "BatchGetLatestPrices with a ChainAddress selector per token",
-    "verifiedAt": ""
+    "verifiedAt": "2026-09-04T15:47:14Z"
   },
   "tokens": [
     {
@@ -1365,6 +1365,85 @@
       "symbol": "XVS",
       "decimals": 18,
       "coinGeckoId": "venus"
+    },
+    {
+      "chainId": 137,
+      "address": "0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270",
+      "symbol": "WPOL",
+      "decimals": 18,
+      "coinGeckoId": "wmatic",
+      "activationBlock": 4931456
+    },
+    {
+      "chainId": 137,
+      "address": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+      "symbol": "USDC",
+      "decimals": 6,
+      "coinGeckoId": "usd-coin",
+      "activationBlock": 45319261
+    },
+    {
+      "chainId": 143,
+      "address": "0x3bd359c1119da7da1d913d1c4d2b7c461115433a",
+      "symbol": "WMON",
+      "decimals": 18,
+      "coinGeckoId": "wrapped-monad",
+      "activationBlock": 22875386
+    },
+    {
+      "chainId": 143,
+      "address": "0x754704bc059f8c67012fed69bc8a327a5aafb603",
+      "symbol": "USDC",
+      "decimals": 6,
+      "coinGeckoId": "usd-coin",
+      "activationBlock": 22909616
+    },
+    {
+      "chainId": 9745,
+      "address": "0x6100e367285b01f48d07953803a2d8dca5d19873",
+      "symbol": "WXPL",
+      "decimals": 18,
+      "coinGeckoId": "wrapped-xpl",
+      "activationBlock": 3363
+    },
+    {
+      "chainId": 9745,
+      "address": "0xb8ce59fc3717ada4c02eadf9682a9e934f625ebb",
+      "symbol": "USDT0",
+      "decimals": 6,
+      "coinGeckoId": "usdt0",
+      "activationBlock": 417066
+    },
+    {
+      "chainId": 43114,
+      "address": "0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7",
+      "symbol": "WAVAX",
+      "decimals": 18,
+      "coinGeckoId": "wrapped-avax",
+      "activationBlock": 820
+    },
+    {
+      "chainId": 43114,
+      "address": "0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e",
+      "symbol": "USDC",
+      "decimals": 6,
+      "coinGeckoId": "usd-coin",
+      "activationBlock": 7388829
+    },
+    {
+      "chainId": 10,
+      "address": "0x4200000000000000000000000000000000000006",
+      "symbol": "WETH",
+      "decimals": 18,
+      "coinGeckoId": "weth"
+    },
+    {
+      "chainId": 10,
+      "address": "0x0b2c639c533813f4aa9d7837caf62653d097ff85",
+      "symbol": "USDC",
+      "decimals": 6,
+      "coinGeckoId": "usd-coin",
+      "activationBlock": 38198364
     }
   ]
 }

@@ -63,6 +63,13 @@ func TestCompoundV2ComponentAvailabilityIsExplicit(t *testing.T) {
 					module.Window,
 				)
 			}
+			for index, module := range deployment.DistributorStaking {
+				requireAvailabilityBoundary(
+					t,
+					fmt.Sprintf("%s distributor staking module %d", prefix, index),
+					module.Window,
+				)
+			}
 		}
 	}
 }
@@ -73,7 +80,9 @@ func TestVenusComponentAvailabilityIsExplicit(t *testing.T) {
 		prefix := fmt.Sprintf("Venus chain %d", chainID)
 		requireAvailabilityBoundary(t, prefix+" pool registry", deployment.PoolRegistryWindow)
 		requireAvailabilityBoundary(t, prefix+" pool lens", deployment.PoolLensWindow)
-		requireAvailabilityBoundary(t, prefix+" XVS vault", deployment.XVSVaultWindow)
+		if deployment.XVSVault != (common.Address{}) {
+			requireAvailabilityBoundary(t, prefix+" XVS vault", deployment.XVSVaultWindow)
+		}
 		if deployment.Core != nil {
 			requireAvailabilityBoundary(t, prefix+" core", deployment.Core.ComptrollerWindow)
 		}

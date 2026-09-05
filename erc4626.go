@@ -26,15 +26,11 @@ func NewERC4626Adapter(
 	name string,
 	vaults map[ChainID][]vaultConfig,
 ) *ERC4626Adapter {
-	chains := make([]ChainID, 0, len(vaults))
-	for _, chainID := range SupportedChainIDs {
-		if len(vaults[chainID]) > 0 {
-			chains = append(chains, chainID)
-		}
-	}
 	return &ERC4626Adapter{
-		adapterBase: adapterBase{info: ProtocolInfo{ID: id, Name: name, Chains: chains}},
-		vaults:      vaults,
+		adapterBase: adapterBase{info: ProtocolInfo{
+			ID: id, Name: name, Chains: deploymentChains(vaults),
+		}},
+		vaults: vaults,
 	}
 }
 

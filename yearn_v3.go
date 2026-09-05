@@ -67,10 +67,14 @@ var yearnV3BaseManifestJSON []byte
 //go:embed yearn_v3_arbitrum_markets.json
 var yearnV3ArbitrumManifestJSON []byte
 
+//go:embed yearn_v3_polygon_markets.json
+var yearnV3PolygonManifestJSON []byte
+
 var yearnV3Deployments = mustYearnManifests(map[ChainID][]byte{
 	Ethereum: yearnV3ManifestJSON,
 	Base:     yearnV3BaseManifestJSON,
 	Arbitrum: yearnV3ArbitrumManifestJSON,
+	Polygon:  yearnV3PolygonManifestJSON,
 })
 
 func mustYearnManifests(payloads map[ChainID][]byte) map[ChainID]yearnManifest {
@@ -138,13 +142,9 @@ type yearnV3Adapter struct {
 func newYearnV3Adapter() Adapter {
 	vaults := make(map[ChainID][]yearnManifestVault, len(yearnV3Deployments))
 	byVault := make(map[ChainID]map[common.Address]yearnManifestVault, len(yearnV3Deployments))
-	chains := make([]ChainID, 0, len(yearnV3Deployments))
-	for _, chainID := range SupportedChainIDs {
-		deployment, exists := yearnV3Deployments[chainID]
-		if !exists {
-			continue
-		}
-		chains = append(chains, chainID)
+	chains := deploymentChains(yearnV3Deployments)
+	for _, chainID := range chains {
+		deployment := yearnV3Deployments[chainID]
 		vaults[chainID] = deployment.Vaults
 		byVault[chainID] = make(map[common.Address]yearnManifestVault, len(deployment.Vaults))
 		for _, vault := range deployment.Vaults {

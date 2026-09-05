@@ -39,9 +39,9 @@ type EtherfiAdapter struct {
 }
 
 func newEtherfiAdapter(config SentioIndexerConfig) Adapter {
-	return &EtherfiAdapter{
+	adapter := &EtherfiAdapter{
 		adapterBase: adapterBase{info: ProtocolInfo{
-			ID: "etherfi", Name: "Ether.fi", Chains: []ChainID{Ethereum, BSC, Base, Arbitrum},
+			ID: "etherfi", Name: "Ether.fi",
 		}},
 		indexer: newOwnerTokenIndexer(config, []ChainID{Ethereum}),
 		receipts: map[ChainID][]convertedBalancePosition{
@@ -79,6 +79,12 @@ func newEtherfiAdapter(config SentioIndexerConfig) Adapter {
 				Token:           token(Arbitrum, "0x35751007a407ca6FEFfE80b3cB397736D2cf4dbe", "weETH", 18),
 				ActivationBlock: 156_547_814,
 			}},
+			Optimism: {{
+				ID: "weeth", Label: "Liquid staking · weETH",
+				BalanceContract: common.HexToAddress("0x5A7fACB970D094B6C7FF1df0eA68D99E6e73CBFF"),
+				Token:           token(Optimism, "0x5A7fACB970D094B6C7FF1df0eA68D99E6e73CBFF", "weETH", 18),
+				ActivationBlock: 120_917_167,
+			}},
 		},
 		vaults: map[ChainID][]etherfiVaultPosition{
 			Ethereum: {
@@ -106,9 +112,29 @@ func newEtherfiAdapter(config SentioIndexerConfig) Adapter {
 				etherfiVault("sethfi", "ETHFI staking", "0x86B5780b606940Eb59A062aA85a07959518c0161", "0x05A1552c5e18F5A0BB9571b5F2D6a4765ebdA32b", 230_459_108),
 				etherfiVault("ebtc", "eBTC", "0x657e8C867D8B37dCC18fA4Caead9C45EB088C642", "0x1b293DC39F94157fA0D1D36d7e0090C8B8B8c13F", 282_047_547),
 			},
+			Optimism: {
+				etherfiVault("sethfi", "ETHFI staking", "0x86B5780b606940Eb59A062aA85a07959518c0161", "0x05A1552c5e18F5A0BB9571b5F2D6a4765ebdA32b", 149_699_007),
+				etherfiVault("ebtc", "eBTC", "0x657e8C867D8B37dCC18fA4Caead9C45EB088C642", "0x1b293DC39F94157fA0D1D36d7e0090C8B8B8c13F", 149_699_299),
+				etherfiVault("eusd", "eUSD", "0x939778D83b46B456224A33Fb59630B11DEC56663", "0xEB440B36f61Bf62E0C54C622944545f159C3B790", 149_822_646),
+				etherfiVault("liquid-eth", "Liquid ETH vault", "0xf0bb20865277aBd641a307eCe5Ee04E79073416C", "0x0d05D94a5F1E76C18fbeB7A13d17C8a314088198", 123_081_511),
+				etherfiVault("liquid-usd", "Liquid USD vault", "0x08c6F91e2B681FaF5e17227F2a44C307b3C1364C", "0xc315D6e14DDCDC7407784e2Caf815d131Bc1D3E7", 149_698_252),
+				etherfiVault("liquid-btc", "Liquid BTC vault", "0x5f46d540b6eD704C3c8789105F30E075AA900726", "0xEa23aC6D7D11f6b181d6B98174D334478ADAe6b0", 149_698_606),
+			},
 		},
 		withdraws: map[ChainID][]common.Address{Ethereum: {etherfiWithdrawalNFT}},
 	}
+	deployments := make(map[ChainID]struct{}, len(adapter.receipts)+len(adapter.vaults)+len(adapter.withdraws))
+	for chainID := range adapter.receipts {
+		deployments[chainID] = struct{}{}
+	}
+	for chainID := range adapter.vaults {
+		deployments[chainID] = struct{}{}
+	}
+	for chainID := range adapter.withdraws {
+		deployments[chainID] = struct{}{}
+	}
+	adapter.info.Chains = deploymentChains(deployments)
+	return adapter
 }
 
 func (a *EtherfiAdapter) Positions(

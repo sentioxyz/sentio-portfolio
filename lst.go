@@ -37,15 +37,11 @@ func NewConvertedBalanceAdapter(
 	name string,
 	positions map[ChainID][]convertedBalancePosition,
 ) *ConvertedBalanceAdapter {
-	chains := make([]ChainID, 0, len(positions))
-	for _, chainID := range SupportedChainIDs {
-		if len(positions[chainID]) > 0 {
-			chains = append(chains, chainID)
-		}
-	}
 	return &ConvertedBalanceAdapter{
-		adapterBase: adapterBase{info: ProtocolInfo{ID: id, Name: name, Chains: chains}},
-		positions:   positions,
+		adapterBase: adapterBase{info: ProtocolInfo{
+			ID: id, Name: name, Chains: deploymentChains(positions),
+		}},
+		positions: positions,
 	}
 }
 

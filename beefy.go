@@ -30,7 +30,10 @@ type beefyManifestVault struct {
 	// ActivationBlock is the first block where balanceOf and
 	// getPricePerFullShare are both safe for this adapter.
 	ActivationBlock uint64 `json:"activationBlock"`
-	Status          string `json:"status"`
+	// DeactivationBlock is the final block where both views remain safe. Zero
+	// means the deployment has no verified end.
+	DeactivationBlock uint64 `json:"deactivationBlock,omitempty"`
+	Status            string `json:"status"`
 }
 
 type beefyManifest struct {
@@ -59,6 +62,7 @@ func mustBeefyManifest() beefyManifest {
 		if !supportsChain(SupportedChainIDs, vault.ChainID) || vault.ID == "" || vault.Name == "" ||
 			vault.Vault == (common.Address{}) || vault.Asset == (common.Address{}) || vault.Symbol == "" ||
 			vault.CreatedAt == 0 || vault.ActivationBlock == 0 ||
+			(vault.DeactivationBlock != 0 && vault.DeactivationBlock < vault.ActivationBlock) ||
 			(vault.Status != "active" && vault.Status != "eol") {
 			panic(fmt.Sprintf("invalid Beefy vault entry %q on chain %d", vault.ID, vault.ChainID))
 		}
@@ -88,7 +92,7 @@ func newBeefyAdapter() Adapter {
 	}
 	return &BeefyAdapter{
 		adapterBase: adapterBase{info: ProtocolInfo{
-			ID: "beefy", Name: "Beefy", Chains: []ChainID{Ethereum, BSC, Base, Arbitrum},
+			ID: "beefy", Name: "Beefy", Chains: deploymentChains(vaults),
 		}},
 		vaults: vaults,
 	}
@@ -97,7 +101,8 @@ func newBeefyAdapter() Adapter {
 func activeBeefyVaults(vaults []beefyManifestVault, block uint64) []beefyManifestVault {
 	active := make([]beefyManifestVault, 0, len(vaults))
 	for _, vault := range vaults {
-		if vault.ActivationBlock <= block {
+		if vault.ActivationBlock <= block &&
+			(vault.DeactivationBlock == 0 || block <= vault.DeactivationBlock) {
 			active = append(active, vault)
 		}
 	}

@@ -1,0 +1,508 @@
+{
+  "version": 3,
+  "chainId": 137,
+  "generatedAt": "2026-09-04T16:08:15Z",
+  "sources": {
+    "currentApi": "https://ydaemon.yearn.fi/137/vaults/all?limit=1000",
+    "stakingPolicy": "Juiced staking is not compatible with the adapter's VeYFI/V3 Staking ABI and is intentionally excluded",
+    "deploymentAnchors": {
+      "method": "archive eth_getCode batch binary search",
+      "semantics": "first canonical block with non-empty code",
+      "verifiedAt": "2026-09-05"
+    }
+  },
+  "vaults": [
+    {
+      "address": "0x03e6010193c595eC168756aF700479D1AFf76895",
+      "version": "3.0.1",
+      "kind": "Multi Strategy",
+      "activationBlock": 51552597,
+      "token": {
+        "address": "0x9E31214Db6931727B7d63a0D2b6236DB455c0965",
+        "symbol": "aUSDC-DAI",
+        "decimals": 18
+      },
+      "staking": null
+    },
+    {
+      "address": "0x06eD7C67755344548FAFe1822bEE365C4208a57F",
+      "version": "3.0.1",
+      "kind": "Single Strategy",
+      "activationBlock": 51603037,
+      "token": {
+        "address": "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063",
+        "symbol": "DAI",
+        "decimals": 18
+      },
+      "staking": null
+    },
+    {
+      "address": "0x0fEFEe13864c431717f5B2678607b6ce532a170C",
+      "version": "3.0.1",
+      "kind": "Single Strategy",
+      "activationBlock": 59396441,
+      "token": {
+        "address": "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
+        "symbol": "USDT",
+        "decimals": 6
+      },
+      "staking": null
+    },
+    {
+      "address": "0x12c3Ad898e8eB1C0ec0Bb74f9748F36C46593F68",
+      "version": "3.0.1",
+      "kind": "Single Strategy",
+      "activationBlock": 49910052,
+      "token": {
+        "address": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
+        "symbol": "WPOL",
+        "decimals": 18
+      },
+      "staking": null
+    },
+    {
+      "address": "0x28F53bA70E5c8ce8D03b1FaD41E9dF11Bb646c36",
+      "version": "3.0.1",
+      "kind": "Multi Strategy",
+      "activationBlock": 50104230,
+      "token": {
+        "address": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
+        "symbol": "WPOL",
+        "decimals": 18
+      },
+      "staking": null
+    },
+    {
+      "address": "0x2a42A69F48EfffDF2d4Fb079Af60D98D3e34D49C",
+      "version": "3.0.1",
+      "kind": "Single Strategy",
+      "activationBlock": 50146649,
+      "token": {
+        "address": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
+        "symbol": "WPOL",
+        "decimals": 18
+      },
+      "staking": null
+    },
+    {
+      "address": "0x2c5d0c3DB75D2f8A4957c74BE09194a9271Cf28D",
+      "version": "3.0.1",
+      "kind": "Single Strategy",
+      "activationBlock": 50777052,
+      "token": {
+        "address": "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
+        "symbol": "USDT",
+        "decimals": 6
+      },
+      "staking": null
+    },
+    {
+      "address": "0x305F25377d0a39091e99B975558b1bdfC3975654",
+      "version": "3.0.1",
+      "kind": "Multi Strategy",
+      "activationBlock": 50217440,
+      "token": {
+        "address": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
+        "symbol": "WETH",
+        "decimals": 18
+      },
+      "staking": null
+    },
+    {
+      "address": "0x32adfC6170344F848A8c0efe68dad93e5b6964aA",
+      "version": "3.0.1",
+      "kind": "Multi Strategy",
+      "activationBlock": 51553527,
+      "token": {
+        "address": "0x6077177d4c41E114780D9901C9b5c784841C523f",
+        "symbol": "aUSDC-WETH",
+        "decimals": 18
+      },
+      "staking": null
+    },
+    {
+      "address": "0x335Bc8366545FaA446e0c1f639617aC40061f2EF",
+      "version": "3.0.4",
+      "kind": "Multi Strategy",
+      "activationBlock": 82473254,
+      "token": {
+        "address": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+        "symbol": "USDC",
+        "decimals": 6
+      },
+      "staking": null
+    },
+    {
+      "address": "0x34b9421Fe3d52191B64bC32ec1aB764dcBcDbF5e",
+      "version": "3.0.2",
+      "kind": "Multi Strategy",
+      "activationBlock": 56533600,
+      "token": {
+        "address": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+        "symbol": "USDC",
+        "decimals": 6
+      },
+      "staking": null
+    },
+    {
+      "address": "0x3A58dF70F9204beDcd6aee2b51582EB77fE30E02",
+      "version": "3.0.1",
+      "kind": "Multi Strategy",
+      "activationBlock": 51551669,
+      "token": {
+        "address": "0x4B9e26a02121a1C541403a611b542965Bd4b68Ce",
+        "symbol": "aWBTC-WETH",
+        "decimals": 18
+      },
+      "staking": null
+    },
+    {
+      "address": "0x3bd8C987286D8Ad00c05fdb2Ae3E8C9a0f054734",
+      "version": "3.0.1",
+      "kind": "Single Strategy",
+      "activationBlock": 50815970,
+      "token": {
+        "address": "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
+        "symbol": "USDT",
+        "decimals": 6
+      },
+      "staking": null
+    },
+    {
+      "address": "0x42908891cBC13301C910B4E71055431bf134AAa0",
+      "version": "3.0.1",
+      "kind": "Multi Strategy",
+      "activationBlock": 51552086,
+      "token": {
+        "address": "0x04d521E2c414E6d898c6F2599FdD863Edf49e247",
+        "symbol": "awMATIC-USDC",
+        "decimals": 18
+      },
+      "staking": null
+    },
+    {
+      "address": "0x4987d1856F93DFf29e08aa605A805FaF43dC3103",
+      "version": "3.0.1",
+      "kind": "Single Strategy",
+      "activationBlock": 52710614,
+      "token": {
+        "address": "0xF54a15F6da443041Bb075959EA66EE47655DDFcA",
+        "symbol": "yvAjnaUSDC",
+        "decimals": 6
+      },
+      "staking": null
+    },
+    {
+      "address": "0x5136c2F7aB13E202eD42bc1AE82Dd63475919653",
+      "version": "3.0.1",
+      "kind": "Single Strategy",
+      "activationBlock": 50146775,
+      "token": {
+        "address": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
+        "symbol": "WETH",
+        "decimals": 18
+      },
+      "staking": null
+    },
+    {
+      "address": "0x52367C8E381EDFb068E9fBa1e7E9B2C847042897",
+      "version": "3.0.1",
+      "kind": "Single Strategy",
+      "activationBlock": 56497489,
+      "token": {
+        "address": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+        "symbol": "USDC",
+        "decimals": 6
+      },
+      "staking": null
+    },
+    {
+      "address": "0x54303F18161d9870b0fc66B88B0B129e8e5fF505",
+      "version": "3.0.1",
+      "kind": "Multi Strategy",
+      "activationBlock": 51551813,
+      "token": {
+        "address": "0x3Cc20A6795c4b57d9817399F68E83e71C8626580",
+        "symbol": "aUSDC-WETH",
+        "decimals": 18
+      },
+      "staking": null
+    },
+    {
+      "address": "0x5BFd56F9BcBDb2be985C64C620ECa7F02Fa7b439",
+      "version": "3.0.4",
+      "kind": "Single Strategy",
+      "activationBlock": 76024091,
+      "token": {
+        "address": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+        "symbol": "USDC",
+        "decimals": 6
+      },
+      "staking": null
+    },
+    {
+      "address": "0x6E9ac188DbCC14632a253aA9Ce2783cD712aB3cA",
+      "version": "3.0.4",
+      "kind": "Single Strategy",
+      "activationBlock": 69053834,
+      "token": {
+        "address": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+        "symbol": "USDC",
+        "decimals": 6
+      },
+      "staking": null
+    },
+    {
+      "address": "0x6Ed737EF2Ef74e04005dC9810366De5ad38Cf7D6",
+      "version": "3.0.1",
+      "kind": "Single Strategy",
+      "activationBlock": 50026912,
+      "token": {
+        "address": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
+        "symbol": "WPOL",
+        "decimals": 18
+      },
+      "staking": null
+    },
+    {
+      "address": "0x7486325A843590b84c98563c6962C58655569EcA",
+      "version": "3.0.1",
+      "kind": "Single Strategy",
+      "activationBlock": 50068185,
+      "token": {
+        "address": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
+        "symbol": "WETH",
+        "decimals": 18
+      },
+      "staking": null
+    },
+    {
+      "address": "0x8BBa7AFd0f9B1b664C161EC31d812a8Ec15f7e1a",
+      "version": "3.0.1",
+      "kind": "Single Strategy",
+      "activationBlock": 50776797,
+      "token": {
+        "address": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+        "symbol": "USDC",
+        "decimals": 6
+      },
+      "staking": null
+    },
+    {
+      "address": "0x8df66d28914084f44c4046783810cbAd662fA633",
+      "version": "3.0.1",
+      "kind": "Multi Strategy",
+      "activationBlock": 51552729,
+      "token": {
+        "address": "0x8dd3BF71eF18dd88869d128BDE058C9d8c270176",
+        "symbol": "aWMATIC-MATICX",
+        "decimals": 18
+      },
+      "staking": null
+    },
+    {
+      "address": "0x90b2f54C6aDDAD41b8f6c4fCCd555197BC0F773B",
+      "version": "3.0.1",
+      "kind": "Multi Strategy",
+      "activationBlock": 52170973,
+      "token": {
+        "address": "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063",
+        "symbol": "DAI",
+        "decimals": 18
+      },
+      "staking": null
+    },
+    {
+      "address": "0x91E646449A3105e9091e882C9A9a7A81950eeBB8",
+      "version": "3.0.1",
+      "kind": "Multi Strategy",
+      "activationBlock": 51552279,
+      "token": {
+        "address": "0x81Cec323BF8C4164c66ec066F53cc053A535f03D",
+        "symbol": "awMATIC-WETH",
+        "decimals": 18
+      },
+      "staking": null
+    },
+    {
+      "address": "0x9d1046ceCB0662037b13dECF1CD125C4Aa3fb65B",
+      "version": "3.0.4",
+      "kind": "Single Strategy",
+      "activationBlock": 69053841,
+      "token": {
+        "address": "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
+        "symbol": "USDT",
+        "decimals": 6
+      },
+      "staking": null
+    },
+    {
+      "address": "0xA013Fbd4b711f9ded6fB09C1c0d358E2FbC2EAA0",
+      "version": "3.0.1",
+      "kind": "Multi Strategy",
+      "activationBlock": 49181585,
+      "token": {
+        "address": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+        "symbol": "USDC",
+        "decimals": 6
+      },
+      "staking": null
+    },
+    {
+      "address": "0xa823eF7dF6392800569946c6C1Dec0e34356EF18",
+      "version": "3.0.1",
+      "kind": "Multi Strategy",
+      "activationBlock": 51552562,
+      "token": {
+        "address": "0x795f8c9B0A0Da9Cd8dea65Fc10f9B57AbC532E58",
+        "symbol": "aUSDC-USDT",
+        "decimals": 18
+      },
+      "staking": null
+    },
+    {
+      "address": "0xA9c3b8f7aB9Cc105ac4d27c1bf821eC0c6a9E954",
+      "version": "3.0.1",
+      "kind": "Multi Strategy",
+      "activationBlock": 51552365,
+      "token": {
+        "address": "0x3f35705479d9d77c619b2aAC9dd7a64e57151506",
+        "symbol": "aWBTC-USDC",
+        "decimals": 18
+      },
+      "staking": null
+    },
+    {
+      "address": "0xb1403908F772E4374BB151F7C67E88761a0Eb4f1",
+      "version": "3.0.1",
+      "kind": "Single Strategy",
+      "activationBlock": 48953454,
+      "token": {
+        "address": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+        "symbol": "USDC",
+        "decimals": 6
+      },
+      "staking": null
+    },
+    {
+      "address": "0xb64cE1C06AF365424060E2720dF46997A4Fd3a0a",
+      "version": "3.0.1",
+      "kind": "Multi Strategy",
+      "activationBlock": 51550499,
+      "token": {
+        "address": "0x02203f2351E7aC6aB5051205172D3f772db7D814",
+        "symbol": "awMATIC-WETH",
+        "decimals": 18
+      },
+      "staking": null
+    },
+    {
+      "address": "0xBb287E6017d3DEb0e2E65061e8684eab21060123",
+      "version": "3.0.1",
+      "kind": "Multi Strategy",
+      "activationBlock": 50828658,
+      "token": {
+        "address": "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
+        "symbol": "USDT",
+        "decimals": 6
+      },
+      "staking": null
+    },
+    {
+      "address": "0xBEDA9A5300393e00229dc15cC54D5185E7646c56",
+      "version": "3.0.1",
+      "kind": "Single Strategy",
+      "activationBlock": 50178273,
+      "token": {
+        "address": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
+        "symbol": "WETH",
+        "decimals": 18
+      },
+      "staking": null
+    },
+    {
+      "address": "0xD4a0AA006e0f70580Aaa7ee1FD04Fa447c36B259",
+      "version": "3.0.4",
+      "kind": "Single Strategy",
+      "activationBlock": 69053827,
+      "token": {
+        "address": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
+        "symbol": "WETH",
+        "decimals": 18
+      },
+      "staking": null
+    },
+    {
+      "address": "0xD811a47cfD17355F47ac49Be02c4744A926dd16B",
+      "version": "3.0.4",
+      "kind": "Single Strategy",
+      "activationBlock": 75098540,
+      "token": {
+        "address": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+        "symbol": "USDC",
+        "decimals": 6
+      },
+      "staking": null
+    },
+    {
+      "address": "0xdB92B89Ca415c0dab40Dc96E99Fc411C08F20780",
+      "version": "3.0.1",
+      "kind": "Single Strategy",
+      "activationBlock": 48951031,
+      "token": {
+        "address": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+        "symbol": "USDC",
+        "decimals": 6
+      },
+      "staking": null
+    },
+    {
+      "address": "0xE30461F1270BA52d45DF1e773AEfE594C7E430DC",
+      "version": "3.0.4",
+      "kind": "Single Strategy",
+      "activationBlock": 75098585,
+      "token": {
+        "address": "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
+        "symbol": "USDT",
+        "decimals": 6
+      },
+      "staking": null
+    },
+    {
+      "address": "0xf4F9d5697341B4C9B0Cc8151413e05A90f7dc24F",
+      "version": "3.0.1",
+      "kind": "Single Strategy",
+      "activationBlock": 50815970,
+      "token": {
+        "address": "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063",
+        "symbol": "DAI",
+        "decimals": 18
+      },
+      "staking": null
+    },
+    {
+      "address": "0xF54a15F6da443041Bb075959EA66EE47655DDFcA",
+      "version": "3.0.1",
+      "kind": "Multi Strategy",
+      "activationBlock": 52548892,
+      "token": {
+        "address": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+        "symbol": "USDC",
+        "decimals": 6
+      },
+      "staking": null
+    },
+    {
+      "address": "0xf7464410C1ccF86b19711c9B6599336b00641c8f",
+      "version": "3.0.1",
+      "kind": "Single Strategy",
+      "activationBlock": 53014594,
+      "token": {
+        "address": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
+        "symbol": "WPOL",
+        "decimals": 18
+      },
+      "staking": null
+    }
+  ]
+}

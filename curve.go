@@ -47,6 +47,12 @@ var curveLendingDeployments = map[ChainID]curveLendingDeployment{
 		oneWayFactory:    common.HexToAddress("0xcaEC110C784c9DF37240a8Ce096D352A75922DeA"),
 		oneWayActivation: 193_652_535,
 	},
+	Optimism: {
+		oneWayFactory:    common.HexToAddress("0x5EA8f3D674C70b020586933A0a5b250734798BeF"),
+		oneWayActivation: 125_072_267,
+		v2Factory:        common.HexToAddress("0x5f94073e3f51c1fff92ffc6b4b06b7af193b3640"),
+		v2Activation:     152_707_578,
+	},
 }
 
 var curveControllerFactoryABI = MustABI(`[
@@ -439,15 +445,10 @@ type curveLendingAdapter struct {
 }
 
 func newCurveLendingAdapter() Adapter {
-	chains := make([]ChainID, 0, len(curveLendingDeployments))
-	for _, chainID := range SupportedChainIDs {
-		if _, exists := curveLendingDeployments[chainID]; exists {
-			chains = append(chains, chainID)
-		}
-	}
 	return &curveLendingAdapter{
 		adapterBase: adapterBase{info: ProtocolInfo{
-			ID: "curve-lending", Name: "Curve Lending", Chains: chains,
+			ID: "curve-lending", Name: "Curve Lending",
+			Chains: deploymentChains(curveLendingDeployments),
 		}},
 		deployments: curveLendingDeployments,
 	}

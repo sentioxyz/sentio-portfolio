@@ -36,7 +36,7 @@ type pendleIndexer struct {
 func newPendleIndexer(config SentioIndexerConfig) *pendleIndexer {
 	return &pendleIndexer{
 		api: newSentioAPIClient(), config: config,
-		requiredChains: []ChainID{Ethereum, BSC, Base, Arbitrum},
+		requiredChains: deploymentChains(pendleChainConfigs),
 	}
 }
 
@@ -444,7 +444,7 @@ func (i *pendleIndexer) indexedRefs(
 	block BlockRef,
 	account common.Address,
 ) (pendleIndexedSnapshot, error) {
-	statuses, err := i.api.chainStatuses(ctx, i.config, i.requiredChains, false)
+	statuses, err := i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, false)
 	if err != nil {
 		return pendleIndexedSnapshot{}, err
 	}
@@ -456,7 +456,7 @@ func (i *pendleIndexer) indexedRefs(
 		)
 	}
 	if block.Number > status.ProcessedBlock && block.Number-status.ProcessedBlock > pendleMaxRPCTailBlocks {
-		statuses, err = i.api.chainStatuses(ctx, i.config, i.requiredChains, true)
+		statuses, err = i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, true)
 		if err != nil {
 			return pendleIndexedSnapshot{}, err
 		}

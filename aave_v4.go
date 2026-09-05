@@ -50,11 +50,15 @@ type aaveV4Reserve struct {
 	Token     Token
 }
 
+func aaveV4ReserveToken(chainID ChainID, row aaveV4ReserveData) Token {
+	return Token{ChainID: chainID, Address: row.Underlying, Decimals: row.Decimals}
+}
+
 type AaveV4Adapter struct {
 	adapterBase
-	hubs        []aaveV4Hub
+	hubs        map[ChainID][]aaveV4Hub
 	spokeLabels map[common.Address]string
-	allowedHubs map[common.Address]struct{}
+	allowedHubs map[ChainID]map[common.Address]struct{}
 }
 
 // Spokes are enumerated from the hubs at the pinned block (getAssetCount ->
@@ -92,6 +96,16 @@ var aaveV4EthereumHubs = []aaveV4Hub{
 	{Address: common.HexToAddress("0x62d63197660c080236193CA60b70E49A08E90368"), Window: deploymentWindow{ActivationBlock: 25_318_132}},
 }
 
+var aaveV4Hubs = map[ChainID][]aaveV4Hub{
+	Ethereum: aaveV4EthereumHubs,
+	Avalanche: {
+		{
+			Address: common.HexToAddress("0xd07369fAE4A5BB13c9Ce446B052c7867B1AbDf6e"),
+			Window:  deploymentWindow{ActivationBlock: 89_721_368},
+		},
+	},
+}
+
 func activeAaveV4Hubs(hubs []aaveV4Hub, block uint64) []common.Address {
 	active := make([]common.Address, 0, len(hubs))
 	for _, hub := range hubs {
@@ -103,13 +117,16 @@ func activeAaveV4Hubs(hubs []aaveV4Hub, block uint64) []common.Address {
 }
 
 func newAaveV4Adapter() Adapter {
-	allowed := make(map[common.Address]struct{}, len(aaveV4EthereumHubs))
-	for _, hub := range aaveV4EthereumHubs {
-		allowed[hub.Address] = struct{}{}
+	allowed := make(map[ChainID]map[common.Address]struct{}, len(aaveV4Hubs))
+	for chainID, hubs := range aaveV4Hubs {
+		allowed[chainID] = make(map[common.Address]struct{}, len(hubs))
+		for _, hub := range hubs {
+			allowed[chainID][hub.Address] = struct{}{}
+		}
 	}
 	return &AaveV4Adapter{
-		adapterBase: adapterBase{info: ProtocolInfo{ID: "aave-v4", Name: "Aave V4", Chains: []ChainID{Ethereum}}},
-		hubs:        aaveV4EthereumHubs,
+		adapterBase: adapterBase{info: ProtocolInfo{ID: "aave-v4", Name: "Aave V4", Chains: deploymentChains(aaveV4Hubs)}},
+		hubs:        aaveV4Hubs,
 		spokeLabels: aaveV4SpokeLabels,
 		allowedHubs: allowed,
 	}
@@ -131,7 +148,7 @@ func (a *AaveV4Adapter) enumerateSpokes(
 	client *RPCClient,
 	block BlockRef,
 ) ([]aaveV4Spoke, error) {
-	hubs := activeAaveV4Hubs(a.hubs, block.Number)
+	hubs := activeAaveV4Hubs(a.hubs[block.ChainID], block.Number)
 	if len(hubs) == 0 {
 		return nil, nil
 	}
@@ -289,7 +306,7 @@ func (a *AaveV4Adapter) reserveCatalog(
 		if row.Underlying == (common.Address{}) {
 			return nil, fmt.Errorf("%s reserve %s has zero underlying", refs[index].spoke.Label, refs[index].id)
 		}
-		if _, exists := a.allowedHubs[row.Hub]; !exists {
+		if _, exists := a.allowedHubs[block.ChainID][row.Hub]; !exists {
 			return nil, fmt.Errorf("%s reserve %s has unknown hub %s", refs[index].spoke.Label, refs[index].id, row.Hub)
 		}
 		if row.Decimals > 36 {
@@ -297,7 +314,7 @@ func (a *AaveV4Adapter) reserveCatalog(
 		}
 		reserves = append(reserves, aaveV4Reserve{
 			Spoke: refs[index].spoke, ReserveID: refs[index].id, Hub: row.Hub,
-			Token: Token{ChainID: Ethereum, Address: row.Underlying, Decimals: row.Decimals},
+			Token: aaveV4ReserveToken(block.ChainID, row),
 		})
 	}
 	return reserves, nil
@@ -309,7 +326,7 @@ func (a *AaveV4Adapter) Positions(
 	block BlockRef,
 	account common.Address,
 ) ([]Group, error) {
-	if block.ChainID != Ethereum {
+	if _, supported := a.hubs[block.ChainID]; !supported {
 		return nil, nil
 	}
 	spokes, err := a.enumerateSpokes(ctx, client, block)

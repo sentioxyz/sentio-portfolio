@@ -17,11 +17,11 @@ var etherfiAccountantABI = MustABI(`[
 ]`)
 
 type etherfiVaultPosition struct {
-	ID              string
-	Label           string
-	Vault           common.Address
-	Accountant      common.Address
-	ActivationBlock uint64
+	deploymentWindow
+	ID         string
+	Label      string
+	Vault      common.Address
+	Accountant common.Address
 }
 
 func etherfiVault(
@@ -32,26 +32,56 @@ func etherfiVault(
 	activationBlock uint64,
 ) etherfiVaultPosition {
 	return etherfiVaultPosition{
-		ID:              id,
-		Label:           label,
-		Vault:           common.HexToAddress(vault),
-		Accountant:      common.HexToAddress(accountant),
-		ActivationBlock: activationBlock,
+		deploymentWindow: deploymentWindow{ActivationBlock: activationBlock},
+		ID:               id,
+		Label:            label,
+		Vault:            common.HexToAddress(vault),
+		Accountant:       common.HexToAddress(accountant),
 	}
 }
 
-func etherfiVaultAssets(shares, rate *big.Int, rateDecimals uint8) (*big.Int, error) {
+func etherfiVaultAssetRatio(shares, rate *big.Int, rateDecimals uint8) (*big.Int, *big.Int, error) {
 	if shares == nil || shares.Sign() < 0 {
-		return nil, fmt.Errorf("shares must be non-negative")
+		return nil, nil, fmt.Errorf("shares must be non-negative")
 	}
 	if rate == nil || rate.Sign() <= 0 {
-		return nil, fmt.Errorf("accountant rate must be positive")
+		return nil, nil, fmt.Errorf("accountant rate must be positive")
 	}
 	if rateDecimals > 77 {
-		return nil, fmt.Errorf("accountant decimals %d exceed the safety bound", rateDecimals)
+		return nil, nil, fmt.Errorf("accountant decimals %d exceed the safety bound", rateDecimals)
 	}
 	scale := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(rateDecimals)), nil)
-	return new(big.Int).Quo(new(big.Int).Mul(new(big.Int).Set(shares), rate), scale), nil
+	return new(big.Int).Mul(new(big.Int).Set(shares), rate), scale, nil
+}
+
+func etherfiVaultComponent(
+	position etherfiVaultPosition,
+	baseToken Token,
+	shares *big.Int,
+	rate *big.Int,
+	rateDecimals uint8,
+	rateMethod string,
+) (Component, error) {
+	amount, amountDenominator, err := etherfiVaultAssetRatio(shares, rate, rateDecimals)
+	if err != nil {
+		return Component{}, err
+	}
+	component := NewComponent(
+		"asset",
+		baseToken,
+		amount,
+		Source{Contract: position.Accountant, Method: rateMethod},
+	)
+	component.AmountDenominatorRaw = amountDenominator.String()
+	component.Metadata = map[string]any{
+		"vault":            position.Vault,
+		"accountant":       position.Accountant,
+		"sharesRaw":        shares.String(),
+		"rateRaw":          rate.String(),
+		"rateDecimals":     rateDecimals,
+		"shareBalanceCall": "balanceOf",
+	}
+	return component, nil
 }
 
 func readEtherfiVaultPositions(
@@ -64,7 +94,7 @@ func readEtherfiVaultPositions(
 	active := make([]etherfiVaultPosition, 0, len(positions))
 	balanceCalls := make([]ContractCall, 0, len(positions))
 	for _, position := range positions {
-		if block.Number < position.ActivationBlock {
+		if !position.ActiveAt(block.Number) {
 			continue
 		}
 		active = append(active, position)
@@ -157,27 +187,20 @@ func readEtherfiVaultPositions(
 		if decodeErr != nil {
 			return groups, fmt.Errorf("vault %s accountant rate: %w", item.position.Vault, decodeErr)
 		}
-		amount, amountErr := etherfiVaultAssets(item.shares, rate, rateDecimals)
-		if amountErr != nil {
-			return groups, fmt.Errorf("vault %s assets: %w", item.position.Vault, amountErr)
-		}
 		baseToken, tokenErr := readERC20Token(ctx, client, block, base)
 		if tokenErr != nil {
 			return groups, fmt.Errorf("vault %s base token: %w", item.position.Vault, tokenErr)
 		}
-		component := NewComponent(
-			"asset",
+		component, componentErr := etherfiVaultComponent(
+			item.position,
 			baseToken,
-			amount,
-			Source{Contract: item.position.Accountant, Method: rateMethod},
+			item.shares,
+			rate,
+			rateDecimals,
+			rateMethod,
 		)
-		component.Metadata = map[string]any{
-			"vault":            item.position.Vault,
-			"accountant":       item.position.Accountant,
-			"sharesRaw":        item.shares.String(),
-			"rateRaw":          rate.String(),
-			"rateDecimals":     rateDecimals,
-			"shareBalanceCall": "balanceOf",
+		if componentErr != nil {
+			return groups, fmt.Errorf("vault %s assets: %w", item.position.Vault, componentErr)
 		}
 		groups = append(groups, Group{
 			ID:         item.position.ID,

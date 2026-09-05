@@ -49,17 +49,68 @@ type reconciliationEvidence struct {
 }
 
 var reconciliationChainNames = map[ChainID]string{
-	Ethereum: "eth",
-	BSC:      "bsc",
-	Base:     "base",
-	Arbitrum: "arb",
+	Ethereum:  "eth",
+	BSC:       "bsc",
+	Base:      "base",
+	Arbitrum:  "arb",
+	Polygon:   "matic",
+	Monad:     "monad",
+	Plasma:    "plasma",
+	Avalanche: "avax",
+	Optimism:  "op",
 }
 
 var reconciliationNativeTokens = map[ChainID]common.Address{
-	Ethereum: common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"),
-	BSC:      common.HexToAddress("0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"),
-	Base:     common.HexToAddress("0x4200000000000000000000000000000000000006"),
-	Arbitrum: common.HexToAddress("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"),
+	Ethereum:  common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"),
+	BSC:       common.HexToAddress("0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"),
+	Base:      common.HexToAddress("0x4200000000000000000000000000000000000006"),
+	Arbitrum:  common.HexToAddress("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"),
+	Polygon:   common.HexToAddress("0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270"),
+	Monad:     common.HexToAddress("0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A"),
+	Plasma:    common.HexToAddress("0x6100E367285b01F48D07953803A2d8dCA5D19873"),
+	Avalanche: common.HexToAddress("0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7"),
+	Optimism:  common.HexToAddress("0x4200000000000000000000000000000000000006"),
+}
+
+var reconciliationNativeAliases = map[ChainID]map[string]struct{}{
+	Ethereum:  {"eth": {}},
+	BSC:       {"bnb": {}, "bsc": {}},
+	Base:      {"eth": {}},
+	Arbitrum:  {"eth": {}},
+	Polygon:   {"matic": {}, "pol": {}},
+	Monad:     {"mon": {}, "monad": {}},
+	Plasma:    {"xpl": {}, "plasma": {}},
+	Avalanche: {"avax": {}},
+	Optimism:  {"eth": {}, "op": {}},
+}
+
+func TestFiveChainDeBankReconciliationAliases(t *testing.T) {
+	for _, test := range []struct {
+		chainID       ChainID
+		debankChain   string
+		nativeAliases []string
+		invalidAlias  string
+	}{
+		{Polygon, "matic", []string{"matic", "pol"}, "avax"},
+		{Monad, "monad", []string{"mon", "monad"}, "xpl"},
+		{Plasma, "plasma", []string{"xpl", "plasma"}, "mon"},
+		{Avalanche, "avax", []string{"avax"}, "pol"},
+		{Optimism, "op", []string{"eth", "op"}, "avax"},
+	} {
+		if got := reconciliationChainNames[test.chainID]; got != test.debankChain {
+			t.Errorf("chain %d DeBank name = %q, want %q", test.chainID, got, test.debankChain)
+		}
+		want := strings.ToLower(reconciliationNativeTokens[test.chainID].Hex())
+		for _, alias := range test.nativeAliases {
+			got, ok := reconciliationTokenID(test.chainID, alias)
+			if !ok || got != want {
+				t.Errorf("chain %d native alias %q = %q, %v; want %q", test.chainID, alias, got, ok, want)
+			}
+		}
+		if got, ok := reconciliationTokenID(test.chainID, test.invalidAlias); ok {
+			t.Errorf("chain %d accepted cross-chain alias %q as %q", test.chainID, test.invalidAlias, got)
+		}
+	}
 }
 
 func reconciliationTokenID(chainID ChainID, value string) (string, bool) {
@@ -67,7 +118,7 @@ func reconciliationTokenID(chainID ChainID, value string) (string, bool) {
 		return strings.ToLower(common.HexToAddress(value).Hex()), true
 	}
 	native := strings.ToLower(strings.TrimSpace(value))
-	if native == "eth" || (chainID == BSC && (native == "bnb" || native == "bsc")) {
+	if _, supported := reconciliationNativeAliases[chainID][native]; supported {
 		return strings.ToLower(reconciliationNativeTokens[chainID].Hex()), true
 	}
 	return "", false
@@ -782,10 +833,15 @@ func runDeBankAPIReconciliationWithTolerance(
 		t.Skip("set PORTFOLIO_DEBANK_API_LIVE_TEST=1 to compare with DeBank Pro API")
 	}
 	rpcEnvironment := map[ChainID]string{
-		Ethereum: "PORTFOLIO_ETH_RPC_URL",
-		BSC:      "PORTFOLIO_BSC_RPC_URL",
-		Base:     "PORTFOLIO_BASE_RPC_URL",
-		Arbitrum: "PORTFOLIO_ARB_RPC_URL",
+		Ethereum:  "PORTFOLIO_ETH_RPC_URL",
+		BSC:       "PORTFOLIO_BSC_RPC_URL",
+		Base:      "PORTFOLIO_BASE_RPC_URL",
+		Arbitrum:  "PORTFOLIO_ARB_RPC_URL",
+		Polygon:   "PORTFOLIO_POLYGON_RPC_URL",
+		Monad:     "PORTFOLIO_MONAD_RPC_URL",
+		Plasma:    "PORTFOLIO_PLASMA_RPC_URL",
+		Avalanche: "PORTFOLIO_AVALANCHE_RPC_URL",
+		Optimism:  "PORTFOLIO_OPTIMISM_RPC_URL",
 	}[chainID]
 	rpcURL := os.Getenv(rpcEnvironment)
 	accessKey := os.Getenv("DEBANK_ACCESS_KEY")

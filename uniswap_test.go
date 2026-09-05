@@ -130,18 +130,28 @@ func TestUniswapV4RejectsInvalidLPFee(t *testing.T) {
 
 func TestEngineRegistersUniswapV3AndV4(t *testing.T) {
 	protocols := NewEngine(nil, nil).Protocols()
-	wanted := map[string]bool{"uniswap-v3": false, "uniswap-v4": false}
+	wanted := map[string][]ChainID{
+		"uniswap-v3": deploymentChains(uniswapV3Deployments),
+		"uniswap-v4": deploymentChains(uniswapV4Deployments),
+	}
+	found := make(map[string]bool, len(wanted))
 	for _, protocol := range protocols {
-		if _, exists := wanted[protocol.ID]; !exists {
+		expected, exists := wanted[protocol.ID]
+		if !exists {
 			continue
 		}
-		wanted[protocol.ID] = true
-		if len(protocol.Chains) != len(SupportedChainIDs) {
-			t.Fatalf("%s chains = %v", protocol.ID, protocol.Chains)
+		found[protocol.ID] = true
+		if len(protocol.Chains) != len(expected) {
+			t.Fatalf("%s chains = %v, want %v", protocol.ID, protocol.Chains, expected)
+		}
+		for index := range expected {
+			if protocol.Chains[index] != expected[index] {
+				t.Fatalf("%s chains = %v, want %v", protocol.ID, protocol.Chains, expected)
+			}
 		}
 	}
-	for protocol, found := range wanted {
-		if !found {
+	for protocol := range wanted {
+		if !found[protocol] {
 			t.Errorf("%s is not registered", protocol)
 		}
 	}

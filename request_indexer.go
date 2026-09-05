@@ -231,7 +231,7 @@ func (i *accountRequestIndexer) IndexedRefs(
 	}
 	sentioQueryMu.Lock()
 	defer sentioQueryMu.Unlock()
-	statuses, err := i.api.chainStatuses(ctx, i.config, i.requiredChains, false)
+	statuses, err := i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, false)
 	if err != nil {
 		return accountRequestSnapshot{}, err
 	}
@@ -247,7 +247,7 @@ func (i *accountRequestIndexer) IndexedRefs(
 	}
 	indexedBlock := min(block.Number, status.ProcessedBlock)
 	if block.Number-indexedBlock > accountRequestMaxRPCTail {
-		statuses, err = i.api.chainStatuses(ctx, i.config, i.requiredChains, true)
+		statuses, err = i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, true)
 		if err != nil {
 			return accountRequestSnapshot{}, err
 		}

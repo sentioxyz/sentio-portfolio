@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"strings"
 
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 )
 
@@ -17,6 +18,17 @@ type staderBSCDeploymentConfig struct {
 	tokenActivationBlock   uint64
 	managerActivationBlock uint64
 	nativeToken            Token
+}
+
+type staderPolygonDeploymentConfig struct {
+	liquidToken                Token
+	childPool                  common.Address
+	rateProvider               common.Address
+	tokenActivationBlock       uint64
+	rateActivationBlock        uint64
+	conversionActivationBlock  uint64
+	withdrawalsActivationBlock uint64
+	nativeToken                Token
 }
 
 var (
@@ -53,6 +65,31 @@ var (
 			18,
 		),
 	}
+	staderPolygonDeployment = staderPolygonDeploymentConfig{
+		liquidToken: token(
+			Polygon,
+			"0xfa68FB4628DFF1028CFEc22b4162FCcd0d45efb6",
+			"MaticX",
+			18,
+		),
+		childPool:                  common.HexToAddress("0xfd225C9e6601C9d38d8F98d8731BF59eFcF8C0E3"),
+		rateProvider:               common.HexToAddress("0xeE652bbF72689AA59F0B8F981c9c90e2A8Af8d8f"),
+		tokenActivationBlock:       27_403_468,
+		rateActivationBlock:        27_449_856,
+		conversionActivationBlock:  27_683_276,
+		withdrawalsActivationBlock: 29_081_643,
+		nativeToken: token(
+			Polygon,
+			"0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
+			"POL",
+			18,
+		),
+	}
+	staderDeploymentWindows = map[ChainID]deploymentWindow{
+		Ethereum: {ActivationBlock: staderActivationBlock},
+		BSC:      {ActivationBlock: staderBSCDeployment.tokenActivationBlock},
+		Polygon:  {ActivationBlock: staderPolygonDeployment.tokenActivationBlock},
+	}
 )
 
 var staderBSCManagerABI = MustABI(`[
@@ -83,6 +120,35 @@ var staderBSCManagerABI = MustABI(`[
       {"name":"operator","type":"address"},
       {"name":"isClaimable","type":"bool"}
     ]
+  }
+]`)
+
+var staderPolygonRateProviderABI = MustABI(`[
+  {"type":"function","name":"getRate","stateMutability":"view","inputs":[],"outputs":[{"type":"uint256"}]}
+]`)
+
+var staderPolygonChildPoolABI = MustABI(`[
+  {
+    "type":"function",
+    "name":"convertMaticXToMatic",
+    "stateMutability":"view",
+    "inputs":[{"name":"balance","type":"uint256"}],
+    "outputs":[
+      {"name":"amount","type":"uint256"},
+      {"name":"maticXReserve","type":"uint256"},
+      {"name":"maticReserve","type":"uint256"}
+    ]
+  },
+  {
+    "type":"function",
+    "name":"getUserMaticXSwapRequests",
+    "stateMutability":"view",
+    "inputs":[{"name":"account","type":"address"}],
+    "outputs":[{"name":"requests","type":"tuple[]","components":[
+      {"name":"amount","type":"uint256"},
+      {"name":"requestTime","type":"uint256"},
+      {"name":"withdrawalTime","type":"uint256"}
+    ]}]
   }
 ]`)
 
@@ -162,8 +228,35 @@ type StaderAdapter struct {
 
 func newStaderAdapter() Adapter {
 	return &StaderAdapter{adapterBase: adapterBase{info: ProtocolInfo{
-		ID: "stader", Name: "Stader", Chains: []ChainID{Ethereum, BSC},
+		ID: "stader", Name: "Stader", Chains: deploymentChains(staderDeploymentWindows),
 	}}}
+}
+
+type staderPolygonSwapRequest struct {
+	Amount         *big.Int
+	RequestTime    *big.Int
+	WithdrawalTime *big.Int
+}
+
+func staderPolygonMaticAmount(shares *big.Int, rate *big.Int) (*big.Int, error) {
+	if shares == nil || shares.Sign() < 0 {
+		return nil, fmt.Errorf("invalid MaticX shares")
+	}
+	if rate == nil || rate.Sign() <= 0 {
+		return nil, fmt.Errorf("invalid MaticX rate")
+	}
+	amount := new(big.Int).Mul(shares, rate)
+	amount.Div(amount, big.NewInt(1_000_000_000_000_000_000))
+	return amount, nil
+}
+
+func decodeStaderPolygonSwapRequests(value any) ([]staderPolygonSwapRequest, error) {
+	converted := abi.ConvertType(value, new([]staderPolygonSwapRequest))
+	requests, ok := converted.(*[]staderPolygonSwapRequest)
+	if !ok || requests == nil {
+		return nil, fmt.Errorf("decode MaticX swap requests")
+	}
+	return *requests, nil
 }
 
 type staderBSCProcessedWithdrawal struct {
@@ -335,9 +428,182 @@ func (a *StaderAdapter) Positions(
 		return a.ethereumPositions(ctx, client, block, account)
 	case BSC:
 		return a.bscPositions(ctx, client, block, account)
+	case Polygon:
+		return a.polygonPositions(ctx, client, block, account)
 	default:
 		return nil, nil
 	}
+}
+
+func (a *StaderAdapter) polygonPositions(
+	ctx context.Context,
+	client *RPCClient,
+	block BlockRef,
+	account common.Address,
+) ([]Group, error) {
+	deployment := staderPolygonDeployment
+	if block.Number < deployment.tokenActivationBlock {
+		return nil, nil
+	}
+	balance, err := client.Call(
+		ctx,
+		block,
+		deployment.liquidToken.Address,
+		erc20ABI,
+		"balanceOf",
+		account,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("MaticX balance: %w", err)
+	}
+	shares, err := BigIntAt(balance, 0)
+	if err != nil {
+		return nil, fmt.Errorf("MaticX balance: %w", err)
+	}
+	// MaticX existed and had holders before the RateProvider was deployed. Preserve that
+	// historical position in its canonical token unit; only unwrap to POL once an on-chain
+	// conversion source actually exists.
+	if block.Number < deployment.rateActivationBlock {
+		if shares.Sign() == 0 {
+			return nil, nil
+		}
+		component := NewComponent(
+			"asset",
+			deployment.liquidToken,
+			shares,
+			Source{Contract: deployment.liquidToken.Address, Method: "balanceOf"},
+		)
+		return []Group{{
+			ID: "maticx", MarketID: "maticx", Label: "Staked · MaticX",
+			Components: []Component{component},
+		}}, nil
+	}
+	stateCalls := make([]ContractCall, 0, 2)
+	conversionActive := block.Number >= deployment.conversionActivationBlock
+	if conversionActive {
+		// Prefer ChildPool's direct conversion once initialized: applying getRate to an
+		// arbitrary share balance can introduce a second rounding step. The earlier
+		// RateProvider era is kept so holdings between the two verified boundaries are
+		// still represented instead of silently dropping that history.
+		stateCalls = append(stateCalls, ContractCall{
+			Contract: deployment.childPool,
+			ABI:      staderPolygonChildPoolABI,
+			Method:   "convertMaticXToMatic",
+			Args:     []any{shares},
+		})
+	} else {
+		stateCalls = append(stateCalls, ContractCall{
+			Contract: deployment.rateProvider,
+			ABI:      staderPolygonRateProviderABI,
+			Method:   "getRate",
+		})
+	}
+	withdrawalsActive := block.Number >= deployment.withdrawalsActivationBlock
+	if withdrawalsActive {
+		stateCalls = append(stateCalls, ContractCall{
+			Contract: deployment.childPool,
+			ABI:      staderPolygonChildPoolABI,
+			Method:   "getUserMaticXSwapRequests",
+			Args:     []any{account},
+		})
+	}
+	rows, err := client.ParallelCalls(ctx, block, stateCalls)
+	if err != nil {
+		return nil, err
+	}
+	var amount *big.Int
+	var sourceContract common.Address
+	var sourceMethod string
+	metadata := map[string]any{"shares": shares.String()}
+	if conversionActive {
+		amount, err = BigIntAt(rows[0], 0)
+		if err != nil {
+			return nil, fmt.Errorf("converted MaticX amount: %w", err)
+		}
+		maticXReserve, reserveErr := BigIntAt(rows[0], 1)
+		if reserveErr != nil {
+			return nil, fmt.Errorf("MaticX reserve: %w", reserveErr)
+		}
+		maticReserve, reserveErr := BigIntAt(rows[0], 2)
+		if reserveErr != nil {
+			return nil, fmt.Errorf("POL reserve: %w", reserveErr)
+		}
+		metadata["maticXReserve"] = maticXReserve.String()
+		metadata["nativeReserve"] = maticReserve.String()
+		sourceContract = deployment.childPool
+		sourceMethod = "convertMaticXToMatic(balanceOf)"
+	} else {
+		rate, rateErr := BigIntAt(rows[0], 0)
+		if rateErr != nil {
+			return nil, fmt.Errorf("MaticX rate: %w", rateErr)
+		}
+		amount, err = staderPolygonMaticAmount(shares, rate)
+		if err != nil {
+			return nil, err
+		}
+		metadata["rate"] = rate.String()
+		sourceContract = deployment.rateProvider
+		sourceMethod = "getRate(MaticX.balanceOf)/1e18"
+	}
+	groups := make([]Group, 0, 2)
+	if amount.Sign() > 0 {
+		component := NewComponent(
+			"asset",
+			deployment.nativeToken,
+			amount,
+			Source{
+				Contract: sourceContract,
+				Method:   sourceMethod,
+			},
+		)
+		component.Metadata = metadata
+		groups = append(groups, Group{
+			ID: "maticx", MarketID: "maticx", Label: "Staked · MaticX",
+			Components: []Component{component},
+		})
+	}
+	if !withdrawalsActive {
+		return groups, nil
+	}
+	requests, err := decodeStaderPolygonSwapRequests(rows[1][0])
+	if err != nil {
+		return nil, err
+	}
+	if len(requests) > 4_096 {
+		return nil, fmt.Errorf("MaticX withdrawal request count %d exceeds bound", len(requests))
+	}
+	withdrawalAmount := new(big.Int)
+	requestTimes := make([]string, len(requests))
+	withdrawalTimes := make([]string, len(requests))
+	for index, request := range requests {
+		if request.Amount == nil || request.Amount.Sign() < 0 ||
+			request.RequestTime == nil || request.RequestTime.Sign() < 0 ||
+			request.WithdrawalTime == nil || request.WithdrawalTime.Sign() < 0 {
+			return nil, fmt.Errorf("MaticX withdrawal request %d has invalid values", index)
+		}
+		withdrawalAmount.Add(withdrawalAmount, request.Amount)
+		requestTimes[index] = request.RequestTime.String()
+		withdrawalTimes[index] = request.WithdrawalTime.String()
+	}
+	if withdrawalAmount.Sign() == 0 {
+		return groups, nil
+	}
+	component := NewComponent(
+		"asset",
+		deployment.nativeToken,
+		withdrawalAmount,
+		Source{Contract: deployment.childPool, Method: "getUserMaticXSwapRequests.amount"},
+	)
+	component.Metadata = map[string]any{
+		"requestCount":    len(requests),
+		"requestTimes":    strings.Join(requestTimes, ","),
+		"withdrawalTimes": strings.Join(withdrawalTimes, ","),
+	}
+	groups = append(groups, Group{
+		ID: "maticx-withdrawal", MarketID: "maticx-withdrawal", Label: "Deposit · MaticX withdrawal",
+		Components: []Component{component},
+	})
+	return groups, nil
 }
 
 func (a *StaderAdapter) bscPositions(

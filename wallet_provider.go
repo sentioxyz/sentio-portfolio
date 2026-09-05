@@ -39,12 +39,33 @@ type WalletBalanceRequest struct {
 	Targets     []WalletBalanceTarget
 }
 
-// WalletBalanceResult may contain verified account results together with failures. A missing
-// account result is not an empty wallet: WalletBalanceAccount with an empty Balances slice is
-// the successful representation of an account with no holdings.
+// WalletBalanceResult may contain verified account results together with failures and explicit
+// clean fallbacks. A missing account result is not an empty wallet: WalletBalanceAccount with an
+// empty Balances slice is the successful representation of an account with no holdings.
 type WalletBalanceResult struct {
-	Chains   []WalletBalanceChain
-	Failures []WalletBalanceFailure
+	Chains          []WalletBalanceChain
+	Failures        []WalletBalanceFailure
+	FallbackTargets []WalletBalanceFallback
+}
+
+// WalletBalanceFallbackReason explains why the provider deliberately left a requested target to
+// the kernel's committed-manifest RPC path. Values are closed so a typo cannot silently suppress
+// a missing-result error.
+type WalletBalanceFallbackReason string
+
+const (
+	WalletBalanceFallbackUnsupportedChain WalletBalanceFallbackReason = "unsupported_chain"
+	WalletBalanceFallbackAddressLimit     WalletBalanceFallbackReason = "address_limit"
+)
+
+// WalletBalanceFallback is an explicit, successful provider hand-off for exactly one requested
+// account. Unsupported chains may include the root account. Address-limit fallback is reserved
+// for attributed accounts: providers must always retain WalletBalanceRequest.RootAccount on a
+// chain they support.
+type WalletBalanceFallback struct {
+	ChainID ChainID
+	Account common.Address
+	Reason  WalletBalanceFallbackReason
 }
 
 // WalletBalanceChain groups every account result that was observed at one provider block.
@@ -140,6 +161,74 @@ func configureLiveWalletBalances(
 		// Keep the existing manifest path for every target rather than trusting partial data.
 		return
 	}
+
+	providerContractError := func(chainID ChainID, message string) {
+		err := errors.New("wallet balance provider contract: " + message)
+		if requested[chainID] != nil {
+			chains[chainID].walletProviderErrors = append(chains[chainID].walletProviderErrors, err)
+			return
+		}
+		// An unknown chain cannot be attributed to one scan. Report it on every requested chain
+		// instead of silently accepting an incomplete provider response.
+		for requestedChainID := range requested {
+			chains[requestedChainID].walletProviderErrors = append(
+				chains[requestedChainID].walletProviderErrors,
+				err,
+			)
+		}
+	}
+	requestedTarget := func(target WalletBalanceTarget) bool {
+		accounts := requested[target.ChainID]
+		if accounts == nil {
+			return false
+		}
+		_, exists := accounts[target.Account]
+		return exists
+	}
+	fallbackReasons := make(map[WalletBalanceTarget]WalletBalanceFallbackReason)
+	invalidTargets := make(map[WalletBalanceTarget]struct{})
+	seenFallbacks := make(map[WalletBalanceTarget]struct{})
+	for _, fallback := range result.FallbackTargets {
+		target := WalletBalanceTarget{ChainID: fallback.ChainID, Account: fallback.Account}
+		if !requestedTarget(target) {
+			providerContractError(
+				fallback.ChainID,
+				fmt.Sprintf("fallback target %d/%s was not requested", fallback.ChainID, fallback.Account.Hex()),
+			)
+			continue
+		}
+		if _, duplicate := seenFallbacks[target]; duplicate {
+			delete(fallbackReasons, target)
+			invalidTargets[target] = struct{}{}
+			providerContractError(
+				fallback.ChainID,
+				fmt.Sprintf("duplicate fallback target %d/%s", fallback.ChainID, fallback.Account.Hex()),
+			)
+			continue
+		}
+		seenFallbacks[target] = struct{}{}
+		switch fallback.Reason {
+		case WalletBalanceFallbackUnsupportedChain:
+			fallbackReasons[target] = fallback.Reason
+		case WalletBalanceFallbackAddressLimit:
+			if fallback.Account == root {
+				invalidTargets[target] = struct{}{}
+				providerContractError(
+					fallback.ChainID,
+					fmt.Sprintf("root account %s cannot use address-limit fallback", root.Hex()),
+				)
+				continue
+			}
+			fallbackReasons[target] = fallback.Reason
+		default:
+			invalidTargets[target] = struct{}{}
+			providerContractError(
+				fallback.ChainID,
+				fmt.Sprintf("fallback target %d/%s has an unknown reason", fallback.ChainID, fallback.Account.Hex()),
+			)
+		}
+	}
+
 	failedChains := make(map[ChainID]struct{})
 	failedAccounts := make(map[ChainID]map[common.Address]struct{})
 	for _, failure := range result.Failures {
@@ -153,7 +242,27 @@ func configureLiveWalletBalances(
 		)
 		if failure.Account == (common.Address{}) {
 			failedChains[failure.ChainID] = struct{}{}
+			for target := range fallbackReasons {
+				if target.ChainID != failure.ChainID {
+					continue
+				}
+				delete(fallbackReasons, target)
+				invalidTargets[target] = struct{}{}
+				providerContractError(
+					failure.ChainID,
+					fmt.Sprintf("fallback target %d/%s overlaps a chain failure", target.ChainID, target.Account.Hex()),
+				)
+			}
 			continue
+		}
+		target := WalletBalanceTarget{ChainID: failure.ChainID, Account: failure.Account}
+		if _, overlaps := fallbackReasons[target]; overlaps {
+			delete(fallbackReasons, target)
+			invalidTargets[target] = struct{}{}
+			providerContractError(
+				failure.ChainID,
+				fmt.Sprintf("fallback target %d/%s overlaps a failure", target.ChainID, target.Account.Hex()),
+			)
 		}
 		if failedAccounts[failure.ChainID] == nil {
 			failedAccounts[failure.ChainID] = make(map[common.Address]struct{})
@@ -174,6 +283,17 @@ func configureLiveWalletBalances(
 		}
 		byChain[chainID] = providerChain
 	}
+	targetHandledWithoutResult := func(chainID ChainID, account common.Address) bool {
+		target := WalletBalanceTarget{ChainID: chainID, Account: account}
+		if _, fallback := fallbackReasons[target]; fallback {
+			return true
+		}
+		if _, invalid := invalidTargets[target]; invalid {
+			return true
+		}
+		_, failed := failedAccounts[chainID][account]
+		return failed
+	}
 
 	for chainID, targetAccounts := range requested {
 		chain := chains[chainID]
@@ -182,10 +302,16 @@ func configureLiveWalletBalances(
 		}
 		providerChain, exists := byChain[chainID]
 		if !exists {
-			chain.walletProviderErrors = append(
-				chain.walletProviderErrors,
-				errors.New("wallet balance provider returned no chain result"),
-			)
+			for account := range targetAccounts {
+				if targetHandledWithoutResult(chainID, account) {
+					continue
+				}
+				chain.walletProviderErrors = append(
+					chain.walletProviderErrors,
+					errors.New("wallet balance provider returned no chain result"),
+				)
+				break
+			}
 			continue
 		}
 		if _, duplicate := duplicateChains[chainID]; duplicate {
@@ -195,6 +321,69 @@ func configureLiveWalletBalances(
 			)
 			continue
 		}
+		resultAccounts := make(map[common.Address]WalletBalanceAccount, len(providerChain.Accounts))
+		duplicateAccounts := make(map[common.Address]struct{})
+		for _, resultAccount := range providerChain.Accounts {
+			if _, wanted := targetAccounts[resultAccount.Account]; !wanted {
+				chain.walletProviderErrors = append(
+					chain.walletProviderErrors,
+					fmt.Errorf(
+						"wallet balance provider returned unexpected account %s",
+						resultAccount.Account.Hex(),
+					),
+				)
+				continue
+			}
+			target := WalletBalanceTarget{ChainID: chainID, Account: resultAccount.Account}
+			if _, fallback := fallbackReasons[target]; fallback {
+				delete(fallbackReasons, target)
+				invalidTargets[target] = struct{}{}
+				providerContractError(
+					chainID,
+					fmt.Sprintf("fallback target %d/%s also has an account result", chainID, resultAccount.Account.Hex()),
+				)
+				continue
+			}
+			if _, invalid := invalidTargets[target]; invalid {
+				continue
+			}
+			if _, failed := failedAccounts[chainID][resultAccount.Account]; failed {
+				continue
+			}
+			if _, duplicate := duplicateAccounts[resultAccount.Account]; duplicate {
+				continue
+			}
+			if _, duplicate := resultAccounts[resultAccount.Account]; duplicate {
+				chain.walletProviderErrors = append(
+					chain.walletProviderErrors,
+					fmt.Errorf(
+						"wallet balance provider returned duplicate account %s",
+						resultAccount.Account.Hex(),
+					),
+				)
+				delete(resultAccounts, resultAccount.Account)
+				duplicateAccounts[resultAccount.Account] = struct{}{}
+				continue
+			}
+			resultAccounts[resultAccount.Account] = resultAccount
+		}
+		if len(resultAccounts) == 0 {
+			for account := range targetAccounts {
+				if targetHandledWithoutResult(chainID, account) {
+					continue
+				}
+				if _, duplicate := duplicateAccounts[account]; duplicate {
+					continue
+				}
+				chain.walletProviderErrors = append(
+					chain.walletProviderErrors,
+					errors.New("wallet balance provider returned no account results"),
+				)
+				break
+			}
+			continue
+		}
+
 		blockMetadataComplete := providerChain.Block.Number != 0 &&
 			providerChain.Block.Hash != (common.Hash{})
 		if !blockMetadataComplete {
@@ -230,55 +419,17 @@ func configureLiveWalletBalances(
 			exactBlock = false
 		}
 
-		providerAccounts := make(map[common.Address]walletProviderAccount, len(providerChain.Accounts))
-		duplicateAccounts := make(map[common.Address]struct{})
-		for _, resultAccount := range providerChain.Accounts {
-			if _, wanted := targetAccounts[resultAccount.Account]; !wanted {
-				chain.walletProviderErrors = append(
-					chain.walletProviderErrors,
-					fmt.Errorf(
-						"wallet balance provider returned unexpected account %s",
-						resultAccount.Account.Hex(),
-					),
-				)
-				continue
-			}
-			if _, failed := failedAccounts[chainID][resultAccount.Account]; failed {
-				continue
-			}
-			if _, duplicate := duplicateAccounts[resultAccount.Account]; duplicate {
-				continue
-			}
-			if _, duplicate := providerAccounts[resultAccount.Account]; duplicate {
-				chain.walletProviderErrors = append(
-					chain.walletProviderErrors,
-					fmt.Errorf(
-						"wallet balance provider returned duplicate account %s",
-						resultAccount.Account.Hex(),
-					),
-				)
-				delete(providerAccounts, resultAccount.Account)
-				duplicateAccounts[resultAccount.Account] = struct{}{}
-				continue
-			}
-			providerAccounts[resultAccount.Account] = walletProviderAccount{
+		providerAccounts := make(map[common.Address]walletProviderAccount, len(resultAccounts))
+		for account, resultAccount := range resultAccounts {
+			providerAccounts[account] = walletProviderAccount{
 				balances:   resultAccount.Balances,
 				exactBlock: exactBlock,
 			}
 		}
-		if len(providerAccounts) == 0 {
-			if len(failedAccounts[chainID])+len(duplicateAccounts) < len(targetAccounts) {
-				chain.walletProviderErrors = append(
-					chain.walletProviderErrors,
-					errors.New("wallet balance provider returned no account results"),
-				)
-			}
-			continue
-		}
 		chain.walletProviderAccounts = providerAccounts
 		for _, account := range chain.accounts {
 			if _, exists := providerAccounts[account.Address]; !exists {
-				if _, alreadyReported := failedAccounts[chainID][account.Address]; alreadyReported {
+				if targetHandledWithoutResult(chainID, account.Address) {
 					continue
 				}
 				if _, alreadyReported := duplicateAccounts[account.Address]; alreadyReported {

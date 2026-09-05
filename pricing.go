@@ -36,10 +36,15 @@ type PriceResult struct {
 }
 
 var chainPriceNames = map[ChainID]string{
-	Ethereum: "ethereum",
-	BSC:      "bsc",
-	Base:     "base",
-	Arbitrum: "arbitrum",
+	Ethereum:  "ethereum",
+	BSC:       "bsc",
+	Base:      "base",
+	Arbitrum:  "arbitrum",
+	Polygon:   "polygon",
+	Monad:     "monad",
+	Plasma:    "plasma",
+	Avalanche: "avalanche",
+	Optimism:  "optimism",
 }
 
 func AssetForToken(token Token) AssetID {

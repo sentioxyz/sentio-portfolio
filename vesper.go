@@ -93,7 +93,7 @@ func mustVesperManifest() vesperManifest {
 			pool.Type == "" || pool.Token.Address == (common.Address{}) || pool.Token.Symbol == "" {
 			panic(fmt.Sprintf("invalid Vesper pool %s on chain %d", pool.Address, pool.ChainID))
 		}
-		if pool.Version != 0 && pool.Version != 3 && pool.Version != 5 {
+		if pool.Version != 0 && pool.Version != 3 && pool.Version != 4 && pool.Version != 5 {
 			panic(fmt.Sprintf("unsupported Vesper pool version %d for %s", pool.Version, pool.Address))
 		}
 		if seen[pool.ChainID] == nil {
@@ -117,16 +117,12 @@ func newVesperAdapter() Adapter {
 	for _, pool := range vesperDeployments.Pools {
 		pools[pool.ChainID] = append(pools[pool.ChainID], pool)
 	}
-	chains := make([]ChainID, 0, len(pools))
-	for _, chainID := range SupportedChainIDs {
-		if len(pools[chainID]) == 0 {
-			continue
-		}
+	chains := deploymentChains(pools)
+	for _, chainID := range chains {
 		sort.Slice(pools[chainID], func(left, right int) bool {
 			return strings.ToLower(pools[chainID][left].Address.Hex()) <
 				strings.ToLower(pools[chainID][right].Address.Hex())
 		})
-		chains = append(chains, chainID)
 	}
 	return &VesperAdapter{
 		adapterBase: adapterBase{info: ProtocolInfo{ID: "vesper", Name: "Vesper", Chains: chains}},

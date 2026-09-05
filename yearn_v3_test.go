@@ -14,7 +14,7 @@ import (
 )
 
 func TestYearnV3ManifestAndRegistration(t *testing.T) {
-	wantVaults := map[ChainID]int{Ethereum: 180, Base: 33, Arbitrum: 48}
+	wantVaults := map[ChainID]int{Ethereum: 180, Base: 33, Arbitrum: 48, Polygon: 41}
 	for chainID, want := range wantVaults {
 		if got := len(yearnV3Deployments[chainID].Vaults); got != want {
 			t.Fatalf("Yearn v3 chain %d manifest vaults = %d, want %d", chainID, got, want)
@@ -23,7 +23,7 @@ func TestYearnV3ManifestAndRegistration(t *testing.T) {
 	engine := NewEngine(nil, nil)
 	for _, protocol := range engine.Protocols() {
 		if protocol.ID == "yearn-v3" {
-			if want := []ChainID{Ethereum, Base, Arbitrum}; !reflect.DeepEqual(protocol.Chains, want) {
+			if want := []ChainID{Ethereum, Base, Arbitrum, Polygon}; !reflect.DeepEqual(protocol.Chains, want) {
 				t.Fatalf("yearn-v3 chains = %v, want %v", protocol.Chains, want)
 			}
 			return
@@ -32,8 +32,25 @@ func TestYearnV3ManifestAndRegistration(t *testing.T) {
 	t.Fatal("yearn-v3 is not registered")
 }
 
+func TestYearnV3PolygonUsesCanonicalWPOLMetadata(t *testing.T) {
+	wpol := common.HexToAddress("0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270")
+	count := 0
+	for _, vault := range yearnV3Deployments[Polygon].Vaults {
+		if vault.Token.Address != wpol {
+			continue
+		}
+		count++
+		if vault.Token.Symbol != "WPOL" || vault.Token.Decimals != 18 {
+			t.Errorf("vault %s WPOL metadata = %+v", vault.Address, vault.Token)
+		}
+	}
+	if count != 5 {
+		t.Fatalf("Polygon WPOL vaults = %d, want 5", count)
+	}
+}
+
 func TestYearnV3ManifestHasComponentDeploymentAnchors(t *testing.T) {
-	wantStaking := map[ChainID]int{Ethereum: 7, Base: 0, Arbitrum: 6}
+	wantStaking := map[ChainID]int{Ethereum: 7, Base: 0, Arbitrum: 6, Polygon: 0}
 	for chainID, deployment := range yearnV3Deployments {
 		stakingCount := 0
 		for _, vault := range deployment.Vaults {

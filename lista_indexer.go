@@ -322,7 +322,7 @@ func (i *listaIndexer) indexedRefs(
 	account common.Address,
 	includeFeeMarkets bool,
 ) (listaPositionRefs, error) {
-	statuses, err := i.api.chainStatuses(ctx, i.config, i.requiredChains, false)
+	statuses, err := i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, false)
 	if err != nil {
 		return listaPositionRefs{}, err
 	}
@@ -334,7 +334,7 @@ func (i *listaIndexer) indexedRefs(
 		)
 	}
 	if block.Number > status.ProcessedBlock && block.Number-status.ProcessedBlock > listaMaxRPCTailBlocks {
-		statuses, err = i.api.chainStatuses(ctx, i.config, i.requiredChains, true)
+		statuses, err = i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, true)
 		if err != nil {
 			return listaPositionRefs{}, err
 		}

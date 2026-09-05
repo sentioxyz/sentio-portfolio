@@ -29,6 +29,29 @@ func TestEulerComponentBlocksAreConsistent(t *testing.T) {
 	}
 }
 
+func TestEulerNewChainIndexerCheckpointBoundaries(t *testing.T) {
+	registration := NewEngine(nil, nil).registrations["euler-v2"]
+	for _, expected := range []struct {
+		chainID ChainID
+		start   uint64
+	}{
+		{chainID: Polygon, start: 86_932_963},
+		{chainID: Monad, start: 30_858_592},
+		{chainID: Plasma, start: 511_021},
+		{chainID: Avalanche, start: 56_805_710},
+	} {
+		if registration.ActiveAt(expected.chainID, expected.start-1) {
+			t.Errorf("Euler chain %d is available before indexer checkpoint %d", expected.chainID, expected.start)
+		}
+		if !registration.ActiveAt(expected.chainID, expected.start) {
+			t.Errorf("Euler chain %d is unavailable at indexer checkpoint %d", expected.chainID, expected.start)
+		}
+		if got := eulerV2ChainConfigs[expected.chainID].ActivationBlock; got != expected.start {
+			t.Errorf("Euler chain %d consumer start = %d, want %d", expected.chainID, got, expected.start)
+		}
+	}
+}
+
 // A gated read must not touch the RPC client at all. Passing a nil client makes that provable
 // without a network: if the gate is removed, the call panics instead of returning cleanly.
 func TestEulerGatedReadsNeverDialBeforeDeployment(t *testing.T) {
@@ -95,10 +118,15 @@ func TestEulerHistoricalWindowLiveScan(t *testing.T) {
 		t.Skip("set PORTFOLIO_EXPANDED_PROTOCOLS_LIVE_TEST=1 to run archive-RPC probes")
 	}
 	rpcEnvironments := map[ChainID]string{
-		Ethereum: "PORTFOLIO_ETH_RPC_URL",
-		BSC:      "PORTFOLIO_BSC_RPC_URL",
-		Base:     "PORTFOLIO_BASE_RPC_URL",
-		Arbitrum: "PORTFOLIO_ARB_RPC_URL",
+		Ethereum:  "PORTFOLIO_ETH_RPC_URL",
+		BSC:       "PORTFOLIO_BSC_RPC_URL",
+		Base:      "PORTFOLIO_BASE_RPC_URL",
+		Arbitrum:  "PORTFOLIO_ARB_RPC_URL",
+		Polygon:   "PORTFOLIO_POLYGON_RPC_URL",
+		Monad:     "PORTFOLIO_MONAD_RPC_URL",
+		Plasma:    "PORTFOLIO_PLASMA_RPC_URL",
+		Avalanche: "PORTFOLIO_AVALANCHE_RPC_URL",
+		Optimism:  "PORTFOLIO_OPTIMISM_RPC_URL",
 	}
 	owner := common.HexToAddress("0x000000000000000000000000000000000000dEaD")
 	for chainID, chain := range eulerV2ChainConfigs {
