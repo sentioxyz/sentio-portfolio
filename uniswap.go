@@ -26,6 +26,9 @@ var uniswapMaxUint128 = new(big.Int).Sub(
 )
 
 var uniswapV3PositionManagerABI = MustABI(`[
+  {"type":"function","name":"supportsInterface","stateMutability":"view","inputs":[{"name":"interfaceId","type":"bytes4"}],"outputs":[{"type":"bool"}]},
+  {"type":"function","name":"balanceOf","stateMutability":"view","inputs":[{"name":"owner","type":"address"}],"outputs":[{"type":"uint256"}]},
+  {"type":"function","name":"tokenOfOwnerByIndex","stateMutability":"view","inputs":[{"name":"owner","type":"address"},{"name":"index","type":"uint256"}],"outputs":[{"type":"uint256"}]},
   {"type":"function","name":"ownerOf","stateMutability":"view","inputs":[{"name":"tokenId","type":"uint256"}],"outputs":[{"name":"owner","type":"address"}]},
   {"type":"function","name":"positions","stateMutability":"view","inputs":[{"name":"tokenId","type":"uint256"}],"outputs":[
     {"name":"nonce","type":"uint96"},{"name":"operator","type":"address"},
@@ -455,6 +458,78 @@ func decodeUniswapV3Position(nft uniswapIndexedNFT, values []any) (uniswapV3Posi
 	}, nil
 }
 
+// enumerateUniswapV3NFTs is an independent, complete discovery path when the
+// indexer is unavailable. NFPM implements IERC721Enumerable. Every read uses
+// the settled block; no latest-state quantities or indexer rows are mixed in.
+// Do not apply this to V4, whose position manager is not enumerable.
+func enumerateUniswapV3NFTs(
+	ctx context.Context,
+	client *RPCClient,
+	block BlockRef,
+	account common.Address,
+	manager common.Address,
+) ([]uniswapIndexedNFT, error) {
+	rows, err := client.ParallelCalls(ctx, block, []ContractCall{
+		{Contract: manager, ABI: uniswapV3PositionManagerABI, Method: "supportsInterface", Args: []any{[4]byte{0x78, 0x0e, 0x9d, 0x63}}},
+		{Contract: manager, ABI: uniswapV3PositionManagerABI, Method: "balanceOf", Args: []any{account}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("NFT enumeration capability/balance: %w", err)
+	}
+	enumerable, err := BoolAt(rows[0], 0)
+	if err != nil || !enumerable {
+		return nil, fmt.Errorf("Uniswap v3 manager does not support ERC721Enumerable")
+	}
+	count, err := BigIntAt(rows[1], 0)
+	if err != nil {
+		return nil, fmt.Errorf("NFT balance: %w", err)
+	}
+	maximum := uniswapIndexerDefinitions[uniswapV3].maxIndexedNFTs
+	if !count.IsUint64() || count.Uint64() > uint64(maximum) {
+		return nil, fmt.Errorf("account has %s Uniswap v3 NFTs, maximum is %d", count, maximum)
+	}
+	calls := make([]ContractCall, int(count.Uint64()))
+	for index := range calls {
+		calls[index] = ContractCall{
+			Contract: manager, ABI: uniswapV3PositionManagerABI, Method: "tokenOfOwnerByIndex",
+			Args: []any{account, new(big.Int).SetUint64(uint64(index))},
+		}
+	}
+	rows, err = client.ParallelCalls(ctx, block, calls)
+	if err != nil {
+		return nil, fmt.Errorf("NFT enumeration: %w", err)
+	}
+	nfts := make([]uniswapIndexedNFT, len(rows))
+	seen := make(map[string]struct{}, len(rows))
+	for index, row := range rows {
+		id, decodeErr := BigIntAt(row, 0)
+		if decodeErr != nil || id.Sign() <= 0 {
+			return nil, fmt.Errorf("NFT index %d returned an invalid ID", index)
+		}
+		if _, duplicate := seen[id.String()]; duplicate {
+			return nil, fmt.Errorf("NFT enumeration returned duplicate ID %s", id)
+		}
+		seen[id.String()] = struct{}{}
+		nfts[index] = uniswapIndexedNFT{TokenID: id, Manager: manager}
+		calls[index] = ContractCall{
+			Contract: manager, ABI: uniswapV3PositionManagerABI, Method: "ownerOf", Args: []any{id},
+		}
+	}
+	// Validate all IDs, including closed positions, before treating the inventory
+	// as complete. A bad/missing result must never become a partial success.
+	rows, err = client.ParallelCalls(ctx, block, calls)
+	if err != nil {
+		return nil, fmt.Errorf("enumerated NFT owners: %w", err)
+	}
+	for index, row := range rows {
+		owner, decodeErr := AddressAt(row, 0)
+		if decodeErr != nil || owner != account {
+			return nil, fmt.Errorf("enumerated NFT %s has an invalid owner", nfts[index].TokenID)
+		}
+	}
+	return nfts, nil
+}
+
 func (a *UniswapV3Adapter) Positions(
 	ctx context.Context,
 	client *RPCClient,
@@ -466,8 +541,17 @@ func (a *UniswapV3Adapter) Positions(
 		return nil, nil
 	}
 	indexed, err := a.indexer.indexedNFTs(ctx, uniswapV3, block, account)
+	enumerated := false
 	if err != nil {
-		return nil, err
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		nfts, enumerationErr := enumerateUniswapV3NFTs(ctx, client, block, account, deployment.Manager)
+		if enumerationErr != nil {
+			return nil, fmt.Errorf("Uniswap v3 indexer: %w; RPC discovery: %w", err, enumerationErr)
+		}
+		indexed = uniswapIndexedNFTs{NFTs: nfts}
+		enumerated = true
 	}
 	positionCalls := make([]ContractCall, len(indexed.NFTs))
 	for index, nft := range indexed.NFTs {
@@ -486,7 +570,7 @@ func (a *UniswapV3Adapter) Positions(
 	positions := make([]uniswapV3Position, 0)
 	for index, row := range positionRows {
 		if row.Error != nil {
-			if executionReverted(row.Error) {
+			if !enumerated && executionReverted(row.Error) {
 				continue
 			}
 			return nil, fmt.Errorf("position %s: %w", indexed.NFTs[index].TokenID, row.Error)
@@ -521,7 +605,7 @@ func (a *UniswapV3Adapter) Positions(
 	owned := make([]uniswapV3Position, 0, len(positions))
 	for index, row := range ownerRows {
 		if row.Error != nil {
-			if executionReverted(row.Error) {
+			if !enumerated && executionReverted(row.Error) {
 				continue
 			}
 			return nil, fmt.Errorf("ownerOf %s: %w", positions[index].NFT.TokenID, row.Error)
@@ -532,6 +616,8 @@ func (a *UniswapV3Adapter) Positions(
 		}
 		if owner == account {
 			owned = append(owned, positions[index])
+		} else if enumerated {
+			return nil, fmt.Errorf("enumerated NFT %s changed owner at the pinned block", positions[index].NFT.TokenID)
 		}
 	}
 	if len(owned) == 0 {
@@ -648,6 +734,12 @@ func (a *UniswapV3Adapter) Positions(
 				"indexerBlock": indexed.CheckpointBlock,
 			},
 		})
+		if enumerated {
+			metadata := groups[len(groups)-1].Metadata
+			delete(metadata, "indexerBlock")
+			metadata["discoverySource"] = "rpc-enumeration"
+			metadata["discoveryBlock"] = block.Number
+		}
 	}
 	return groups, nil
 }

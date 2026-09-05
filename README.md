@@ -35,6 +35,14 @@ Indexer-backed adapters receive their deployment-specific GraphQL/status
 endpoints and processor versions through `EngineConfig`. Public source must not
 contain project names or owner namespaces.
 
+Uniswap V3 keeps the indexer as its fast discovery path. If that path is
+unavailable, its [enumerable position manager](https://github.com/Uniswap/v3-periphery/blob/main/contracts/interfaces/INonfungiblePositionManager.sol)
+can independently discover the wallet's complete NFT inventory at the settled
+block. The RPC path validates every ID and owner, retains the 4,096-NFT limit,
+and fails rather than returning a partial inventory. Its groups report
+`discoverySource: rpc-enumeration` and `discoveryBlock`, not a fabricated
+`indexerBlock`. V4 remains indexer-backed; this fallback does not apply to it.
+
 Historical scans use a fail-closed availability registry in
 `protocol_availability.go`. Every adapter must declare an explicit outer window
 for every advertised chain before the engine can start; genesis support is
