@@ -96,12 +96,13 @@ func TestWalletNativeCoinsUseTheWrappedTokenIdentity(t *testing.T) {
 }
 
 type walletTestServer struct {
-	t        *testing.T
-	native   *big.Int
-	balances map[common.Address]*big.Int
-	reverts  map[common.Address]struct{}
-	code     map[common.Address]struct{}
-	calls    int
+	t          *testing.T
+	native     *big.Int
+	balances   map[common.Address]*big.Int
+	reverts    map[common.Address]struct{}
+	rawResults map[common.Address]string
+	code       map[common.Address]struct{}
+	calls      int
 }
 
 type walletTestRequest struct {
@@ -148,6 +149,10 @@ func (s *walletTestServer) answer(call walletTestRequest) map[string]any {
 		address := s.target(call.Params[0])
 		if _, reverts := s.reverts[address]; reverts {
 			response["error"] = map[string]any{"code": 3, "message": "execution reverted"}
+			break
+		}
+		if raw, exists := s.rawResults[address]; exists {
+			response["result"] = raw
 			break
 		}
 		balance, exists := s.balances[address]

@@ -282,6 +282,63 @@ func TestDiscoveryOnlyPathReReadsManifestWhenProviderReturnsNoTokens(t *testing.
 	}
 }
 
+func TestDiscoveryOnlyPathClassifiesInvalidBalanceResults(t *testing.T) {
+	longTail := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	for _, test := range []struct {
+		name         string
+		candidate    common.Address
+		raw          string
+		revert       bool
+		manifestOnly bool
+		wantError    bool
+	}{
+		{name: "empty discovered candidate", candidate: longTail, raw: "0x"},
+		{name: "malformed discovered balance", candidate: longTail, raw: "0x01", wantError: true},
+		{name: "reverting discovered candidate", candidate: longTail, revert: true, wantError: true},
+		{name: "empty manifest token also discovered", candidate: walletTestWBTC, raw: "0x", wantError: true},
+		{name: "empty manifest-only token", candidate: walletTestWBTC, raw: "0x", manifestOnly: true, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := &walletTestServer{
+				t: t, native: big.NewInt(0),
+				balances:   map[common.Address]*big.Int{walletTestUSDC: big.NewInt(7)},
+				rawResults: map[common.Address]string{test.candidate: test.raw},
+			}
+			if test.revert {
+				server.reverts = map[common.Address]struct{}{test.candidate: {}}
+			}
+			account := walletProviderAccount{}
+			if !test.manifestOnly {
+				account.balances = []WalletBalance{{
+					Token:     Token{ChainID: Ethereum, Address: test.candidate, Symbol: "CANDIDATE", Decimals: 18},
+					AmountRaw: "123", MetadataComplete: true,
+				}}
+			}
+			groups, err := providerWalletGroups(
+				context.Background(), newWalletTestClient(t, server),
+				BlockRef{ChainID: Ethereum, Number: 996}, Ethereum,
+				common.HexToAddress("0xabc"), account,
+			)
+			if (err != nil) != test.wantError {
+				t.Fatalf("error = %v, wantError = %t", err, test.wantError)
+			}
+			if test.wantError && !strings.Contains(err.Error(), test.candidate.Hex()) {
+				t.Fatalf("candidate failure not reported: %v", err)
+			}
+			if len(groups) != 1 || groups[0].ID != walletTokenGroupID(walletTestUSDC) || groups[0].Components[0].AmountRaw != "7" {
+				t.Fatalf("valid balance lost or invalid candidate retained: %+v", groups)
+			}
+			wantCalls := walletManifestTokenCount(Ethereum)
+			if test.candidate == longTail {
+				wantCalls++
+			}
+			if server.calls != wantCalls {
+				t.Fatalf("balanceOf calls = %d, want %d", server.calls, wantCalls)
+			}
+		})
+	}
+}
+
 func walletManifestTokenCount(chainID ChainID) int {
 	count := 0
 	for _, entry := range walletTokens.Tokens {

@@ -20,6 +20,12 @@ the manifest may be omitted. A token an adapter already reads as a position is
 never counted twice, and final USD valuation always comes from the host's
 `PriceProvider`.
 
+On the discovery re-read path, an address outside the committed token manifest
+is discarded if its successful `balanceOf` call returns empty data. Such a
+candidate provides no decodable ERC-20 balance at the settled block. Empty returns from
+manifest tokens, contract reverts, RPC errors, and malformed non-empty results
+remain scan errors; valid zero balances remain ordinary zero balances.
+
 The repository deliberately does not own an HTTP or gRPC API, protobufs,
 deployment configuration, authentication, or a concrete price service. A host
 constructs `Engine` with chain RPC URLs and a `PriceProvider` implementation.

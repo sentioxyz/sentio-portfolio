@@ -701,6 +701,14 @@ func discoveredProviderWalletGroups(
 	for index, row := range rows {
 		candidate := candidates[index]
 		if row.Error != nil {
+			// Discovery can include contracts that emit token-like events but do
+			// not implement balanceOf. Empty successful calls disqualify only
+			// these unverified candidates; known tokens and other failures must
+			// still report gaps rather than silently shrinking the portfolio.
+			_, knownToken := walletManifestTokens[AssetForToken(candidate.Token)]
+			if !knownToken && errors.Is(row.Error, errEmptyContractResult) {
+				continue
+			}
 			failures = append(failures, fmt.Errorf(
 				"%s balance: %w",
 				candidate.Token.Address.Hex(),
