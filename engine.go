@@ -31,9 +31,8 @@ const defaultHeadLagBlocks = 4
 // Public source must not provide defaults for private indexer projects.
 type EngineConfig struct {
 	SentioIndexers map[string]SentioIndexerConfig
-	// WalletBalanceProvider discovers live holdings. Amounts from another block are re-read at
-	// the engine's settled RPC pin; fixed-block requests always use the manifest RPC path because
-	// a live discovery service cannot prove historical coverage.
+	// WalletBalanceProvider is the only ERC-20 discovery source for live and
+	// historical scans. Amounts from another block are re-read at the settled RPC pin.
 	WalletBalanceProvider WalletBalanceProvider
 	// HeadLagBlocks overrides how far behind the advertised head a live scan pins itself. Zero
 	// selects defaultHeadLagBlocks; a deployment whose RPC pool is in lockstep may set it to 1.
@@ -274,7 +273,7 @@ func (e *Engine) ScanWithOptions(
 	}
 	wait.Wait()
 	if options.includesProtocol(walletProtocolID) {
-		configureLiveWalletBalances(ctx, e.walletBalanceProvider, address, chains)
+		configureWalletBalances(ctx, e.walletBalanceProvider, address, chains)
 	}
 	defer func() {
 		for _, chain := range chains {

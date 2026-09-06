@@ -12,69 +12,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-func TestWalletTokenManifestIsWellFormed(t *testing.T) {
-	if walletTokens.CoinQuote.Method == "" {
-		t.Fatal("manifest does not record how CoinQuote support was established")
-	}
-	perChain := make(map[ChainID]int)
-	for _, entry := range walletTokens.Tokens {
-		if entry.Symbol == "" || entry.Address == (common.Address{}) {
-			t.Fatalf("token %+v has an empty identity", entry)
-		}
-		if entry.Decimals == 0 || entry.Decimals > 36 {
-			t.Errorf("token %s on chain %d has decimals %d", entry.Symbol, entry.ChainID, entry.Decimals)
-		}
-		if entry.CoinGeckoID == "" {
-			t.Errorf("token %s on chain %d has no CoinGecko identity", entry.Symbol, entry.ChainID)
-		}
-		perChain[entry.ChainID]++
-	}
-	for _, chainID := range SupportedChainIDs {
-		if perChain[chainID] == 0 {
-			t.Errorf("chain %d has no wallet tokens", chainID)
-		}
-	}
-}
-
-// The holdings manifest lists assets, never the receipt tokens an adapter reads. A wrapped
-// staking token in the manifest is double counting rather than extra coverage, and it is the
-// mistake a growing list invites.
-func TestWalletTokenManifestExcludesTokensAdaptersRead(t *testing.T) {
-	claimed := make(map[ChainID]map[common.Address]string)
-	record := func(chainID ChainID, address common.Address, label string) {
-		if claimed[chainID] == nil {
-			claimed[chainID] = make(map[common.Address]string)
-		}
-		claimed[chainID][address] = label
-	}
-	for _, adapter := range NewEngine(nil, nil).adapters {
-		switch typed := adapter.(type) {
-		case *ConvertedBalanceAdapter:
-			for chainID, positions := range typed.positions {
-				for _, position := range positions {
-					record(chainID, position.BalanceContract, position.Label)
-				}
-			}
-		case *ERC4626Adapter:
-			for chainID, vaults := range typed.vaults {
-				for _, vault := range vaults {
-					record(chainID, vault.Address, vault.Label)
-				}
-			}
-		}
-	}
-	for _, entry := range walletTokens.Tokens {
-		if label, exists := claimed[entry.ChainID][entry.Address]; exists {
-			t.Errorf(
-				"wallet token %s on chain %d is already read as %q",
-				entry.Symbol,
-				entry.ChainID,
-				label,
-			)
-		}
-	}
-}
-
 func TestWalletNativeCoinsUseTheWrappedTokenIdentity(t *testing.T) {
 	for _, chainID := range SupportedChainIDs {
 		coin, exists := walletNativeCoin[chainID]
@@ -96,12 +33,13 @@ func TestWalletNativeCoinsUseTheWrappedTokenIdentity(t *testing.T) {
 }
 
 type walletTestServer struct {
-	t        *testing.T
-	native   *big.Int
-	balances map[common.Address]*big.Int
-	reverts  map[common.Address]struct{}
-	code     map[common.Address]struct{}
-	calls    int
+	t          *testing.T
+	native     *big.Int
+	balances   map[common.Address]*big.Int
+	reverts    map[common.Address]struct{}
+	rawResults map[common.Address]string
+	code       map[common.Address]struct{}
+	calls      int
 }
 
 type walletTestRequest struct {
@@ -150,6 +88,10 @@ func (s *walletTestServer) answer(call walletTestRequest) map[string]any {
 			response["error"] = map[string]any{"code": 3, "message": "execution reverted"}
 			break
 		}
+		if raw, exists := s.rawResults[address]; exists {
+			response["result"] = raw
+			break
+		}
 		balance, exists := s.balances[address]
 		if !exists {
 			balance = big.NewInt(0)
@@ -192,25 +134,6 @@ var (
 	walletTestLate = common.HexToAddress("0x1111111111111111111111111111111111111111")
 )
 
-func newWalletTestAdapter() *WalletAdapter {
-	return &WalletAdapter{
-		adapterBase: adapterBase{info: ProtocolInfo{
-			ID: walletProtocolID, Name: "Wallet", Chains: []ChainID{Ethereum},
-		}},
-		tokens: map[ChainID][]walletTokenEntry{Ethereum: {
-			{ChainID: Ethereum, Address: walletTestUSDC, Symbol: "USDC", Decimals: 6},
-			{ChainID: Ethereum, Address: walletTestWBTC, Symbol: "WBTC", Decimals: 8},
-			{
-				ChainID:         Ethereum,
-				Address:         walletTestLate,
-				Symbol:          "LATE",
-				Decimals:        18,
-				ActivationBlock: 5_000,
-			},
-		}},
-	}
-}
-
 func newWalletTestClient(t *testing.T, server *walletTestServer) *RPCClient {
 	t.Helper()
 	httpServer := httptest.NewServer(server)
@@ -230,102 +153,6 @@ func groupByID(groups []Group, id string) (Group, bool) {
 		}
 	}
 	return Group{}, false
-}
-
-func TestWalletAdapterReportsNativeAndTokenBalances(t *testing.T) {
-	server := &walletTestServer{
-		t:      t,
-		native: big.NewInt(1_500_000_000_000_000_000),
-		balances: map[common.Address]*big.Int{
-			walletTestUSDC: big.NewInt(250_000_000),
-			walletTestWBTC: big.NewInt(0),
-		},
-	}
-	groups, err := newWalletTestAdapter().Positions(
-		context.Background(),
-		newWalletTestClient(t, server),
-		BlockRef{ChainID: Ethereum, Number: 4_000},
-		common.HexToAddress("0xabc"),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(groups) != 2 {
-		t.Fatalf("groups = %d, want the native coin and USDC only: %+v", len(groups), groups)
-	}
-	native, exists := groupByID(groups, walletNativeGroupID)
-	if !exists {
-		t.Fatal("native coin is missing")
-	}
-	if native.Components[0].Token.Address != walletNativeCoin[Ethereum].Wrapped ||
-		native.Components[0].AmountRaw != "1500000000000000000" ||
-		native.Components[0].Metadata["native"] != true {
-		t.Fatalf("native component = %+v", native.Components[0])
-	}
-	usdc, exists := groupByID(groups, walletTokenGroupID(walletTestUSDC))
-	if !exists {
-		t.Fatal("USDC holding is missing")
-	}
-	if usdc.Components[0].AmountRaw != "250000000" ||
-		usdc.Components[0].Source.Method != "balanceOf" ||
-		usdc.Components[0].Source.Contract != walletTestUSDC {
-		t.Fatalf("USDC component = %+v", usdc.Components[0])
-	}
-	// The token whose activation block is above the scanned block is never called, so a
-	// historical scan does not spend a call on a contract that cannot exist.
-	if server.calls != 2 {
-		t.Fatalf("eth_call count = %d, want 2", server.calls)
-	}
-}
-
-func TestWalletAdapterReportsFailuresWithoutDiscardingBalances(t *testing.T) {
-	server := &walletTestServer{
-		t:      t,
-		native: big.NewInt(0),
-		balances: map[common.Address]*big.Int{
-			walletTestUSDC: big.NewInt(1),
-		},
-		reverts: map[common.Address]struct{}{walletTestWBTC: {}},
-	}
-	groups, err := newWalletTestAdapter().Positions(
-		context.Background(),
-		newWalletTestClient(t, server),
-		BlockRef{ChainID: Ethereum, Number: 4_000},
-		common.HexToAddress("0xabc"),
-	)
-	if err == nil {
-		t.Fatal("a failed balance read must be reported")
-	}
-	if !strings.Contains(err.Error(), "WBTC") {
-		t.Fatalf("error does not name the failed token: %v", err)
-	}
-	if _, exists := groupByID(groups, walletTokenGroupID(walletTestUSDC)); !exists {
-		t.Fatalf("verified balances were discarded: %+v", groups)
-	}
-}
-
-func TestWalletAdapterSkipsTokensWithoutCodeAtAFixedBlock(t *testing.T) {
-	server := &walletTestServer{
-		t:        t,
-		native:   big.NewInt(0),
-		balances: map[common.Address]*big.Int{walletTestUSDC: big.NewInt(7)},
-		code:     map[common.Address]struct{}{walletTestUSDC: {}},
-	}
-	groups, err := newWalletTestAdapter().Positions(
-		context.Background(),
-		newWalletTestClient(t, server),
-		BlockRef{ChainID: Ethereum, Number: 4_000, Fixed: true},
-		common.HexToAddress("0xabc"),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(groups) != 1 || groups[0].ID != walletTokenGroupID(walletTestUSDC) {
-		t.Fatalf("groups = %+v, want USDC only", groups)
-	}
-	if server.calls != 1 {
-		t.Fatalf("eth_call count = %d, want 1: an undeployed token must not be called", server.calls)
-	}
 }
 
 func holdingSnapshot(groups ...Group) Snapshot {

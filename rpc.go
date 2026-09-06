@@ -387,6 +387,11 @@ type ContractCallResult struct {
 	Error  error
 }
 
+// errEmptyContractResult marks a successful eth_call whose empty return data
+// cannot satisfy its ABI. It remains an error for callers unless they explicitly
+// treat the contract as an unverified discovery candidate.
+var errEmptyContractResult = errors.New("empty contract return data")
+
 func contractCallObject(call ContractCall, data []byte) map[string]any {
 	object := map[string]any{"to": call.Contract, "data": hexutil.Bytes(data)}
 	if call.From != (common.Address{}) {
@@ -487,6 +492,9 @@ func (c *RPCClient) ParallelCallsAllowFailure(
 			}
 			values, err := call.ABI.Unpack(call.Method, raw[offset])
 			if err != nil {
+				if len(raw[offset]) == 0 {
+					err = fmt.Errorf("%w: %w", errEmptyContractResult, err)
+				}
 				results[index].Error = fmt.Errorf(
 					"decode %s %s: %w",
 					call.Contract,

@@ -181,6 +181,41 @@ func TestParallelCallsAllowFailurePreservesContractRevert(t *testing.T) {
 	}
 }
 
+func TestParallelCallsAllowFailureClassifiesEmptyResults(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		raw       string
+		noOutputs bool
+		wantEmpty bool
+		wantError bool
+	}{
+		{name: "empty", raw: "0x", wantEmpty: true, wantError: true},
+		{name: "malformed nonempty", raw: "0x01", wantError: true},
+		{name: "valid zero", raw: "0x" + strings.Repeat("0", 64)},
+		{name: "no ABI outputs", raw: "0x", noOutputs: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client, handler := newRPCTestClient(t, false)
+			handler.result = test.raw
+			calls := rpcTestCalls()
+			if test.noOutputs {
+				calls[1].ABI = MustABI(`[{"type":"function","name":"value","stateMutability":"view","inputs":[],"outputs":[]}]`)
+			}
+			rows, err := client.ParallelCallsAllowFailure(context.Background(), BlockRef{ChainID: Ethereum, Number: 1}, calls)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The first element is always a revert, even though its raw result is empty.
+			if rows[0].Error == nil || errors.Is(rows[0].Error, errEmptyContractResult) {
+				t.Fatalf("revert misclassified: %v", rows[0].Error)
+			}
+			if (rows[1].Error != nil) != test.wantError || errors.Is(rows[1].Error, errEmptyContractResult) != test.wantEmpty {
+				t.Fatalf("result error = %v, wantError = %t, wantEmpty = %t", rows[1].Error, test.wantError, test.wantEmpty)
+			}
+		})
+	}
+}
+
 func TestLogsPinsRangeAndTopics(t *testing.T) {
 	contract := common.HexToAddress("0x1111111111111111111111111111111111111111")
 	topic := common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")

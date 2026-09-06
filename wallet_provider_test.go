@@ -244,13 +244,13 @@ func TestProviderWalletGroupsReReadsZeroDiscoveryRowsAtSettledBlock(t *testing.T
 	if !exists || group.Components[0].AmountRaw != "7" {
 		t.Fatalf("settled-block balance is missing: %+v", groups)
 	}
-	wantCalls := walletManifestTokenCount(Ethereum) + 1
+	wantCalls := 1
 	if server.calls != wantCalls {
-		t.Fatalf("balanceOf calls = %d, want manifest union plus long-tail row = %d", server.calls, wantCalls)
+		t.Fatalf("balanceOf calls = %d, want discovered token = %d", server.calls, wantCalls)
 	}
 }
 
-func TestDiscoveryOnlyPathReReadsManifestWhenProviderReturnsNoTokens(t *testing.T) {
+func TestDiscoveryOnlyPathDoesNotInventUndiscoveredTokens(t *testing.T) {
 	server := &walletTestServer{
 		t:      t,
 		native: big.NewInt(0),
@@ -269,30 +269,61 @@ func TestDiscoveryOnlyPathReReadsManifestWhenProviderReturnsNoTokens(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	group, exists := groupByID(groups, walletTokenGroupID(walletTestUSDC))
-	if !exists || group.Components[0].AmountRaw != "7" {
-		t.Fatalf("manifest baseline balance is missing: %+v", groups)
-	}
-	if server.calls != walletManifestTokenCount(Ethereum) {
-		t.Fatalf(
-			"balanceOf calls = %d, want every Ethereum manifest token = %d",
-			server.calls,
-			walletManifestTokenCount(Ethereum),
-		)
+	if len(groups) != 0 || server.calls != 0 {
+		t.Fatalf("undiscovered tokens were queried: groups=%+v calls=%d", groups, server.calls)
 	}
 }
 
-func walletManifestTokenCount(chainID ChainID) int {
-	count := 0
-	for _, entry := range walletTokens.Tokens {
-		if entry.ChainID == chainID {
-			count++
-		}
+func TestDiscoveryOnlyPathClassifiesInvalidBalanceResults(t *testing.T) {
+	longTail := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	for _, test := range []struct {
+		name      string
+		candidate common.Address
+		raw       string
+		revert    bool
+		wantError bool
+	}{
+		{name: "empty discovered candidate", candidate: longTail, raw: "0x"},
+		{name: "malformed discovered balance", candidate: longTail, raw: "0x01", wantError: true},
+		{name: "reverting discovered candidate", candidate: longTail, revert: true, wantError: true},
+		{name: "empty previously listed token", candidate: walletTestWBTC, raw: "0x"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := &walletTestServer{
+				t: t, native: big.NewInt(0),
+				balances:   map[common.Address]*big.Int{walletTestUSDC: big.NewInt(7)},
+				rawResults: map[common.Address]string{test.candidate: test.raw},
+			}
+			if test.revert {
+				server.reverts = map[common.Address]struct{}{test.candidate: {}}
+			}
+			account := walletProviderAccount{balances: []WalletBalance{
+				{Token: Token{ChainID: Ethereum, Address: test.candidate, Symbol: "CANDIDATE", Decimals: 18}, AmountRaw: "123", MetadataComplete: true},
+				{Token: Token{ChainID: Ethereum, Address: walletTestUSDC, Symbol: "USDC", Decimals: 6}, AmountRaw: "7", MetadataComplete: true},
+			}}
+			groups, err := providerWalletGroups(
+				context.Background(), newWalletTestClient(t, server),
+				BlockRef{ChainID: Ethereum, Number: 996}, Ethereum,
+				common.HexToAddress("0xabc"), account,
+			)
+			if (err != nil) != test.wantError {
+				t.Fatalf("error = %v, wantError = %t", err, test.wantError)
+			}
+			if test.wantError && !strings.Contains(err.Error(), test.candidate.Hex()) {
+				t.Fatalf("candidate failure not reported: %v", err)
+			}
+			if len(groups) != 1 || groups[0].ID != walletTokenGroupID(walletTestUSDC) || groups[0].Components[0].AmountRaw != "7" {
+				t.Fatalf("valid balance lost or invalid candidate retained: %+v", groups)
+			}
+			wantCalls := 2
+			if server.calls != wantCalls {
+				t.Fatalf("balanceOf calls = %d, want %d", server.calls, wantCalls)
+			}
+		})
 	}
-	return count
 }
 
-func TestConfigureLiveWalletBalancesUsesNewerProviderBlockForDiscovery(t *testing.T) {
+func TestConfigureWalletBalancesUsesNewerProviderBlockForDiscovery(t *testing.T) {
 	client, _ := newLaggingPoolClient(t, 1_000, 1_000)
 	initial, err := client.BlockByNumber(context.Background(), 996)
 	if err != nil {
@@ -330,7 +361,7 @@ func TestConfigureLiveWalletBalancesUsesNewerProviderBlockForDiscovery(t *testin
 		},
 	}
 
-	configureLiveWalletBalances(context.Background(), provider, owner, chains)
+	configureWalletBalances(context.Background(), provider, owner, chains)
 
 	if len(provider.requests) != 1 || provider.requests[0].RootAccount != owner ||
 		len(provider.requests[0].Targets) != 1 ||
@@ -367,9 +398,8 @@ func TestEngineUsesExactProviderBalanceAtSettledBlockAndCoinQuotePrice(t *testin
 			Accounts: []WalletBalanceAccount{{
 				Account: owner,
 				Balances: []WalletBalance{{
-					Token:     Token{ChainID: Ethereum, Address: walletTestUSDC},
-					AmountRaw: "250000000",
-					// Metadata is deliberately absent: the committed manifest supplies it.
+					Token:     Token{ChainID: Ethereum, Address: walletTestUSDC, Symbol: "USDC", Decimals: 6},
+					AmountRaw: "250000000", MetadataComplete: true,
 				}},
 			}},
 		}},
@@ -407,7 +437,7 @@ func TestEngineUsesExactProviderBalanceAtSettledBlockAndCoinQuotePrice(t *testin
 	}
 }
 
-func TestConfigureLiveWalletBalancesReportsSameHeightHashMismatch(t *testing.T) {
+func TestConfigureWalletBalancesReportsSameHeightHashMismatch(t *testing.T) {
 	client, _ := newLaggingPoolClient(t, 1_000, 1_000)
 	initial, err := client.BlockByNumber(context.Background(), 996)
 	if err != nil {
@@ -434,7 +464,7 @@ func TestConfigureLiveWalletBalancesReportsSameHeightHashMismatch(t *testing.T) 
 		},
 	}
 
-	configureLiveWalletBalances(context.Background(), provider, owner, chains)
+	configureWalletBalances(context.Background(), provider, owner, chains)
 
 	chain := chains[Ethereum]
 	if chain.block != initial {
@@ -450,7 +480,7 @@ func TestConfigureLiveWalletBalancesReportsSameHeightHashMismatch(t *testing.T) 
 	}
 }
 
-func TestConfigureLiveWalletBalancesRequestFailureKeepsManifestFallback(t *testing.T) {
+func TestConfigureWalletBalancesRequestFailureReportsCoverageGap(t *testing.T) {
 	owner := common.HexToAddress("0x000000000000000000000000000000000000dEaD")
 	provider := &recordingWalletBalanceProvider{err: errors.New("provider unavailable")}
 	chain := &chainScan{
@@ -459,7 +489,7 @@ func TestConfigureLiveWalletBalancesRequestFailureKeepsManifestFallback(t *testi
 			Address: owner, Attribution: "wallet", Source: "direct",
 		}},
 	}
-	configureLiveWalletBalances(
+	configureWalletBalances(
 		context.Background(),
 		provider,
 		owner,
@@ -474,76 +504,7 @@ func TestConfigureLiveWalletBalancesRequestFailureKeepsManifestFallback(t *testi
 	}
 }
 
-func TestConfigureLiveWalletBalancesAcceptsCleanChainFallback(t *testing.T) {
-	owner := common.HexToAddress("0x000000000000000000000000000000000000dEaD")
-	provider := &recordingWalletBalanceProvider{result: WalletBalanceResult{
-		FallbackTargets: []WalletBalanceFallback{{
-			ChainID: Monad,
-			Account: owner,
-			Reason:  WalletBalanceFallbackUnsupportedChain,
-		}},
-	}}
-	chain := &chainScan{
-		block: BlockRef{ChainID: Monad, Number: 1},
-		accounts: []attributedAccount{{
-			Address: owner, Attribution: "wallet", Source: "direct",
-		}},
-	}
-
-	configureLiveWalletBalances(
-		context.Background(),
-		provider,
-		owner,
-		map[ChainID]*chainScan{Monad: chain},
-	)
-
-	if chain.walletProviderAccounts != nil || len(chain.walletProviderErrors) != 0 {
-		t.Fatalf("clean fallback installed data or errors: accounts=%+v errors=%v", chain.walletProviderAccounts, chain.walletProviderErrors)
-	}
-}
-
-func TestConfigureLiveWalletBalancesMixesSuccessAndAttributedFallback(t *testing.T) {
-	owner := common.HexToAddress("0x000000000000000000000000000000000000dEaD")
-	attributed := common.HexToAddress("0x000000000000000000000000000000000000bEEF")
-	block := BlockRef{ChainID: Ethereum, Number: 996, Hash: common.HexToHash("0x996")}
-	provider := &recordingWalletBalanceProvider{result: WalletBalanceResult{
-		Chains: []WalletBalanceChain{{
-			Block:    block,
-			Accounts: []WalletBalanceAccount{{Account: owner}},
-		}},
-		FallbackTargets: []WalletBalanceFallback{{
-			ChainID: Ethereum,
-			Account: attributed,
-			Reason:  WalletBalanceFallbackAddressLimit,
-		}},
-	}}
-	chain := &chainScan{
-		block: block,
-		accounts: []attributedAccount{
-			{Address: owner, Attribution: "wallet", Source: "direct"},
-			{Address: attributed, Attribution: "vault", Source: "test"},
-		},
-	}
-
-	configureLiveWalletBalances(
-		context.Background(),
-		provider,
-		owner,
-		map[ChainID]*chainScan{Ethereum: chain},
-	)
-
-	if len(chain.walletProviderAccounts) != 1 {
-		t.Fatalf("provider accounts = %+v, want only root", chain.walletProviderAccounts)
-	}
-	if _, exists := chain.walletProviderAccounts[owner]; !exists {
-		t.Fatalf("root account was not installed: %+v", chain.walletProviderAccounts)
-	}
-	if len(chain.walletProviderErrors) != 0 {
-		t.Fatalf("provider errors = %v", chain.walletProviderErrors)
-	}
-}
-
-func TestConfigureLiveWalletBalancesFailureDoesNotAddMissingResultError(t *testing.T) {
+func TestConfigureWalletBalancesFailureDoesNotAddMissingResultError(t *testing.T) {
 	owner := common.HexToAddress("0x000000000000000000000000000000000000dEaD")
 	provider := &recordingWalletBalanceProvider{result: WalletBalanceResult{
 		Failures: []WalletBalanceFailure{{
@@ -559,7 +520,7 @@ func TestConfigureLiveWalletBalancesFailureDoesNotAddMissingResultError(t *testi
 		}},
 	}
 
-	configureLiveWalletBalances(
+	configureWalletBalances(
 		context.Background(),
 		provider,
 		owner,
@@ -575,7 +536,7 @@ func TestConfigureLiveWalletBalancesFailureDoesNotAddMissingResultError(t *testi
 	}
 }
 
-func TestConfigureLiveWalletBalancesChainFailureDoesNotAddMissingResultError(t *testing.T) {
+func TestConfigureWalletBalancesChainFailureDoesNotAddMissingResultError(t *testing.T) {
 	owner := common.HexToAddress("0x000000000000000000000000000000000000dEaD")
 	provider := &recordingWalletBalanceProvider{result: WalletBalanceResult{
 		Failures: []WalletBalanceFailure{{
@@ -590,7 +551,7 @@ func TestConfigureLiveWalletBalancesChainFailureDoesNotAddMissingResultError(t *
 		}},
 	}
 
-	configureLiveWalletBalances(
+	configureWalletBalances(
 		context.Background(),
 		provider,
 		owner,
@@ -606,140 +567,7 @@ func TestConfigureLiveWalletBalancesChainFailureDoesNotAddMissingResultError(t *
 	}
 }
 
-func TestConfigureLiveWalletBalancesRejectsInvalidFallbacks(t *testing.T) {
-	owner := common.HexToAddress("0x000000000000000000000000000000000000dEaD")
-	other := common.HexToAddress("0x000000000000000000000000000000000000bEEF")
-	tests := []struct {
-		name      string
-		fallbacks []WalletBalanceFallback
-	}{
-		{
-			name: "unknown target",
-			fallbacks: []WalletBalanceFallback{{
-				ChainID: Ethereum, Account: other, Reason: WalletBalanceFallbackUnsupportedChain,
-			}},
-		},
-		{
-			name: "duplicate target",
-			fallbacks: []WalletBalanceFallback{
-				{ChainID: Ethereum, Account: owner, Reason: WalletBalanceFallbackUnsupportedChain},
-				{ChainID: Ethereum, Account: owner, Reason: WalletBalanceFallbackUnsupportedChain},
-			},
-		},
-		{
-			name: "unknown reason",
-			fallbacks: []WalletBalanceFallback{{
-				ChainID: Ethereum, Account: owner, Reason: WalletBalanceFallbackReason("typo"),
-			}},
-		},
-		{
-			name: "root address limit",
-			fallbacks: []WalletBalanceFallback{{
-				ChainID: Ethereum, Account: owner, Reason: WalletBalanceFallbackAddressLimit,
-			}},
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			provider := &recordingWalletBalanceProvider{result: WalletBalanceResult{
-				FallbackTargets: test.fallbacks,
-			}}
-			chain := &chainScan{
-				block: BlockRef{ChainID: Ethereum, Number: 996},
-				accounts: []attributedAccount{{
-					Address: owner, Attribution: "wallet", Source: "direct",
-				}},
-			}
-
-			configureLiveWalletBalances(
-				context.Background(),
-				provider,
-				owner,
-				map[ChainID]*chainScan{Ethereum: chain},
-			)
-
-			joined := errors.Join(chain.walletProviderErrors...)
-			if joined == nil || !strings.Contains(joined.Error(), "provider contract") {
-				t.Fatalf("provider errors = %v, want contract error", joined)
-			}
-			if chain.walletProviderAccounts != nil {
-				t.Fatalf("invalid fallback installed provider data: %+v", chain.walletProviderAccounts)
-			}
-		})
-	}
-}
-
-func TestConfigureLiveWalletBalancesRejectsFallbackOverlap(t *testing.T) {
-	owner := common.HexToAddress("0x000000000000000000000000000000000000dEaD")
-	block := BlockRef{ChainID: Ethereum, Number: 996, Hash: common.HexToHash("0x996")}
-	tests := []struct {
-		name   string
-		result WalletBalanceResult
-	}{
-		{
-			name: "failure",
-			result: WalletBalanceResult{
-				Failures: []WalletBalanceFailure{{
-					ChainID: Ethereum, Account: owner, Message: "genuine provider failure",
-				}},
-				FallbackTargets: []WalletBalanceFallback{{
-					ChainID: Ethereum, Account: owner, Reason: WalletBalanceFallbackUnsupportedChain,
-				}},
-			},
-		},
-		{
-			name: "chain failure",
-			result: WalletBalanceResult{
-				Failures: []WalletBalanceFailure{{
-					ChainID: Ethereum, Message: "genuine chain failure",
-				}},
-				FallbackTargets: []WalletBalanceFallback{{
-					ChainID: Ethereum, Account: owner, Reason: WalletBalanceFallbackUnsupportedChain,
-				}},
-			},
-		},
-		{
-			name: "returned account",
-			result: WalletBalanceResult{
-				Chains: []WalletBalanceChain{{
-					Block: block, Accounts: []WalletBalanceAccount{{Account: owner}},
-				}},
-				FallbackTargets: []WalletBalanceFallback{{
-					ChainID: Ethereum, Account: owner, Reason: WalletBalanceFallbackUnsupportedChain,
-				}},
-			},
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			provider := &recordingWalletBalanceProvider{result: test.result}
-			chain := &chainScan{
-				block: block,
-				accounts: []attributedAccount{{
-					Address: owner, Attribution: "wallet", Source: "direct",
-				}},
-			}
-
-			configureLiveWalletBalances(
-				context.Background(),
-				provider,
-				owner,
-				map[ChainID]*chainScan{Ethereum: chain},
-			)
-
-			joined := errors.Join(chain.walletProviderErrors...)
-			if joined == nil || (!strings.Contains(joined.Error(), "overlap") &&
-				!strings.Contains(joined.Error(), "also has an account result")) {
-				t.Fatalf("provider errors = %v, want overlap contract error", joined)
-			}
-			if chain.walletProviderAccounts != nil {
-				t.Fatalf("conflicting target installed provider data: %+v", chain.walletProviderAccounts)
-			}
-		})
-	}
-}
-
-func TestConfigureLiveWalletBalancesReportsUnclassifiedMissingTarget(t *testing.T) {
+func TestConfigureWalletBalancesReportsUnclassifiedMissingTarget(t *testing.T) {
 	owner := common.HexToAddress("0x000000000000000000000000000000000000dEaD")
 	provider := &recordingWalletBalanceProvider{}
 	chain := &chainScan{
@@ -749,7 +577,7 @@ func TestConfigureLiveWalletBalancesReportsUnclassifiedMissingTarget(t *testing.
 		}},
 	}
 
-	configureLiveWalletBalances(
+	configureWalletBalances(
 		context.Background(),
 		provider,
 		owner,
@@ -762,7 +590,7 @@ func TestConfigureLiveWalletBalancesReportsUnclassifiedMissingTarget(t *testing.
 	}
 }
 
-func TestConfigureLiveWalletBalancesAssetFailureKeepsAccountManifestFallback(t *testing.T) {
+func TestConfigureWalletBalancesAssetFailureReportsIncompleteAccount(t *testing.T) {
 	owner := common.HexToAddress("0x000000000000000000000000000000000000dEaD")
 	block := BlockRef{ChainID: Ethereum, Number: 996, Hash: common.HexToHash("0x996")}
 	provider := &recordingWalletBalanceProvider{result: WalletBalanceResult{
@@ -789,7 +617,7 @@ func TestConfigureLiveWalletBalancesAssetFailureKeepsAccountManifestFallback(t *
 			Address: owner, Attribution: "wallet", Source: "direct",
 		}},
 	}
-	configureLiveWalletBalances(
+	configureWalletBalances(
 		context.Background(),
 		provider,
 		owner,
@@ -804,18 +632,62 @@ func TestConfigureLiveWalletBalancesAssetFailureKeepsAccountManifestFallback(t *
 	}
 }
 
-func TestConfigureLiveWalletBalancesNeverCallsProviderForFixedBlocks(t *testing.T) {
-	provider := &recordingWalletBalanceProvider{}
-	configureLiveWalletBalances(context.Background(), provider, common.HexToAddress("0x1"), map[ChainID]*chainScan{
-		Ethereum: {
-			block: BlockRef{ChainID: Ethereum, Number: 1, Fixed: true},
-			accounts: []attributedAccount{{
-				Address: common.HexToAddress("0x1"), Attribution: "wallet", Source: "direct",
-			}},
-		},
-	})
-	if len(provider.requests) != 0 {
-		t.Fatalf("fixed-block scan called live provider: %+v", provider.requests)
+func TestConfigureWalletBalancesUsesDiscoveryForHistoricalBlocks(t *testing.T) {
+	owner := common.HexToAddress("0x1")
+	pin := BlockRef{ChainID: Ethereum, Number: 996, Hash: common.HexToHash("0x996"), Fixed: true}
+	provider := &recordingWalletBalanceProvider{result: WalletBalanceResult{Chains: []WalletBalanceChain{{
+		Block: BlockRef{ChainID: Ethereum, Number: 1000, Hash: common.HexToHash("0x1000")},
+		Accounts: []WalletBalanceAccount{{Account: owner, Balances: []WalletBalance{{
+			Token:     Token{ChainID: Ethereum, Address: walletTestUSDC, Symbol: "USDC", Decimals: 6},
+			AmountRaw: "123", MetadataComplete: true,
+		}}}},
+	}}}}
+	chain := &chainScan{block: pin, accounts: []attributedAccount{{Address: owner}}}
+	configureWalletBalances(context.Background(), provider, owner, map[ChainID]*chainScan{Ethereum: chain})
+	if len(provider.requests) != 1 || chain.block != pin {
+		t.Fatal("historical discovery bypassed provider or changed the pin")
+	}
+	account, ok := chain.walletProviderAccounts[owner]
+	if !ok || account.exactBlock {
+		t.Fatal("current provider balance accepted as historical")
+	}
+	if err := errors.Join(chain.walletProviderErrors...); err == nil || !strings.Contains(err.Error(), "historical wallet token discovery is incomplete") {
+		t.Fatalf("missing historical coverage error: %v", err)
+	}
+	server := &walletTestServer{t: t, native: big.NewInt(0), balances: map[common.Address]*big.Int{walletTestUSDC: big.NewInt(7)}}
+	groups, err := providerWalletGroups(context.Background(), newWalletTestClient(t, server), pin, Ethereum, owner, account)
+	if err != nil || len(groups) != 1 || groups[0].Components[0].AmountRaw != "7" || server.calls != 1 {
+		t.Fatalf("historical balance was not re-read: groups=%+v calls=%d err=%v", groups, server.calls, err)
+	}
+}
+
+func TestConfigureWalletBalancesHonorsPerAccountBlockSamples(t *testing.T) {
+	owner, other := common.HexToAddress("0x1"), common.HexToAddress("0x2")
+	pin := BlockRef{ChainID: Ethereum, Number: 996, Hash: common.HexToHash("0x996")}
+	newer := BlockRef{ChainID: Ethereum, Number: 1000, Hash: common.HexToHash("0x1000")}
+	provider := &recordingWalletBalanceProvider{result: WalletBalanceResult{Chains: []WalletBalanceChain{{
+		Block: pin, Accounts: []WalletBalanceAccount{{Account: owner}, {Account: other, Block: &newer}},
+	}}}}
+	chain := &chainScan{block: pin, accounts: []attributedAccount{{Address: owner}, {Address: other}}}
+	configureWalletBalances(context.Background(), provider, owner, map[ChainID]*chainScan{Ethereum: chain})
+	if !chain.walletProviderAccounts[owner].exactBlock || chain.walletProviderAccounts[other].exactBlock || len(chain.walletProviderErrors) != 0 {
+		t.Fatalf("per-account samples lost: accounts=%+v errors=%v", chain.walletProviderAccounts, chain.walletProviderErrors)
+	}
+}
+
+func TestWalletWithoutDiscoveryReturnsOnlyNativeAndCoverageError(t *testing.T) {
+	owner := common.HexToAddress("0x1")
+	for _, provider := range []WalletBalanceProvider{nil, &recordingWalletBalanceProvider{err: errors.New("provider unavailable")}} {
+		chain := &chainScan{block: BlockRef{ChainID: Ethereum, Number: 996}, accounts: []attributedAccount{{Address: owner}}}
+		configureWalletBalances(context.Background(), provider, owner, map[ChainID]*chainScan{Ethereum: chain})
+		if len(chain.walletProviderErrors) == 0 {
+			t.Fatal("missing discovery reported as complete wallet")
+		}
+		server := &walletTestServer{t: t, native: big.NewInt(1), balances: map[common.Address]*big.Int{walletTestUSDC: big.NewInt(7)}}
+		groups, err := newWalletAdapter().Positions(context.Background(), newWalletTestClient(t, server), chain.block, owner)
+		if err != nil || len(groups) != 1 || groups[0].ID != walletNativeGroupID || server.calls != 0 {
+			t.Fatalf("static ERC20 fallback survived: groups=%+v calls=%d err=%v", groups, server.calls, err)
+		}
 	}
 }
 
