@@ -259,11 +259,13 @@ func (i *ownerTokenIndexer) positionRefs(
 	if len(contracts) == 0 {
 		return nil, nil
 	}
-	lockSentioLane(ctx)
+	if err := lockSentioLane(ctx); err != nil {
+		return nil, err
+	}
 	queryLocked := true
 	defer func() {
 		if queryLocked {
-			unlockSentioLane()
+			unlockSentioLane(ctx)
 		}
 	}()
 	statuses, err := i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, false)
@@ -328,7 +330,7 @@ func (i *ownerTokenIndexer) positionRefs(
 		}
 		after = next
 	}
-	unlockSentioLane()
+	unlockSentioLane(ctx)
 	queryLocked = false
 	if indexedBlock < block.Number {
 		topics := []common.Hash{erc721TransferTopic}

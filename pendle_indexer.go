@@ -439,6 +439,26 @@ type pendleIndexedSnapshot struct {
 	Refs  []pendlePositionRef
 }
 
+// presenceProbe asks every Pendle chain at once whether the account holds any PT, YT or LP
+// position, so a scan queries only the chains where it does.
+func (i *pendleIndexer) presenceProbe(account common.Address) presenceProbe {
+	owner := strings.ToLower(account.Hex())
+	return presenceProbe{
+		name:           "pendle",
+		config:         i.config,
+		requiredChains: i.requiredChains,
+		fields: []presenceField{{
+			entity: "pendlePositionRefs",
+			where: func(chainID ChainID) string {
+				return fmt.Sprintf("chainId: %d, account: \"%s\"", chainID, owner)
+			},
+		}},
+		maxRPCTail:     pendleMaxRPCTailBlocks,
+		liveMaxLag:     pendleIndexerLiveMaxLag,
+		backfillMaxLag: pendleIndexerBackfillMaxLag,
+	}
+}
+
 func (i *pendleIndexer) indexedRefs(
 	ctx context.Context,
 	block BlockRef,
@@ -470,6 +490,9 @@ func (i *pendleIndexer) indexedRefs(
 		)
 	}
 	queryBlock := min(block.Number, status.ProcessedBlock)
+	if _, empty := i.api.chainProvenEmpty(ctx, i.presenceProbe(account), block, strings.ToLower(account.Hex()), statuses); empty {
+		return pendleIndexedSnapshot{Block: queryBlock, Refs: make([]pendlePositionRef, 0)}, nil
+	}
 	after := pendleRefRowPrefix(block.ChainID, account)
 	tokens := make([]common.Address, 0)
 	kinds := make([]pendleTokenKind, 0)
@@ -783,8 +806,10 @@ func (i *pendleIndexer) PositionRefs(
 		return nil, fmt.Errorf("Pendle is not configured on chain %d", block.ChainID)
 	}
 	indexed, err := func() (pendleIndexedSnapshot, error) {
-		lockSentioLane(ctx)
-		defer unlockSentioLane()
+		if err := lockSentioLane(ctx); err != nil {
+			return pendleIndexedSnapshot{}, err
+		}
+		defer unlockSentioLane(ctx)
 		return i.indexedRefs(ctx, block, account)
 	}()
 	if err != nil {

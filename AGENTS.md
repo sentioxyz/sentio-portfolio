@@ -17,6 +17,20 @@ single processor:
   configuration — never an extra contract binding inside another protocol's
   processor.
 
+### Indexer requests
+
+Every indexer request passes through one `indexerLane` per engine (`sentio_lane.go`), sized
+by `EngineConfig.IndexerConcurrency`: the adapters share one API key, so admission is bounded
+per engine, not per protocol. Do not add a second lock or a per-adapter limiter in front of it.
+
+An adapter whose protocol spans several chains should answer "which chains hold anything for
+this account" with one request rather than one per chain: `sentio_presence.go` aliases a
+time-travel query per chain, at that chain's own indexed block, and the per-chain flow skips
+only chains the probe proved empty. The proof must stay exact — same block, same checkpoint
+validation, same where clause or a superset of it — and the RPC tail after the indexed block
+must keep running for skipped chains. Refs are deleted when positions close, so never decide
+presence from the latest state of the index.
+
 ## Wallet holdings
 
 A host-injected `WalletBalanceProvider` is the only ERC-20 discovery source for

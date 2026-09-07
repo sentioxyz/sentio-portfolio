@@ -342,6 +342,27 @@ func validateMorphoCheckpoint(block BlockRef, page morphoGraphQLPage) error {
 	return nil
 }
 
+// presenceProbe asks every Morpho chain at once whether the account holds any market or vault
+// position, so a scan queries only the chains where it does.
+func (i *morphoIndexer) presenceProbe(account common.Address) presenceProbe {
+	owner := strings.ToLower(account.Hex())
+	where := func(chainID ChainID) string {
+		return fmt.Sprintf("chainId: %d, account: \"%s\"", chainID, owner)
+	}
+	return presenceProbe{
+		name:           "morpho-blue",
+		config:         i.config,
+		requiredChains: i.requiredChains,
+		fields: []presenceField{
+			{entity: "morphoMarketPositionRefs", where: where},
+			{entity: "morphoVaultPositionRefs", where: where},
+		},
+		maxRPCTail:     morphoMaxRPCTailBlocks,
+		liveMaxLag:     morphoCheckpointMaxLag,
+		backfillMaxLag: morphoBackfillMaxLag,
+	}
+}
+
 func (i *morphoIndexer) indexedRefs(
 	ctx context.Context,
 	block BlockRef,
@@ -374,12 +395,19 @@ func (i *morphoIndexer) indexedRefs(
 		)
 	}
 	queryBlock := min(block.Number, status.ProcessedBlock)
+	result := morphoPositionRefs{IndexerBlock: queryBlock}
+	// The fee-market surface is keyed by chain, not account, so only an account-only query can be
+	// answered by the probe.
+	if !includeFeeMarkets {
+		if _, empty := i.api.chainProvenEmpty(ctx, i.presenceProbe(account), block, strings.ToLower(account.Hex()), statuses); empty {
+			return mergeMorphoRefs(result, nil, nil)
+		}
+	}
 	prefix := morphoRowPrefix(block.ChainID, account)
 	marketAfter := prefix
 	vaultAfter := prefix
 	marketDone := false
 	vaultDone := false
-	result := morphoPositionRefs{IndexerBlock: queryBlock}
 	var checkpointBlock uint64
 	var checkpointMS uint64
 	firstPage := true
@@ -865,8 +893,10 @@ func (i *morphoIndexer) PositionRefs(
 	}
 	includeCurrentFeeMarkets := feeRecipient != (common.Address{}) && feeRecipient == account
 	indexed, err := func() (morphoPositionRefs, error) {
-		lockSentioLane(ctx)
-		defer unlockSentioLane()
+		if err := lockSentioLane(ctx); err != nil {
+			return morphoPositionRefs{}, err
+		}
+		defer unlockSentioLane(ctx)
 		return i.indexedRefs(ctx, block, account, includeCurrentFeeMarkets)
 	}()
 	if err != nil {
