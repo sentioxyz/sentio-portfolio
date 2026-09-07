@@ -19,11 +19,6 @@ const (
 	sentioStatusCacheTTL = 30 * time.Second
 )
 
-// Sentio applies a queue limit per API key. All index-backed portfolio adapters therefore share
-// one lane across status checks, pagination, and retries instead of limiting concurrency inside
-// each protocol independently.
-var sentioQueryMu sync.Mutex
-
 // SentioIndexerConfig is supplied by the host at runtime. Endpoint values may
 // contain private project paths and must never be included in public errors.
 type SentioIndexerConfig struct {
@@ -128,6 +123,7 @@ func (c *sentioAPIClient) doJSON(
 		if body != nil {
 			request.Header.Set("content-type", "application/json")
 		}
+		startedAt := time.Now()
 		response, err := httpClient.Do(request)
 		transportFailed := err != nil
 		if err == nil {
@@ -144,14 +140,17 @@ func (c *sentioAPIClient) doJSON(
 				)
 				if response.StatusCode != http.StatusTooManyRequests &&
 					response.StatusCode < http.StatusInternalServerError {
+					observeIndexerRequest(ctx, method, attempt, startedAt, err)
 					return redactEndpoints(err)
 				}
 			} else if decodeErr := json.Unmarshal(payload, result); decodeErr != nil {
 				err = decodeErr
 			} else {
+				observeIndexerRequest(ctx, method, attempt, startedAt, nil)
 				return nil
 			}
 		}
+		observeIndexerRequest(ctx, method, attempt, startedAt, err)
 		if transportFailed {
 			// A canceled HTTP/2 stream can leave its underlying connection alive but
 			// unable to serve subsequent streams. Retrying on that same connection
@@ -171,6 +170,27 @@ func (c *sentioAPIClient) doJSON(
 		}
 	}
 	return fmt.Errorf("request failed after 3 attempts: %w", redactEndpoints(last))
+}
+
+// observeIndexerRequest reports one indexer round trip. The two request shapes the client makes
+// are told apart by HTTP method: a processor status read is a GET, a position query is a GraphQL
+// POST. The wall-clock covers the request until the body is read.
+func observeIndexerRequest(ctx context.Context, method string, attempt int, startedAt time.Time, err error) {
+	kind := IndexerGraphQL
+	scope := scopeFrom(ctx)
+	chainID := scope.chainID
+	if method == http.MethodGet {
+		kind = IndexerStatus
+		chainID = 0
+	}
+	scope.observer.ObserveIndexer(IndexerObservation{
+		ProtocolID: scope.protocolID,
+		ChainID:    chainID,
+		Kind:       kind,
+		Attempt:    attempt + 1,
+		Duration:   time.Since(startedAt),
+		Err:        redactEndpoints(err),
+	})
 }
 
 type sentioIndexerStatusResponse struct {

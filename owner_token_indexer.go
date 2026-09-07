@@ -259,11 +259,11 @@ func (i *ownerTokenIndexer) positionRefs(
 	if len(contracts) == 0 {
 		return nil, nil
 	}
-	sentioQueryMu.Lock()
+	lockSentioLane(ctx)
 	queryLocked := true
 	defer func() {
 		if queryLocked {
-			sentioQueryMu.Unlock()
+			unlockSentioLane()
 		}
 	}()
 	statuses, err := i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, false)
@@ -328,7 +328,7 @@ func (i *ownerTokenIndexer) positionRefs(
 		}
 		after = next
 	}
-	sentioQueryMu.Unlock()
+	unlockSentioLane()
 	queryLocked = false
 	if indexedBlock < block.Number {
 		topics := []common.Hash{erc721TransferTopic}

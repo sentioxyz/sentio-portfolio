@@ -86,6 +86,42 @@ func (c *RPCClient) Close() {
 	c.client.Close()
 }
 
+// observe reports one round trip to the scan's observer under the adapter the context names.
+func (c *RPCClient) observe(
+	ctx context.Context,
+	method string,
+	batchSize int,
+	attempt int,
+	startedAt time.Time,
+	err error,
+) {
+	scope := scopeFrom(ctx)
+	scope.observer.ObserveRPC(RPCObservation{
+		ChainID:    c.chainID,
+		ProtocolID: scope.protocolID,
+		Method:     method,
+		BatchSize:  batchSize,
+		Attempt:    attempt + 1,
+		Duration:   time.Since(startedAt),
+		Err:        redactEndpoints(err),
+	})
+}
+
+// batchMethod names a batch by the method its elements share. The kernel only builds homogeneous
+// batches, so a mixed one is reported as such rather than mislabelled by its first element.
+func batchMethod(batch []rpc.BatchElem) string {
+	if len(batch) == 0 {
+		return "batch"
+	}
+	method := batch[0].Method
+	for _, element := range batch[1:] {
+		if element.Method != method {
+			return "batch"
+		}
+	}
+	return method
+}
+
 func retryableRPCError(err error) bool {
 	if err == nil {
 		return false
@@ -122,8 +158,10 @@ func (c *RPCClient) callRaw(ctx context.Context, result any, method string, args
 	var last error
 	for attempt := 0; attempt < rpcAttempts; attempt++ {
 		callCtx, cancel := context.WithTimeout(ctx, rpcCallTimeout)
+		startedAt := time.Now()
 		last = c.client.CallContext(callCtx, result, method, args...)
 		cancel()
+		c.observe(ctx, method, 0, attempt, startedAt, last)
 		if last == nil {
 			return nil
 		}
@@ -157,6 +195,7 @@ func (c *RPCClient) batchCallRaw(ctx context.Context, batch []rpc.BatchElem) err
 			batch[index].Error = nil
 		}
 		callCtx, cancel := context.WithTimeout(ctx, rpcCallTimeout)
+		startedAt := time.Now()
 		last = c.client.BatchCallContext(callCtx, batch)
 		cancel()
 		if last == nil {
@@ -167,6 +206,7 @@ func (c *RPCClient) batchCallRaw(ctx context.Context, batch []rpc.BatchElem) err
 				}
 			}
 		}
+		c.observe(ctx, batchMethod(batch), len(batch), attempt, startedAt, last)
 		if last == nil {
 			return nil
 		}
@@ -520,6 +560,7 @@ func (c *RPCClient) batchCallTransportRaw(ctx context.Context, batch []rpc.Batch
 			batch[index].Error = nil
 		}
 		callCtx, cancel := context.WithTimeout(ctx, rpcCallTimeout)
+		startedAt := time.Now()
 		last = c.client.BatchCallContext(callCtx, batch)
 		cancel()
 		if last == nil {
@@ -529,11 +570,14 @@ func (c *RPCClient) batchCallTransportRaw(ctx context.Context, batch []rpc.Batch
 					break
 				}
 			}
-			if last == nil {
-				// Non-retryable element errors (for example, contract reverts) belong to
-				// the individual result and must not fail otherwise independent calls.
-				return nil
-			}
+		}
+		// A transport-tolerant batch whose only failures are contract reverts is a successful
+		// round trip: the reverts belong to the individual results, not to the RPC.
+		c.observe(ctx, batchMethod(batch), len(batch), attempt, startedAt, last)
+		if last == nil {
+			// Non-retryable element errors (for example, contract reverts) belong to
+			// the individual result and must not fail otherwise independent calls.
+			return nil
 		}
 		if !retryableRPCError(last) {
 			return last
