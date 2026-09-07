@@ -168,6 +168,7 @@ func (a *MethAdapter) doJSON(
 		if a.apiKey != "" {
 			request.Header.Set("api-key", a.apiKey)
 		}
+		startedAt := time.Now()
 		response, err := a.httpClient.Do(request)
 		if err == nil {
 			payload, readErr := io.ReadAll(io.LimitReader(response.Body, 4<<20))
@@ -182,14 +183,17 @@ func (a *MethAdapter) doJSON(
 				)
 				if response.StatusCode != http.StatusTooManyRequests &&
 					response.StatusCode < http.StatusInternalServerError {
+					observeIndexerRequest(ctx, method, attempt, startedAt, err)
 					return err
 				}
 			} else if decodeErr := json.Unmarshal(payload, result); decodeErr != nil {
 				err = decodeErr
 			} else {
+				observeIndexerRequest(ctx, method, attempt, startedAt, nil)
 				return nil
 			}
 		}
+		observeIndexerRequest(ctx, method, attempt, startedAt, err)
 		last = err
 		if attempt < 2 {
 			timer := time.NewTimer(methIndexerRetryInitial << attempt)
@@ -426,8 +430,8 @@ func (a *MethAdapter) requestIDs(
 	block BlockRef,
 	account common.Address,
 ) ([]*big.Int, error) {
-	sentioQueryMu.Lock()
-	defer sentioQueryMu.Unlock()
+	lockSentioLane(ctx)
+	defer unlockSentioLane()
 	processed, err := a.processedBlock(ctx)
 	if err != nil {
 		return nil, err

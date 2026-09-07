@@ -20,6 +20,7 @@ type Engine struct {
 	priceProvider         PriceProvider
 	walletBalanceProvider WalletBalanceProvider
 	headLagBlocks         uint64
+	observer              Observer
 }
 
 // defaultHeadLagBlocks is how far behind the advertised head a live scan pins itself. Four blocks
@@ -37,6 +38,9 @@ type EngineConfig struct {
 	// HeadLagBlocks overrides how far behind the advertised head a live scan pins itself. Zero
 	// selects defaultHeadLagBlocks; a deployment whose RPC pool is in lockstep may set it to 1.
 	HeadLagBlocks uint64
+	// Observer receives per-scan, per-protocol, per-RPC and per-indexer-request timings. Nil
+	// observes nothing.
+	Observer Observer
 }
 
 func (c EngineConfig) headLagBlocks() uint64 {
@@ -139,6 +143,7 @@ func NewEngineWithConfig(
 		priceProvider:         priceProvider,
 		walletBalanceProvider: config.WalletBalanceProvider,
 		headLagBlocks:         config.headLagBlocks(),
+		observer:              config.Observer,
 	}
 }
 
@@ -194,6 +199,10 @@ func (e *Engine) ScanWithOptions(
 	address common.Address,
 	options ScanOptions,
 ) *Response {
+	scanStartedAt := time.Now()
+	observation := ScanObservation{Options: options}
+	ctx = withObserver(ctx, e.observer)
+	observer := observerFrom(ctx)
 	protocols := make([]ProtocolInfo, 0, len(e.adapters))
 	for _, protocol := range e.Protocols() {
 		if options.includesProtocol(protocol.ID) {
@@ -272,8 +281,12 @@ func (e *Engine) ScanWithOptions(
 		}(chainID)
 	}
 	wait.Wait()
+	observation.ChainSetup = time.Since(scanStartedAt)
+	observation.Chains = len(chains)
 	if options.includesProtocol(walletProtocolID) {
+		discoveryStartedAt := time.Now()
 		configureWalletBalances(ctx, e.walletBalanceProvider, address, chains)
+		observation.WalletDiscovery = time.Since(discoveryStartedAt)
 	}
 	defer func() {
 		for _, chain := range chains {
@@ -296,7 +309,9 @@ func (e *Engine) ScanWithOptions(
 			panic(fmt.Sprintf("adapter %q is missing its validated availability", info.ID))
 		}
 		for _, chainID := range info.Chains {
-			if !options.includesChain(chainID) {
+			// A chain that failed to pin has already reported its error; there is nothing to
+			// dispatch for it.
+			if !options.includesChain(chainID) || chains[chainID] == nil {
 				continue
 			}
 			deployments = append(deployments, deployment{
@@ -305,6 +320,8 @@ func (e *Engine) ScanWithOptions(
 			})
 		}
 	}
+	observation.Deployments = len(deployments)
+	protocolsStartedAt := time.Now()
 	jobs := make(chan deployment)
 	var workers sync.WaitGroup
 	for worker := 0; worker < 3; worker++ {
@@ -321,6 +338,8 @@ func (e *Engine) ScanWithOptions(
 					continue
 				}
 				startedAt := time.Now()
+				// Every RPC and indexer request the adapter makes reports under its name.
+				jobCtx := withDeployment(ctx, info.ID, job.chainID)
 				groups := make([]Group, 0)
 				var positionErr error
 				for _, account := range chain.accounts {
@@ -329,7 +348,7 @@ func (e *Engine) ScanWithOptions(
 					providerAccount, useProvider := chain.walletProviderAccounts[account.Address]
 					if info.ID == walletProtocolID && useProvider {
 						accountGroups, err = providerWalletGroups(
-							ctx,
+							jobCtx,
 							chain.client,
 							chain.block,
 							job.chainID,
@@ -338,7 +357,7 @@ func (e *Engine) ScanWithOptions(
 						)
 					} else {
 						accountGroups, err = job.Positions(
-							ctx,
+							jobCtx,
 							chain.client,
 							chain.block,
 							account.Address,
@@ -391,11 +410,19 @@ func (e *Engine) ScanWithOptions(
 					})
 				}
 				mutex.Unlock()
+				elapsed := time.Since(startedAt)
+				observer.ObserveProtocol(ProtocolObservation{
+					ProtocolID: info.ID,
+					ChainID:    job.chainID,
+					Duration:   elapsed,
+					Groups:     len(groups),
+					Err:        redactEndpoints(positionErr),
+				})
 				log.Printf(
 					"portfolio protocol=%s chain=%d duration=%s error=%q",
 					info.ID,
 					job.chainID,
-					time.Since(startedAt).Round(time.Millisecond),
+					elapsed.Round(time.Millisecond),
 					PublicError(positionErr),
 				)
 			}
@@ -411,6 +438,7 @@ sendJobs:
 	}
 	close(jobs)
 	workers.Wait()
+	observation.Protocols = time.Since(protocolsStartedAt)
 	// Holdings are decided once every adapter has finished, so a token an adapter already
 	// counted is never reported twice — and never depends on which adapter finished first.
 	response.Snapshots = suppressDuplicateHoldings(response.Snapshots)
@@ -421,6 +449,7 @@ sendJobs:
 		return response.Snapshots[left].ChainID < response.Snapshots[right].ChainID
 	})
 
+	pricingStartedAt := time.Now()
 	if !options.SkipPrices {
 		prices, priceErrors := fetchPrices(ctx, e.priceProvider, response.Snapshots)
 		response.Prices = prices
@@ -453,5 +482,13 @@ sendJobs:
 		return leftError.Message < rightError.Message
 	})
 	response.CompletedAt = time.Now().UTC()
+	if !options.SkipPrices {
+		observation.Pricing = time.Since(pricingStartedAt)
+	}
+	observation.Duration = time.Since(scanStartedAt)
+	observation.Snapshots = len(response.Snapshots)
+	observation.Errors = response.Errors
+	observation.Canceled = ctx.Err() != nil
+	observer.ObserveScan(observation)
 	return response
 }

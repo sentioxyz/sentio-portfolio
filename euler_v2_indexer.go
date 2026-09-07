@@ -363,8 +363,8 @@ func (i *eulerIndexer) indexedSnapshot(
 	block BlockRef,
 	owner common.Address,
 ) (eulerIndexedSnapshot, error) {
-	sentioQueryMu.Lock()
-	defer sentioQueryMu.Unlock()
+	lockSentioLane(ctx)
+	defer unlockSentioLane()
 	statuses, err := i.api.chainStatuses(ctx, i.config, []ChainID{block.ChainID}, false)
 	if err != nil {
 		return eulerIndexedSnapshot{}, err

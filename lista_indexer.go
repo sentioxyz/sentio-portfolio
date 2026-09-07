@@ -529,8 +529,8 @@ func (i *listaIndexer) PositionRefs(
 	}
 	includeCurrentFeeMarkets := feeRecipient != (common.Address{}) && feeRecipient == account
 	indexed, err := func() (listaPositionRefs, error) {
-		sentioQueryMu.Lock()
-		defer sentioQueryMu.Unlock()
+		lockSentioLane(ctx)
+		defer unlockSentioLane()
 		return i.indexedRefs(ctx, block, account, includeCurrentFeeMarkets)
 	}()
 	if err != nil {

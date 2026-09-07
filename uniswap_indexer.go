@@ -306,8 +306,8 @@ func (i *uniswapIndexer) indexedNFTs(
 		return uniswapIndexedNFTs{}, fmt.Errorf("unknown Uniswap generation %q", version)
 	}
 
-	sentioQueryMu.Lock()
-	defer sentioQueryMu.Unlock()
+	lockSentioLane(ctx)
+	defer unlockSentioLane()
 	statuses, err := i.chainStatuses(ctx, definition, block.ChainID)
 	if err != nil {
 		return uniswapIndexedNFTs{}, err

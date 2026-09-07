@@ -783,8 +783,8 @@ func (i *pendleIndexer) PositionRefs(
 		return nil, fmt.Errorf("Pendle is not configured on chain %d", block.ChainID)
 	}
 	indexed, err := func() (pendleIndexedSnapshot, error) {
-		sentioQueryMu.Lock()
-		defer sentioQueryMu.Unlock()
+		lockSentioLane(ctx)
+		defer unlockSentioLane()
 		return i.indexedRefs(ctx, block, account)
 	}()
 	if err != nil {
