@@ -49,6 +49,15 @@ The provider is not the price source. `PriceProvider` alone supplies valuation.
 `suppressDuplicateHoldings` uses `Source.Contract` and the attributed account to
 avoid counting tokens already read by protocol adapters, so preserve provenance.
 
+## Historical valuation
+
+A scan pinned to fixed blocks holds what the account had then, so the engine
+values it through `PriceProvider.USDPricesAt` at each pinned block's timestamp;
+only live scans use `USDPrices`. Never fall back from a historical quote to the
+latest one: an unpriced component is a gap the response reports, while a current
+price on a past balance is a wrong number nobody can see is wrong. A provider
+that cannot serve a historical quote must return a `PriceFailure` for the token.
+
 ## Pricing a token nothing quotes
 
 An adapter that reads a token no price provider knows has two honest options, and

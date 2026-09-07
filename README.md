@@ -27,7 +27,9 @@ response does not claim a complete historical token universe.
 
 A token already counted by a protocol adapter is suppressed from wallet holdings
 by its source contract and attributed account. Final USD valuation always comes
-from the host's `PriceProvider`.
+from the host's `PriceProvider`: live scans through `USDPrices`, scans pinned to
+fixed blocks through `USDPricesAt` at each pinned block's timestamp, so a
+historical balance is never valued at today's price.
 
 The repository deliberately does not own an HTTP or gRPC API, protobufs,
 deployment configuration, authentication, or a concrete price service. A host
