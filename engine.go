@@ -21,6 +21,7 @@ type Engine struct {
 	walletBalanceProvider WalletBalanceProvider
 	headLagBlocks         uint64
 	observer              Observer
+	indexerLane           *indexerLane
 }
 
 // defaultHeadLagBlocks is how far behind the advertised head a live scan pins itself. Four blocks
@@ -41,6 +42,9 @@ type EngineConfig struct {
 	// Observer receives per-scan, per-protocol, per-RPC and per-indexer-request timings. Nil
 	// observes nothing.
 	Observer Observer
+	// IndexerConcurrency bounds the Sentio indexer requests this engine keeps in flight across
+	// every protocol, chain and concurrent scan. Zero selects defaultIndexerConcurrency.
+	IndexerConcurrency int
 }
 
 func (c EngineConfig) headLagBlocks() uint64 {
@@ -144,6 +148,7 @@ func NewEngineWithConfig(
 		walletBalanceProvider: config.WalletBalanceProvider,
 		headLagBlocks:         config.headLagBlocks(),
 		observer:              config.Observer,
+		indexerLane:           newIndexerLane(config.IndexerConcurrency),
 	}
 }
 
@@ -201,7 +206,7 @@ func (e *Engine) ScanWithOptions(
 ) *Response {
 	scanStartedAt := time.Now()
 	observation := ScanObservation{Options: options}
-	ctx = withObserver(ctx, e.observer)
+	ctx = withScan(ctx, e.observer, e.indexerLane)
 	observer := observerFrom(ctx)
 	protocols := make([]ProtocolInfo, 0, len(e.adapters))
 	for _, protocol := range e.Protocols() {
@@ -283,6 +288,11 @@ func (e *Engine) ScanWithOptions(
 	wait.Wait()
 	observation.ChainSetup = time.Since(scanStartedAt)
 	observation.Chains = len(chains)
+	pinned := make(map[ChainID]BlockRef, len(chains))
+	for chainID, chain := range chains {
+		pinned[chainID] = chain.block
+	}
+	ctx = withPinnedBlocks(ctx, pinned)
 	if options.includesProtocol(walletProtocolID) {
 		discoveryStartedAt := time.Now()
 		configureWalletBalances(ctx, e.walletBalanceProvider, address, chains)

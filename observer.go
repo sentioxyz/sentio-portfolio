@@ -1,10 +1,6 @@
 package portfolio
 
-import (
-	"context"
-	"sync"
-	"time"
-)
+import "time"
 
 // Observer receives timing and outcome facts about a scan while it runs. The kernel exports no
 // telemetry of its own — it has no opinion about Prometheus, OpenTelemetry or structured logs —
@@ -118,72 +114,3 @@ func (noopObserver) ObserveScan(ScanObservation)         {}
 func (noopObserver) ObserveProtocol(ProtocolObservation) {}
 func (noopObserver) ObserveRPC(RPCObservation)           {}
 func (noopObserver) ObserveIndexer(IndexerObservation)   {}
-
-// scanScope is what a scan attaches to its context so that the RPC client and the indexer
-// clients, which adapters call with signatures the kernel does not want to widen, can still
-// report to the scan's observer under the right protocol and chain.
-type scanScope struct {
-	observer   Observer
-	protocolID string
-	chainID    ChainID
-}
-
-type scanScopeKey struct{}
-
-func withObserver(ctx context.Context, observer Observer) context.Context {
-	if observer == nil {
-		return ctx
-	}
-	return context.WithValue(ctx, scanScopeKey{}, scanScope{observer: observer})
-}
-
-// withDeployment narrows the scope to one adapter on one chain for the duration of its run.
-func withDeployment(ctx context.Context, protocolID string, chainID ChainID) context.Context {
-	scope, ok := ctx.Value(scanScopeKey{}).(scanScope)
-	if !ok {
-		return ctx
-	}
-	scope.protocolID = protocolID
-	scope.chainID = chainID
-	return context.WithValue(ctx, scanScopeKey{}, scope)
-}
-
-func scopeFrom(ctx context.Context) scanScope {
-	if ctx == nil {
-		return scanScope{observer: noopObserver{}}
-	}
-	scope, ok := ctx.Value(scanScopeKey{}).(scanScope)
-	if !ok || scope.observer == nil {
-		return scanScope{observer: noopObserver{}}
-	}
-	return scope
-}
-
-// observerFrom never returns nil, so call sites report unconditionally.
-func observerFrom(ctx context.Context) Observer {
-	return scopeFrom(ctx).observer
-}
-
-// Sentio applies a queue limit per API key. All index-backed portfolio adapters therefore share
-// one lane across status checks, pagination, and retries instead of limiting concurrency inside
-// each protocol independently.
-var sentioQueryMu sync.Mutex
-
-// lockSentioLane takes the shared indexer lane and reports how long the wait was. The lane is
-// the one place a scan serializes across protocols, chains and concurrent requests, which makes
-// the wait the first number to look at when index-backed protocols dominate a scan's duration.
-func lockSentioLane(ctx context.Context) {
-	startedAt := time.Now()
-	sentioQueryMu.Lock()
-	scope := scopeFrom(ctx)
-	scope.observer.ObserveIndexer(IndexerObservation{
-		ProtocolID: scope.protocolID,
-		ChainID:    scope.chainID,
-		Kind:       IndexerLane,
-		Duration:   time.Since(startedAt),
-	})
-}
-
-func unlockSentioLane() {
-	sentioQueryMu.Unlock()
-}

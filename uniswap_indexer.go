@@ -69,21 +69,52 @@ func newUniswapIndexer(
 	}
 }
 
+func uniswapIndexerChains(version uniswapGeneration) ([]ChainID, error) {
+	switch version {
+	case uniswapV3:
+		return deploymentChains(uniswapV3Deployments), nil
+	case uniswapV4:
+		return deploymentChains(uniswapV4Deployments), nil
+	default:
+		return nil, fmt.Errorf("unsupported Uniswap generation %q", version)
+	}
+}
+
 func (i *uniswapIndexer) chainStatuses(
 	ctx context.Context,
 	definition uniswapIndexerDefinition,
 	chainID ChainID,
 ) (map[ChainID]sentioChainStatus, error) {
-	var chains []ChainID
-	switch definition.version {
-	case uniswapV3:
-		chains = deploymentChains(uniswapV3Deployments)
-	case uniswapV4:
-		chains = deploymentChains(uniswapV4Deployments)
-	default:
-		return nil, fmt.Errorf("unsupported Uniswap generation %q", definition.version)
+	chains, err := uniswapIndexerChains(definition.version)
+	if err != nil {
+		return nil, err
 	}
 	return i.api.chainStatusesForScan(ctx, i.configs[definition.version], chains, chainID, false)
+}
+
+// presenceProbe asks every chain of one Uniswap generation at once whether the account holds any
+// live position NFT, so a scan queries only the chains where it does. Uniswap has no RPC tail:
+// the pinned-block query is the whole answer, so a chain the probe proves empty is done.
+func (i *uniswapIndexer) presenceProbe(
+	definition uniswapIndexerDefinition,
+	account common.Address,
+) presenceProbe {
+	chains, _ := uniswapIndexerChains(definition.version)
+	owner := strings.ToLower(account.Hex())
+	return presenceProbe{
+		name:           "uniswap-" + string(definition.version),
+		config:         i.configs[definition.version],
+		requiredChains: chains,
+		fields: []presenceField{{
+			entity: "positions",
+			where: func(chainID ChainID) string {
+				return fmt.Sprintf("id_starts_with: \"%d:%s:\", balance_not: 0", chainID, owner)
+			},
+		}},
+		maxRPCTail:     ^uint64(0),
+		liveMaxLag:     uniswapCheckpointMaxLag,
+		backfillMaxLag: uniswapBackfillMaxLag,
+	}
 }
 
 const uniswapWalletQuery = `
@@ -306,8 +337,10 @@ func (i *uniswapIndexer) indexedNFTs(
 		return uniswapIndexedNFTs{}, fmt.Errorf("unknown Uniswap generation %q", version)
 	}
 
-	lockSentioLane(ctx)
-	defer unlockSentioLane()
+	if err := lockSentioLane(ctx); err != nil {
+		return uniswapIndexedNFTs{}, err
+	}
+	defer unlockSentioLane(ctx)
 	statuses, err := i.chainStatuses(ctx, definition, block.ChainID)
 	if err != nil {
 		return uniswapIndexedNFTs{}, err
@@ -324,6 +357,12 @@ func (i *uniswapIndexer) indexedNFTs(
 			status.ProcessedBlock,
 			status.EstimatedLatest,
 		)
+	}
+
+	if checkpoint, empty := i.api.chainProvenEmpty(
+		ctx, i.presenceProbe(definition, account), block, strings.ToLower(account.Hex()), statuses,
+	); empty {
+		return uniswapIndexedNFTs{CheckpointBlock: checkpoint, NFTs: make([]uniswapIndexedNFT, 0)}, nil
 	}
 
 	prefix := fmt.Sprintf("%d:%s:", block.ChainID, strings.ToLower(account.Hex()))

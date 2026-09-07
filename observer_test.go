@@ -227,15 +227,22 @@ func TestSentioLaneReportsWait(t *testing.T) {
 	recorder := &recordingObserver{}
 	ctx := withDeployment(withObserver(context.Background(), recorder), "pendle", Arbitrum)
 
-	lockSentioLane(context.Background())
+	// A lane of one slot makes the second acquisition wait for the first to release.
+	lane := newIndexerLane(1)
+	scoped := withScanLane(ctx, lane)
+	if err := lockSentioLane(withScanLane(context.Background(), lane)); err != nil {
+		t.Fatal(err)
+	}
 	released := make(chan struct{})
 	go func() {
 		time.Sleep(20 * time.Millisecond)
-		unlockSentioLane()
+		unlockSentioLane(withScanLane(context.Background(), lane))
 		close(released)
 	}()
-	lockSentioLane(ctx)
-	unlockSentioLane()
+	if err := lockSentioLane(scoped); err != nil {
+		t.Fatal(err)
+	}
+	unlockSentioLane(scoped)
 	<-released
 
 	recorder.mu.Lock()
@@ -243,12 +250,13 @@ func TestSentioLaneReportsWait(t *testing.T) {
 	if len(recorder.indexers) != 1 {
 		t.Fatalf("lane observations = %+v, want exactly one for the scoped acquisition", recorder.indexers)
 	}
-	lane := recorder.indexers[0]
-	if lane.Kind != IndexerLane || lane.ProtocolID != "pendle" || lane.ChainID != Arbitrum || lane.Attempt != 0 {
-		t.Fatalf("lane observation = %+v", lane)
+	observation := recorder.indexers[0]
+	if observation.Kind != IndexerLane || observation.ProtocolID != "pendle" ||
+		observation.ChainID != Arbitrum || observation.Attempt != 0 {
+		t.Fatalf("lane observation = %+v", observation)
 	}
-	if lane.Duration < 15*time.Millisecond {
-		t.Fatalf("lane wait = %s, want at least the 20ms the lane was held", lane.Duration)
+	if observation.Duration < 15*time.Millisecond {
+		t.Fatalf("lane wait = %s, want at least the 20ms the lane was held", observation.Duration)
 	}
 }
 
