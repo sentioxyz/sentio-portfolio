@@ -20,6 +20,8 @@ type laggingPool struct {
 	announcedHead uint64
 	servedHead    uint64
 	callBlocks    []uint64
+	// blockTimestamp, when set, chooses each block's timestamp; every block reports 1 otherwise.
+	blockTimestamp func(number uint64) uint64
 }
 
 func (p *laggingPool) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -52,10 +54,14 @@ func (p *laggingPool) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 				parsed.SetString(strings.TrimPrefix(tag, "0x"), 16)
 				number = parsed.Uint64()
 			}
+			timestamp := uint64(1)
+			if p.blockTimestamp != nil {
+				timestamp = p.blockTimestamp(number)
+			}
 			return respond(call.ID, map[string]any{
 				"number":    "0x" + big.NewInt(int64(number)).Text(16),
 				"hash":      common.BytesToHash([]byte{byte(number)}).Hex(),
-				"timestamp": "0x1",
+				"timestamp": "0x" + big.NewInt(int64(timestamp)).Text(16),
 			}, "")
 		case "eth_call":
 			var object map[string]any
