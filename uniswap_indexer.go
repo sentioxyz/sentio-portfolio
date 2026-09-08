@@ -326,6 +326,14 @@ func validateUniswapCheckpoint(block BlockRef, page uniswapGraphQLPage) error {
 	return nil
 }
 
+func (i *uniswapIndexer) prefetchPresence(ctx context.Context, version uniswapGeneration, account common.Address) {
+	definition, exists := uniswapIndexerDefinitions[version]
+	if !exists {
+		return
+	}
+	i.api.prefetchPresence(ctx, i.presenceProbe(definition, account), strings.ToLower(account.Hex()))
+}
+
 func (i *uniswapIndexer) indexedNFTs(
 	ctx context.Context,
 	version uniswapGeneration,
@@ -337,6 +345,7 @@ func (i *uniswapIndexer) indexedNFTs(
 		return uniswapIndexedNFTs{}, fmt.Errorf("unknown Uniswap generation %q", version)
 	}
 
+	i.api.awaitPresence(ctx, i.presenceProbe(definition, account), strings.ToLower(account.Hex()))
 	if err := lockSentioLane(ctx); err != nil {
 		return uniswapIndexedNFTs{}, err
 	}
@@ -359,10 +368,13 @@ func (i *uniswapIndexer) indexedNFTs(
 		)
 	}
 
-	if checkpoint, empty := i.api.chainProvenEmpty(
+	// Uniswap has no RPC tail to cover the blocks after a proof, so only a proof at the very block
+	// this query would read can stand in for it.
+	proof, empty := i.api.chainProvenEmpty(
 		ctx, i.presenceProbe(definition, account), block, strings.ToLower(account.Hex()), statuses,
-	); empty {
-		return uniswapIndexedNFTs{CheckpointBlock: checkpoint, NFTs: make([]uniswapIndexedNFT, 0)}, nil
+	)
+	if empty && proof.QueryBlock == min(block.Number, status.ProcessedBlock) {
+		return uniswapIndexedNFTs{CheckpointBlock: proof.Checkpoint, NFTs: make([]uniswapIndexedNFT, 0)}, nil
 	}
 
 	prefix := fmt.Sprintf("%d:%s:", block.ChainID, strings.ToLower(account.Hex()))

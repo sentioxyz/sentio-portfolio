@@ -17,10 +17,17 @@ type scanScope struct {
 	// finishes and read by the indexer presence probe, which needs every chain's block at once.
 	pinned map[ChainID]BlockRef
 	// memo caches per-scan results shared by the (protocol, chain) jobs of one scan.
-	memo       *scanMemo
-	protocolID string
-	chainID    ChainID
+	memo *scanMemo
+	// prefetchSlots bounds how many presence probes the scan runs ahead of its workers at once,
+	// so the probes never take every lane slot from the adapters the workers are already running.
+	prefetchSlots chan struct{}
+	protocolID    string
+	chainID       ChainID
 }
+
+// prefetchConcurrency is how many presence probes run ahead of the workers at once. Two leaves
+// half of the default lane to the adapters the workers reach first.
+const prefetchConcurrency = 2
 
 type scanScopeKey struct{}
 
@@ -31,9 +38,10 @@ func withScan(ctx context.Context, observer Observer, lane *indexerLane) context
 		observer = noopObserver{}
 	}
 	return context.WithValue(ctx, scanScopeKey{}, scanScope{
-		observer: observer,
-		lane:     lane,
-		memo:     newScanMemo(),
+		observer:      observer,
+		lane:          lane,
+		memo:          newScanMemo(),
+		prefetchSlots: make(chan struct{}, prefetchConcurrency),
 	})
 }
 
@@ -102,24 +110,73 @@ func newScanMemo() *scanMemo {
 	return &scanMemo{entries: make(map[string]*memoEntry)}
 }
 
-// once returns the memoized value for key, computing it with compute on the first call. A nil
+// claim registers key and reports whether the caller now owns its computation. A caller that
+// does not own it waits on the entry's done channel for whoever does.
+func (m *scanMemo) claim(key string) (*memoEntry, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	entry, exists := m.entries[key]
+	if exists {
+		return entry, false
+	}
+	entry = &memoEntry{done: make(chan struct{})}
+	m.entries[key] = entry
+	return entry, true
+}
+
+// once returns the memoized value for key, computing it with compute on the first call and
+// waiting for whoever is computing it otherwise. The wait ends with ctx, returning nil. A nil
 // memo computes every time, which is what a caller outside a scan gets.
-func (m *scanMemo) once(key string, compute func() any) any {
+func (m *scanMemo) once(ctx context.Context, key string, compute func() any) any {
 	if m == nil {
 		return compute()
 	}
-	m.mu.Lock()
-	entry, exists := m.entries[key]
-	if !exists {
-		entry = &memoEntry{done: make(chan struct{})}
-		m.entries[key] = entry
-	}
-	m.mu.Unlock()
-	if exists {
-		<-entry.done
-		return entry.value
+	entry, owner := m.claim(key)
+	if !owner {
+		select {
+		case <-entry.done:
+			return entry.value
+		case <-ctx.Done():
+			return nil
+		}
 	}
 	defer close(entry.done)
 	entry.value = compute()
 	return entry.value
+}
+
+// await blocks until a computation started for key has finished, or ctx ends. It returns at once
+// when nothing was started, so a caller can wait before taking a lane slot without ever holding
+// that slot while a background computation needs it.
+func (m *scanMemo) await(ctx context.Context, key string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	entry, exists := m.entries[key]
+	m.mu.Unlock()
+	if !exists {
+		return
+	}
+	select {
+	case <-entry.done:
+	case <-ctx.Done():
+	}
+}
+
+// start computes key in the background unless someone already claimed it, so a later once for
+// the same key waits only for whatever is left of the work instead of doing it. A nil memo
+// starts nothing.
+func (m *scanMemo) start(key string, compute func() any) {
+	if m == nil {
+		return
+	}
+	entry, owner := m.claim(key)
+	if !owner {
+		return
+	}
+	go func() {
+		defer close(entry.done)
+		entry.value = compute()
+	}()
 }

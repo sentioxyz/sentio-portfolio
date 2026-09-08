@@ -36,6 +36,15 @@ type presenceTestServer struct {
 	probeErrors    bool
 	staleChains    map[ChainID]bool
 	lastProbeQuery atomic.Pointer[string]
+	// processed overrides the processed block the status reports; zero means presenceTestBlock.
+	processed atomic.Uint64
+}
+
+func (s *presenceTestServer) processedBlock() uint64 {
+	if processed := s.processed.Load(); processed != 0 {
+		return processed
+	}
+	return presenceTestBlock
 }
 
 func (s *presenceTestServer) checkpoint(chainID ChainID) map[string]any {
@@ -62,7 +71,7 @@ func (s *presenceTestServer) vaultRow(chainID ChainID) map[string]any {
 func (s *presenceTestServer) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	writer.Header().Set("content-type", "application/json")
 	if request.Method == http.MethodGet {
-		_ = json.NewEncoder(writer).Encode(uniswapIndexerTestStatus("8", s.chains, presenceTestBlock))
+		_ = json.NewEncoder(writer).Encode(uniswapIndexerTestStatus("8", s.chains, s.processedBlock()))
 		return
 	}
 	var body struct {
@@ -314,5 +323,152 @@ func TestValidatePresenceCheckpointMatchesPageRules(t *testing.T) {
 	fixed := BlockRef{Number: 100, Timestamp: presenceTestTimestamp, Fixed: true}
 	if err := validatePresenceCheckpoint(probe, fixed, 100, (presenceTestTimestamp-1_800)*1_000); err != nil {
 		t.Fatalf("checkpoint 30 minutes stale rejected on a fixed-block scan: %v", err)
+	}
+}
+
+func TestPrefetchedPresenceIsReusedByTheChainJobs(t *testing.T) {
+	chains := []ChainID{Ethereum, BSC, Base, Arbitrum}
+	server := &presenceTestServer{t: t, chains: chains}
+	indexer, _ := newPresenceTestMorpho(t, server)
+	pinned := presenceTestPinned(chains...)
+	ctx := presenceScanContext(pinned)
+
+	indexer.prefetchPresence(ctx, presenceTestAccount)
+	// A second prefetch for the same account starts nothing new.
+	indexer.prefetchPresence(ctx, presenceTestAccount)
+	for _, chainID := range chains {
+		refs, err := indexer.indexedRefs(ctx, pinned[chainID], presenceTestAccount, false)
+		if err != nil {
+			t.Fatalf("chain %d: %v", chainID, err)
+		}
+		if (chainID == Base) != (len(refs.Vaults) == 1) {
+			t.Fatalf("chain %d refs = %+v", chainID, refs)
+		}
+	}
+	if server.probes.Load() != 1 {
+		t.Fatalf("probes = %d, want the one prefetched probe", server.probes.Load())
+	}
+	if len(server.pagedChains) != 1 || server.pagedChains[0] != Base {
+		t.Fatalf("paged chains = %v, want only Base", server.pagedChains)
+	}
+	// Outside a scan there is nothing to prefetch into.
+	indexer.prefetchPresence(context.Background(), presenceTestAccount)
+	time.Sleep(10 * time.Millisecond)
+	if server.probes.Load() != 1 {
+		t.Fatalf("prefetch outside a scan ran a probe")
+	}
+}
+
+// A proof established while the index stood at block N still holds after the index advances: the
+// chain job then reports N as its indexed block so the RPC tail starts right after the proof.
+func TestPresenceProofFromAnEarlierIndexedBlockStartsTheTailThere(t *testing.T) {
+	chains := []ChainID{Ethereum, BSC, Base}
+	server := &presenceTestServer{t: t, chains: chains}
+	indexer, _ := newPresenceTestMorpho(t, server)
+	pinned := make(map[ChainID]BlockRef, len(chains))
+	for _, chainID := range chains {
+		pinned[chainID] = BlockRef{ChainID: chainID, Number: presenceTestBlock + 10, Timestamp: presenceTestTimestamp}
+	}
+	ctx := presenceScanContext(pinned)
+
+	// Probe at processed = 1000, then the index advances to 1010 before the chain job runs.
+	indexer.prefetchPresence(ctx, presenceTestAccount)
+	if _, err := indexer.indexedRefs(ctx, pinned[Base], presenceTestAccount, false); err != nil {
+		t.Fatal(err)
+	}
+	server.processed.Store(presenceTestBlock + 10)
+	indexer.api.statuses = make(map[string]sentioStatusCache)
+
+	refs, err := indexer.indexedRefs(ctx, pinned[Ethereum], presenceTestAccount, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refs.IndexerBlock != presenceTestBlock || len(refs.Vaults) != 0 {
+		t.Fatalf("refs = %+v, want an empty result indexed at the proof block %d", refs, presenceTestBlock)
+	}
+	if len(server.pagedChains) != 1 || server.pagedChains[0] != Base {
+		t.Fatalf("paged chains = %v, want the drifted Ethereum job to reuse the proof", server.pagedChains)
+	}
+}
+
+// Uniswap has no RPC tail, so a proof from an earlier indexed block cannot stand in for the page.
+//
+// The scan context carries a lane of one slot, so this also guards the ordering that keeps a
+// prefetch from deadlocking: the chain job waits for the probe before it takes the slot the probe
+// needs.
+func TestUniswapPresenceRequiresAProofAtTheQueryBlock(t *testing.T) {
+	chains := deploymentChains(uniswapV4Deployments)
+	var probes, pages atomic.Int32
+	processed := atomic.Uint64{}
+	processed.Store(presenceTestBlock)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("content-type", "application/json")
+		if request.Method == http.MethodGet {
+			_ = json.NewEncoder(writer).Encode(uniswapIndexerTestStatus("5", chains, processed.Load()))
+			return
+		}
+		var body struct {
+			Query string `json:"query"`
+		}
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		if strings.Contains(body.Query, "query Presence") {
+			probes.Add(1)
+			data := make(map[string]any)
+			for _, chainID := range chains {
+				data[presenceAlias("cp", chainID)] = []map[string]any{{
+					"blockNumber": strconv.FormatUint(processed.Load(), 10),
+					"timestampMs": strconv.FormatUint(presenceTestTimestamp*1_000, 10),
+				}}
+				data[presenceAlias("f0_", chainID)] = []map[string]any{}
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{"data": data})
+			return
+		}
+		pages.Add(1)
+		_ = json.NewEncoder(writer).Encode(uniswapIndexerTestResponse(processed.Load(), presenceTestTimestamp*1_000, nil))
+	}))
+	t.Cleanup(server.Close)
+	indexer := newUniswapIndexerTestClient(server, "5")
+	pinned := make(map[ChainID]BlockRef, len(chains))
+	for _, chainID := range chains {
+		pinned[chainID] = BlockRef{ChainID: chainID, Number: presenceTestBlock + 10, Timestamp: presenceTestTimestamp}
+	}
+	ctx := presenceScanContext(pinned)
+
+	indexer.prefetchPresence(ctx, uniswapV4, presenceTestAccount)
+	first, err := indexer.indexedNFTs(ctx, uniswapV4, pinned[chains[0]], presenceTestAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.NFTs) != 0 || first.CheckpointBlock != presenceTestBlock || pages.Load() != 0 {
+		t.Fatalf("first chain = %+v pages=%d, want the proof to stand in for the page", first, pages.Load())
+	}
+	processed.Store(presenceTestBlock + 10)
+	indexer.api.statuses = make(map[string]sentioStatusCache)
+	second, err := indexer.indexedNFTs(ctx, uniswapV4, pinned[chains[1]], presenceTestAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pages.Load() != 1 || second.CheckpointBlock != presenceTestBlock+10 {
+		t.Fatalf("drifted chain = %+v pages=%d, want the page to run at the new indexed block", second, pages.Load())
+	}
+	if probes.Load() != 1 {
+		t.Fatalf("probes = %d, want the single prefetched probe", probes.Load())
+	}
+}
+
+func TestEngineRegistersPresencePrefetchers(t *testing.T) {
+	engine := NewEngineWithConfig(nil, nil, EngineConfig{SentioIndexers: map[string]SentioIndexerConfig{
+		"morpho-blue": testSentioIndexerConfig("morpho"),
+		"pendle":      testSentioIndexerConfig("pendle"),
+		"uniswap-v3":  testSentioIndexerConfig("uniswap-v3"),
+		"uniswap-v4":  testSentioIndexerConfig("uniswap-v4"),
+	}})
+	want := map[string]bool{"morpho-blue": true, "pendle": true, "uniswap-v3": true, "uniswap-v4": true}
+	for _, adapter := range engine.adapters {
+		_, prefetches := adapter.(presencePrefetcher)
+		if prefetches != want[adapter.Info().ID] {
+			t.Errorf("protocol %q prefetches presence = %v, want %v", adapter.Info().ID, prefetches, want[adapter.Info().ID])
+		}
 	}
 }

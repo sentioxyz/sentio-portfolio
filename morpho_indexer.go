@@ -363,6 +363,10 @@ func (i *morphoIndexer) presenceProbe(account common.Address) presenceProbe {
 	}
 }
 
+func (i *morphoIndexer) prefetchPresence(ctx context.Context, account common.Address) {
+	i.api.prefetchPresence(ctx, i.presenceProbe(account), strings.ToLower(account.Hex()))
+}
+
 func (i *morphoIndexer) indexedRefs(
 	ctx context.Context,
 	block BlockRef,
@@ -399,7 +403,10 @@ func (i *morphoIndexer) indexedRefs(
 	// The fee-market surface is keyed by chain, not account, so only an account-only query can be
 	// answered by the probe.
 	if !includeFeeMarkets {
-		if _, empty := i.api.chainProvenEmpty(ctx, i.presenceProbe(account), block, strings.ToLower(account.Hex()), statuses); empty {
+		proof, empty := i.api.chainProvenEmpty(ctx, i.presenceProbe(account), block, strings.ToLower(account.Hex()), statuses)
+		if empty {
+			// The proof may predate this status read; the RPC tail then starts where it holds.
+			result.IndexerBlock = proof.QueryBlock
 			return mergeMorphoRefs(result, nil, nil)
 		}
 	}
@@ -893,6 +900,9 @@ func (i *morphoIndexer) PositionRefs(
 	}
 	includeCurrentFeeMarkets := feeRecipient != (common.Address{}) && feeRecipient == account
 	indexed, err := func() (morphoPositionRefs, error) {
+		if !includeCurrentFeeMarkets {
+			i.api.awaitPresence(ctx, i.presenceProbe(account), strings.ToLower(account.Hex()))
+		}
 		if err := lockSentioLane(ctx); err != nil {
 			return morphoPositionRefs{}, err
 		}
