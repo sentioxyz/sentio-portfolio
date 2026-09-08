@@ -2,11 +2,17 @@ package portfolio
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 // withScanLane opens a scan scope around lane, keeping any observer the context already carries.
@@ -113,4 +119,75 @@ func TestScanMemoComputesOnce(t *testing.T) {
 	if nilMemo.once("key", func() any { return "computed" }) != "computed" {
 		t.Fatalf("a nil memo must compute every time")
 	}
+}
+
+// Every indexer request must take a lane slot, including the market lookup valuation makes after
+// PositionRefs has released its own. With a single slot held elsewhere, the lookup waits.
+func TestPendleMarketLookupWaitsForTheLane(t *testing.T) {
+	pt := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	market := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		writer.Header().Set("content-type", "application/json")
+		_ = json.NewEncoder(writer).Encode(map[string]any{"data": map[string]any{
+			"pendleTokens": []map[string]any{{
+				"id":      pendleTokenRowID(Ethereum, market),
+				"chainId": int(Ethereum),
+				"address": strings.ToLower(market.Hex()),
+				"kind":    string(pendleLP),
+				"pt":      strings.ToLower(pt.Hex()),
+			}},
+		}})
+	}))
+	t.Cleanup(server.Close)
+	indexer := &pendleIndexer{
+		api:    &sentioAPIClient{apiKey: "test", httpClient: server.Client(), statuses: make(map[string]sentioStatusCache)},
+		config: SentioIndexerConfig{GraphQLURL: server.URL, StatusURL: server.URL, ProcessorVersion: "2"},
+	}
+
+	lane := newIndexerLane(1)
+	holder := withScanLane(context.Background(), lane)
+	if err := lockSentioLane(holder); err != nil {
+		t.Fatal(err)
+	}
+	type outcome struct {
+		markets map[common.Address][]common.Address
+		err     error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		markets, err := indexer.MarketsForPT(
+			withScanLane(context.Background(), lane), BlockRef{ChainID: Ethereum, Number: 100}, []common.Address{pt},
+		)
+		done <- outcome{markets, err}
+	}()
+	select {
+	case result := <-done:
+		t.Fatalf("market lookup finished while the only slot was held: %+v", result)
+	case <-time.After(30 * time.Millisecond):
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("market lookup sent %d requests while the only slot was held", requests.Load())
+	}
+	unlockSentioLane(holder)
+	select {
+	case result := <-done:
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if got := result.markets[pt]; len(got) != 1 || got[0] != market {
+			t.Fatalf("markets = %+v, want the one indexed market", result.markets)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("market lookup did not proceed after the slot was released")
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("market lookup sent %d requests, want 1", requests.Load())
+	}
+	// The slot is free again afterwards.
+	if err := lockSentioLane(holder); err != nil {
+		t.Fatal(err)
+	}
+	unlockSentioLane(holder)
 }
