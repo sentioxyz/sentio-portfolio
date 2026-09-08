@@ -155,10 +155,10 @@ func (s *suiTestServer) identifier(identifier string) {
 	})
 }
 
-func newSuiTestClient(t *testing.T, server *suiTestServer) *SuiClient {
+func newSuiTestClient(t *testing.T, server *suiTestServer) *SuiGraphQLClient {
 	httpServer := httptest.NewServer(server)
 	t.Cleanup(httpServer.Close)
-	client, err := DialSui(context.Background(), 0, httpServer.URL, SuiMainnetChainIdentifier)
+	client, err := DialSuiGraphQL(context.Background(), 0, httpServer.URL, SuiMainnetChainIdentifier)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,12 +170,12 @@ func TestDialSuiRejectsAnotherNetwork(t *testing.T) {
 	server.identifier("4c78adac")
 	httpServer := httptest.NewServer(server)
 	t.Cleanup(httpServer.Close)
-	_, err := DialSui(context.Background(), 0, httpServer.URL, SuiMainnetChainIdentifier)
+	_, err := DialSuiGraphQL(context.Background(), 0, httpServer.URL, SuiMainnetChainIdentifier)
 	if err == nil || !strings.Contains(err.Error(), "4c78adac") {
 		t.Fatalf("DialSui error = %v, want a chain identifier mismatch", err)
 	}
-	if _, err := DialSui(context.Background(), 0, "", SuiMainnetChainIdentifier); err == nil {
-		t.Fatal("DialSui accepted an empty endpoint")
+	if _, err := DialSuiGraphQL(context.Background(), 0, "", SuiMainnetChainIdentifier); err == nil {
+		t.Fatal("DialSuiGraphQL accepted an empty endpoint")
 	}
 }
 
@@ -234,7 +234,7 @@ func suiBalancePage(hasNext bool, cursor string, rows ...string) string {
 	)
 }
 
-func suiBalanceRow(coinType string, amount string) string {
+func suiBalanceNode(coinType string, amount string) string {
 	return fmt.Sprintf(`{"coinType":{"repr":%q},"totalBalance":%q}`, coinType, amount)
 }
 
@@ -253,15 +253,15 @@ func TestSuiBalancesPaginateAtThePinnedCheckpoint(t *testing.T) {
 				t.Errorf("first page carried a cursor: %v", variables)
 			}
 			return http.StatusOK, suiBalancePage(true, "cursor-1",
-				suiBalanceRow("0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI", "57673653528"),
-				suiBalanceRow("0xdead::spent::SPENT", "0"),
+				suiBalanceNode("0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI", "57673653528"),
+				suiBalanceNode("0xdead::spent::SPENT", "0"),
 			)
 		case 2:
 			if variables["after"] != "cursor-1" {
 				t.Errorf("second page cursor = %v", variables["after"])
 			}
 			return http.StatusOK, suiBalancePage(false, "",
-				suiBalanceRow("0x5ae9d8b7c4c4c3a55ff5a2d1a6cd6b9dd0c1f0d4dcd8c43a4eabf287bd63c932::gift::GIFT", "2595000000000"),
+				suiBalanceNode("0x5ae9d8b7c4c4c3a55ff5a2d1a6cd6b9dd0c1f0d4dcd8c43a4eabf287bd63c932::gift::GIFT", "2595000000000"),
 			)
 		default:
 			t.Errorf("unexpected balances page %d", calls)
@@ -295,11 +295,11 @@ func TestSuiBalancesReportTheConsistentRangeAndMalformedRows(t *testing.T) {
 			return http.StatusOK, `{"data":{"address":{"balances":null}},"errors":[{"message":"Request is outside consistent range","path":["address","balances"],"extensions":{"code":"BAD_USER_INPUT"}}]}`
 		case float64(1):
 			return http.StatusOK, suiBalancePage(false, "",
-				suiBalanceRow("0x2::sui::SUI", "1"), suiBalanceRow("0x02::sui::SUI", "2"))
+				suiBalanceNode("0x2::sui::SUI", "1"), suiBalanceNode("0x02::sui::SUI", "2"))
 		case float64(2):
-			return http.StatusOK, suiBalancePage(false, "", suiBalanceRow("0x2::sui::SUI", "-1"))
+			return http.StatusOK, suiBalancePage(false, "", suiBalanceNode("0x2::sui::SUI", "-1"))
 		case float64(3):
-			return http.StatusOK, suiBalancePage(true, "", suiBalanceRow("0x2::sui::SUI", "1"))
+			return http.StatusOK, suiBalancePage(true, "", suiBalanceNode("0x2::sui::SUI", "1"))
 		case float64(4):
 			return http.StatusOK, `{"data":{"address":null}}`
 		default:
@@ -358,7 +358,7 @@ func TestSuiClientRetriesTransientResponsesAndRedactsTheEndpoint(t *testing.T) {
 	t.Cleanup(httpServer.Close)
 	observer := &recordingObserver{}
 	ctx := withObserver(context.Background(), observer)
-	client, err := DialSui(ctx, Ethereum, httpServer.URL, SuiMainnetChainIdentifier)
+	client, err := DialSuiGraphQL(ctx, Ethereum, httpServer.URL, SuiMainnetChainIdentifier)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -471,5 +471,39 @@ func TestSuiCoinMetadataBatchesAliasesAndNamesUnusableCoins(t *testing.T) {
 		if !exists || !strings.Contains(reason.Error(), want) {
 			t.Errorf("unusable[%d] = %v, want %q", index, reason, want)
 		}
+	}
+}
+
+func TestSuiGraphQLHoldingsAreExactAtTheLatestOrPinnedCheckpoint(t *testing.T) {
+	server := newSuiTestServer(t)
+	server.identifier(suiMainnetGenesisDigest)
+	server.handle("SuiLatestCheckpoint", func(map[string]any, int) (int, string) {
+		return http.StatusOK, `{"data":{"checkpoint":` +
+			suiCheckpointJSON(320105168, suiTestDigest, "2026-09-08T06:53:28.219Z") + `}}`
+	})
+	server.handle("SuiBalances", func(variables map[string]any, _ int) (int, string) {
+		return http.StatusOK, suiBalancePage(false, "",
+			suiBalanceNode("0x2::sui::SUI", fmt.Sprint(int(variables["checkpoint"].(float64)))))
+	})
+	client := newSuiTestClient(t, server)
+	owner, _ := ParseSuiAddress("0x1")
+
+	latest, err := client.Holdings(context.Background(), owner, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !latest.Exact || latest.Checkpoint.Sequence != 320105168 || latest.HeadBeforeRead != 320105168 ||
+		latest.Balances[0].Amount.String() != "320105168" {
+		t.Fatalf("latest holdings = %+v", latest)
+	}
+	pinned, err := client.Holdings(context.Background(), owner, &SuiCheckpoint{Sequence: 320000000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pinned.Exact || pinned.Checkpoint.Sequence != 320000000 || pinned.Balances[0].Amount.String() != "320000000" {
+		t.Fatalf("pinned holdings = %+v", pinned)
+	}
+	if got := server.calls["SuiLatestCheckpoint"].Load(); got != 1 {
+		t.Fatalf("latest checkpoint reads = %d, want 1: a pinned read must not consult the head", got)
 	}
 }

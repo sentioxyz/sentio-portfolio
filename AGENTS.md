@@ -83,24 +83,32 @@ avoid counting tokens already read by protocol adapters, so preserve provenance.
 
 ## Sui reads
 
-Sui is read through its GraphQL RPC (`sui.go`), never through JSON-RPC:
+Sui is read through `SuiReader` (`sui.go`), which two transports implement. Which one a
+deployment uses is a matter of what it runs; what neither may do is blur the pin:
 
-- `suix_getAllBalances` answers only for the head, so a balance read that way can never be
-  attributed to the checkpoint a scan pinned, and Mysten has withdrawn JSON-RPC from their
-  public fullnodes. GraphQL's `address(atCheckpoint:)` reads holdings at the pinned checkpoint,
-  which is the same settled-block contract the EVM chains keep.
-- A checkpoint is the pin: sequence number, 32-byte digest and timestamp fill `BlockRef` as a
-  block does. `DialSui` verifies the endpoint's chain identifier the way `DialRPC` verifies
-  `eth_chainId`.
-- Balances are answerable only inside the service's consistent range, about an hour of
-  checkpoints. A pinned scan outside it fails with `errSuiOutsideConsistentRange`; never fall
+- `SuiGraphQLClient` (`sui_graphql.go`) reads holdings at a named checkpoint through
+  `address(atCheckpoint:)`, inside the service's consistent range of about an hour. Its reads are
+  `Exact`. A pinned scan outside the range fails with `errSuiOutsideConsistentRange`; never fall
   back to reading the head for it.
-- The chain enumerates holdings itself, so Sui needs no `WalletBalanceProvider`. Enumeration is
-  paginated to completion and fails past its bound rather than truncating.
+- `SuiJSONRPCClient` (`sui_jsonrpc.go`) speaks the JSON-RPC a fullnode or a proxy in front of one
+  serves. `suix_getAllBalances` reads only the head, so a read is bracketed by two head
+  observations and reported as a window: `Exact` is false, `Checkpoint` is the head seen after
+  the read and `HeadBeforeRead` the one seen before. A pinned read is refused with
+  `errSuiPinnedReadUnsupported`. A consumer must surface a head read as such; the rule that a
+  latest amount is never labelled with an earlier `BlockRef` applies here too.
+- A checkpoint is the pin: sequence number, 32-byte digest and timestamp fill `BlockRef` as a
+  block does. Both dialers verify the endpoint's chain identifier the way `DialRPC` verifies
+  `eth_chainId`.
+- The chain enumerates holdings itself, so Sui needs no `WalletBalanceProvider`. GraphQL
+  enumeration is paginated to completion and fails past its bound rather than truncating.
 - Coin types are normalized with `NormalizeMoveType` (zero-padded lowercase addresses, generics
-  joined with a bare comma), the form the GraphQL `repr` and the host's price service both use.
+  joined with a bare comma), the form the GraphQL `repr` and the host's price service both use;
+  JSON-RPC's short addresses and spaced generics normalize to the same string.
 - Coin metadata comes from the chain's `coinMetadata` or not at all: a coin whose metadata is
   absent or unusable is a reported gap, never a guessed symbol or precision.
+- JSON-RPC error objects are final and never retried: Sui's codes do not reuse the EVM pools'
+  rate-limit codes, and a server that rejects batches answers with one. The client falls back to
+  single calls for that server rather than parse the message.
 
 ## Historical valuation
 
