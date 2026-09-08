@@ -8,69 +8,23 @@ import (
 	"time"
 )
 
-// The live tests probe real Sui mainnet endpoints. They are contract checks on each transport's
-// schema and consistency semantics rather than on any particular balance, so they assert shapes
-// and invariants, not amounts. PORTFOLIO_SUI_LIVE_ADDRESS optionally names an address whose
-// holdings are enumerated and whose coin metadata is resolved.
-
-func TestSuiLiveGraphQLReader(t *testing.T) {
-	endpoint := os.Getenv("PORTFOLIO_SUI_GRAPHQL_URL")
+// The live test probes a real Sui mainnet gRPC endpoint. It is a contract check on the service's
+// schema and head-only semantics rather than on any particular balance, so it asserts shapes and
+// invariants, not amounts. PORTFOLIO_SUI_LIVE_ADDRESS optionally names an address whose holdings
+// are enumerated and whose coin metadata is resolved.
+func TestSuiLiveGRPCReader(t *testing.T) {
+	endpoint := os.Getenv("PORTFOLIO_SUI_GRPC_URL")
 	if endpoint == "" {
-		t.Skip("set PORTFOLIO_SUI_GRAPHQL_URL to a Sui mainnet GraphQL endpoint to probe it")
+		t.Skip("set PORTFOLIO_SUI_GRPC_URL to a Sui mainnet gRPC endpoint (grpc://host:port or grpcs://host:port) to probe it")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	client, err := DialSuiGraphQL(ctx, 0, endpoint, SuiMainnetChainIdentifier)
+	client, err := DialSuiGRPC(ctx, 0, endpoint, SuiMainnetChainIdentifier)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer client.Close()
 
-	latest := suiLiveReaderChecks(ctx, t, client, true)
-
-	first, last, err := client.BalancesRange(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first > latest.Sequence || last < latest.Sequence-1 {
-		t.Fatalf("balances range %d-%d does not cover the latest checkpoint %d", first, last, latest.Sequence)
-	}
-	t.Logf("balances answerable for %d checkpoints", last-first+1)
-
-	// A checkpoint far before the consistent range must be refused, not answered from the head.
-	framework, _ := ParseSuiAddress("0x2")
-	_, err = client.Holdings(ctx, framework, &SuiCheckpoint{Sequence: first / 2})
-	if !errors.Is(err, errSuiOutsideConsistentRange) {
-		t.Fatalf("checkpoint %d outside the range: %v, want errSuiOutsideConsistentRange", first/2, err)
-	}
-}
-
-func TestSuiLiveJSONRPCReader(t *testing.T) {
-	endpoint := os.Getenv("PORTFOLIO_SUI_JSONRPC_URL")
-	if endpoint == "" {
-		t.Skip("set PORTFOLIO_SUI_JSONRPC_URL to a Sui mainnet JSON-RPC endpoint to probe it")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	client, err := DialSuiJSONRPC(ctx, 0, endpoint, SuiMainnetChainIdentifier)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer client.Close()
-
-	latest := suiLiveReaderChecks(ctx, t, client, false)
-
-	// The transport reads only the head, so a pinned read is refused rather than approximated.
-	framework, _ := ParseSuiAddress("0x2")
-	_, err = client.Holdings(ctx, framework, &latest)
-	if !errors.Is(err, errSuiPinnedReadUnsupported) {
-		t.Fatalf("pinned read: %v, want errSuiPinnedReadUnsupported", err)
-	}
-}
-
-// suiLiveReaderChecks runs the transport-neutral part of the probe and returns the latest
-// checkpoint it observed.
-func suiLiveReaderChecks(ctx context.Context, t *testing.T, client SuiReader, exact bool) SuiCheckpoint {
 	latest, err := client.LatestCheckpoint(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -95,20 +49,30 @@ func suiLiveReaderChecks(ctx context.Context, t *testing.T, client SuiReader, ex
 	}
 
 	// The framework package address is a popular airdrop target, so it holds spam coins; whatever
-	// it holds must decode with every coin type normalized.
+	// it holds must decode with every coin type normalized, and the read must report the window
+	// it belongs to.
 	framework, _ := ParseSuiAddress("0x2")
 	held, err := client.Holdings(ctx, framework, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if held.Exact != exact {
-		t.Fatalf("holdings exact = %t, want %t", held.Exact, exact)
+	if held.HistoryUnsupported {
+		t.Fatal("a head read was marked HistoryUnsupported")
 	}
 	if held.HeadBeforeRead > held.Checkpoint.Sequence || held.Checkpoint.Sequence < latest.Sequence {
 		t.Fatalf("holdings window %d..%d is not ordered after the latest checkpoint %d",
 			held.HeadBeforeRead, held.Checkpoint.Sequence, latest.Sequence)
 	}
 	t.Logf("framework address holds %d coin types; window %d..%d", len(held.Balances), held.HeadBeforeRead, held.Checkpoint.Sequence)
+
+	// A pinned read is answered with nothing, by decision, without asking the service.
+	pinned, err := client.Holdings(ctx, framework, &latest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pinned.HistoryUnsupported || len(pinned.Balances) != 0 || pinned.Checkpoint != latest {
+		t.Fatalf("pinned read = %+v, want no balances marked HistoryUnsupported at the pin", pinned)
+	}
 
 	metadata, unusable, err := client.CoinMetadata(ctx, []string{
 		"0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI",
@@ -145,9 +109,8 @@ func suiLiveReaderChecks(ctx context.Context, t *testing.T, client SuiReader, ex
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Logf("%s holds %d coin types in window %d..%d (exact=%t); %d with usable metadata, %d without",
+		t.Logf("%s holds %d coin types in window %d..%d; %d with usable metadata, %d without",
 			owner.Hex(), len(holdings.Balances), holdings.HeadBeforeRead, holdings.Checkpoint.Sequence,
-			holdings.Exact, len(metadata), len(unusable))
+			len(metadata), len(unusable))
 	}
-	return latest
 }

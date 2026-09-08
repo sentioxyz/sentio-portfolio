@@ -83,32 +83,39 @@ avoid counting tokens already read by protocol adapters, so preserve provenance.
 
 ## Sui reads
 
-Sui is read through `SuiReader` (`sui.go`), which two transports implement. Which one a
-deployment uses is a matter of what it runs; what neither may do is blur the pin:
+Sui is read through `SuiReader` (`sui.go`), implemented by `SuiGRPCClient` (`sui_grpc.go`) over
+the `sui.rpc.v2` services a fullnode, or a proxy in front of one, serves. The rules:
 
-- `SuiGraphQLClient` (`sui_graphql.go`) reads holdings at a named checkpoint through
-  `address(atCheckpoint:)`, inside the service's consistent range of about an hour. Its reads are
-  `Exact`. A pinned scan outside the range fails with `errSuiOutsideConsistentRange`; never fall
-  back to reading the head for it.
-- `SuiJSONRPCClient` (`sui_jsonrpc.go`) speaks the JSON-RPC a fullnode or a proxy in front of one
-  serves. `suix_getAllBalances` reads only the head, so a read is bracketed by two head
-  observations and reported as a window: `Exact` is false, `Checkpoint` is the head seen after
-  the read and `HeadBeforeRead` the one seen before. A pinned read is refused with
-  `errSuiPinnedReadUnsupported`. A consumer must surface a head read as such; the rule that a
-  latest amount is never labelled with an earlier `BlockRef` applies here too.
+- The services answer for the head only. A holdings read is bracketed by two head observations
+  (`GetServiceInfo` before, `GetCheckpoint` after) and reported as a window: `Checkpoint` is the
+  head seen after the read and `HeadBeforeRead` the one seen before. A consumer must surface a
+  head read as such; the rule that a latest amount is never labelled with an earlier `BlockRef`
+  applies here too.
+- Sui history is out of scope for now. A pinned read (`Holdings` with a non-nil checkpoint)
+  returns no balances with `HistoryUnsupported` set and makes no round trip; it never reads the
+  head under the pin's name. Present that result as not read, never as nothing held. Neither
+  JSON-RPC nor gRPC can read the past and the GraphQL service's consistent range is about an hour,
+  so there is no transport to fall back to.
 - A checkpoint is the pin: sequence number, 32-byte digest and timestamp fill `BlockRef` as a
-  block does. Both dialers verify the endpoint's chain identifier the way `DialRPC` verifies
-  `eth_chainId`.
-- The chain enumerates holdings itself, so Sui needs no `WalletBalanceProvider`. GraphQL
-  enumeration is paginated to completion and fails past its bound rather than truncating.
+  block does. `GetCheckpoint` is asked with a read mask for those three fields only. The dialer
+  verifies the endpoint's chain identifier (`GetServiceInfo.chain_id`, the base58 genesis digest
+  whose first four bytes are the JSON-RPC spelling) the way `DialRPC` verifies `eth_chainId`.
+- The endpoint's scheme selects transport security: `grpc://` and `http://` are plaintext,
+  `grpcs://`, `https://` and a bare `host:port` are TLS. Anything beyond `host:port` is refused
+  rather than silently ignored.
+- The chain enumerates holdings itself, so Sui needs no `WalletBalanceProvider`. `ListBalances`
+  is paginated to completion and fails past its page bound rather than truncating.
 - Coin types are normalized with `NormalizeMoveType` (zero-padded lowercase addresses, generics
-  joined with a bare comma), the form the GraphQL `repr` and the host's price service both use;
-  JSON-RPC's short addresses and spaced generics normalize to the same string.
-- Coin metadata comes from the chain's `coinMetadata` or not at all: a coin whose metadata is
-  absent or unusable is a reported gap, never a guessed symbol or precision.
-- JSON-RPC error objects are final and never retried: Sui's codes do not reuse the EVM pools'
-  rate-limit codes, and a server that rejects batches answers with one. The client falls back to
-  single calls for that server rather than parse the message.
+  joined with a bare comma), the form the chain's long spelling and the host's price service
+  both use.
+- Coin metadata comes from `GetCoinInfo` or not at all: a coin whose metadata is absent
+  (`NotFound`, or no metadata object) or unusable is a reported gap, never a guessed symbol or
+  precision. There is no batch form, so reads run a few at a time.
+- Statuses about the request (`NotFound`, `InvalidArgument`, `Unauthenticated`, ...) are final;
+  transient ones (`Unavailable`, `ResourceExhausted`, `Aborted`, `DeadlineExceeded`, `Unknown`,
+  `Internal`) are retried with backoff. Errors keep the status code, reachable through
+  `status.Code`, and never the endpoint: transport-level statuses drop their message because grpc
+  spells the dial target out in it.
 
 ## Historical valuation
 

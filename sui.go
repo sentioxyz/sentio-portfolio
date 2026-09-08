@@ -14,15 +14,15 @@ import (
 // Sui differs from the EVM chains in three ways that shape the Sui reader. It has no numbered
 // blocks: the unit of finality is the checkpoint, named by a sequence number and a digest. It has
 // no contract ledgers to poll: the chain itself enumerates what an address holds, per coin type,
-// so holdings need no external discovery provider. And its transports differ in what they can
-// pin: the GraphQL RPC reads holdings at a named checkpoint inside a recent consistent range,
-// while JSON-RPC and gRPC read only the head. SuiReader is the interface both transports
-// implement (sui_graphql.go, sui_jsonrpc.go); this file holds what they share.
+// so holdings need no external discovery provider. And nothing it serves reads holdings at a past
+// checkpoint: the gRPC state service, like JSON-RPC, answers for the head only, and the GraphQL
+// service's consistent range covers about an hour. SuiReader is the interface the gRPC transport
+// implements (sui_grpc.go); this file holds what any Sui transport shares.
 //
 // The reader is deliberately independent of the engine's chain and token model: it speaks in
 // checkpoints, Sui addresses and normalized coin types, leaving the mapping onto BlockRef, Token
-// and Group to the wallet adapter that will consume it. That keeps the Sui transports testable
-// on their own and lets the same shapes serve Sui testnet or IOTA later.
+// and Group to the wallet adapter that will consume it. That keeps the transport testable on its
+// own and lets the same shapes serve Sui testnet or IOTA later.
 
 // SuiMainnetChainIdentifier is how Sui names its mainnet: the first four bytes of the genesis
 // checkpoint digest, in hex. The dialers compare the endpoint's identifier against it the way
@@ -30,17 +30,20 @@ import (
 // answering with another network's balances.
 const SuiMainnetChainIdentifier = "35834a8a"
 
-// SuiReader reads one Sui network. Both transports verify the network at dial time, normalize
-// every coin type they return, and never invent coin metadata.
+// SuiReader reads one Sui network. A transport verifies the network at dial time, normalizes
+// every coin type it returns, and never invents coin metadata.
 type SuiReader interface {
 	// LatestCheckpoint is the newest checkpoint the endpoint serves.
 	LatestCheckpoint(ctx context.Context) (SuiCheckpoint, error)
 	// CheckpointBySequence resolves a checkpoint by sequence number; an unknown one is
 	// errSuiCheckpointUnavailable.
 	CheckpointBySequence(ctx context.Context, sequence uint64) (SuiCheckpoint, error)
-	// Holdings enumerates every coin type owner holds. A nil pin reads the head; a non-nil pin
-	// must be honoured exactly, and a transport that cannot read at a fixed checkpoint returns
-	// errSuiPinnedReadUnsupported rather than reading the head instead.
+	// Holdings enumerates every coin type owner holds at the head when pin is nil. A non-nil pin
+	// asks for the state at a fixed checkpoint, which no Sui transport this kernel speaks can
+	// answer, so the reader returns no balances at all, marked HistoryUnsupported, rather than
+	// the head's balances under the pin's name. Returning nothing is a product decision, Sui
+	// history being out of scope for now; a consumer must present the result as not read, never
+	// as nothing held.
 	Holdings(ctx context.Context, owner SuiAddress, pin *SuiCheckpoint) (SuiHoldings, error)
 	// CoinMetadata reads the on-chain metadata of normalized coin types. The first map holds
 	// every coin whose metadata is usable; the second names each coin whose metadata is absent
@@ -52,32 +55,61 @@ type SuiReader interface {
 
 // SuiHoldings is what an address holds and which chain state that claim is about.
 //
-// A GraphQL read is Exact: every balance is the state at Checkpoint. A JSON-RPC read is not: the
-// balances were read from the head somewhere between two checkpoints the reader observed, and
-// Checkpoint is the later of them, so the balances belong to a state no later than Checkpoint
-// and no earlier than HeadBeforeRead. A consumer must surface that distinction rather than label
-// a head read as the state at a checkpoint.
+// A head read is reported as a window rather than a point: the balances were read from the head
+// somewhere between two checkpoints the reader observed. Checkpoint is the later of them and
+// HeadBeforeRead the earlier, so the balances belong to a state no later than Checkpoint and no
+// earlier than HeadBeforeRead. A consumer must surface that distinction rather than label a head
+// read as the state at a checkpoint.
+//
+// A pinned read carries the pin as Checkpoint and HeadBeforeRead, no balances, and
+// HistoryUnsupported set.
 type SuiHoldings struct {
 	Balances   []SuiCoinBalance
 	Checkpoint SuiCheckpoint
-	Exact      bool
-	// HeadBeforeRead is the head sequence observed before a head read began. It equals
-	// Checkpoint.Sequence when Exact.
+	// HeadBeforeRead is the head sequence observed before a head read began.
 	HeadBeforeRead uint64
+	// HistoryUnsupported marks a pinned read that was answered with no balances because the
+	// transport cannot read the past. Balances is then empty by decision, not observation.
+	HistoryUnsupported bool
 }
 
-var (
-	// errSuiOutsideConsistentRange marks a read scoped to a checkpoint the GraphQL service no
-	// longer holds consistent state for. Balances are only answerable inside a recent window, so
-	// a fixed-checkpoint scan older than that must fail explicitly rather than read the head.
-	errSuiOutsideConsistentRange = errors.New("checkpoint is outside the Sui GraphQL consistent range")
-	// errSuiCheckpointUnavailable marks a checkpoint the endpoint does not know, which for a
-	// sequence number above the head means the scan asked for the future.
-	errSuiCheckpointUnavailable = errors.New("checkpoint is not available")
-	// errSuiPinnedReadUnsupported marks a transport that reads only the head being asked for a
-	// fixed checkpoint. Answering from the head would label one state with another's name.
-	errSuiPinnedReadUnsupported = errors.New("this Sui transport cannot read holdings at a fixed checkpoint")
-)
+// errSuiCheckpointUnavailable marks a checkpoint the endpoint does not know, which for a sequence
+// number above the head means the scan asked for the future.
+var errSuiCheckpointUnavailable = errors.New("checkpoint is not available")
+
+// waitSuiRetry sleeps for a retry backoff, or returns early when ctx ends.
+func waitSuiRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// observeSuiRequest reports one round trip of the Sui transport to the scan's observer under the
+// adapter the context names. Calls report as their gRPC method name, so a host can tell the Sui
+// transport apart from the EVM JSON-RPC methods in its metrics.
+func observeSuiRequest(
+	ctx context.Context,
+	chainID ChainID,
+	method string,
+	attempt int,
+	startedAt time.Time,
+	err error,
+) {
+	scope := scopeFrom(ctx)
+	scope.observer.ObserveRPC(RPCObservation{
+		ChainID:    chainID,
+		ProtocolID: scope.protocolID,
+		Method:     method,
+		Attempt:    attempt + 1,
+		Duration:   time.Since(startedAt),
+		Err:        redactEndpoints(err),
+	})
+}
 
 // SuiAddress is a 32-byte Sui account or object address. Sui renders addresses as 0x-prefixed
 // hex and accepts short forms with leading zeros dropped (0x2 is the framework package), so the
@@ -157,9 +189,10 @@ var movePrimitiveTypes = map[string]struct{}{
 // Every address collapses to the zero-padded lowercase long form, because 0x2 and its padded
 // spelling are one address, while module and struct names stay byte-exact, because Move
 // identifiers are case-sensitive. Generic parameters are re-joined with a bare comma. The result
-// matches the `repr` the Sui GraphQL service returns and the form the host's price service
-// resolves, so one string identifies a coin from the chain through valuation whichever transport
-// read it: JSON-RPC returns short addresses and spaced generics, and both normalize to the same.
+// is the long spelling the gRPC service returns, the `repr` the GraphQL service returns, and the
+// form the host's price service resolves, so one string identifies a coin from the chain through
+// valuation whichever spelling reached the kernel: JSON-RPC's short addresses and spaced generics
+// normalize to the same string.
 func NormalizeMoveType(value string) (string, error) {
 	parser := &moveTypeParser{input: strings.TrimSpace(value)}
 	if parser.input == "" {
@@ -361,8 +394,8 @@ func decodeBase58(value string) ([]byte, error) {
 }
 
 // suiChainIdentifierHex accepts both spellings of a Sui chain identifier: the eight-hex-digit
-// form JSON-RPC uses, and the base58 genesis digest GraphQL returns, whose first four bytes are
-// that same identifier.
+// form JSON-RPC uses, and the base58 genesis digest gRPC and GraphQL return, whose first four
+// bytes are that same identifier.
 func suiChainIdentifierHex(value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -403,7 +436,7 @@ type SuiCheckpoint struct {
 	Timestamp time.Time
 }
 
-// newSuiCheckpoint assembles a checkpoint from the wire spellings both transports share: a
+// newSuiCheckpoint assembles a checkpoint from the wire spellings every Sui transport shares: a
 // base58 digest and a timestamp.
 func newSuiCheckpoint(sequence uint64, digest string, timestamp time.Time) (SuiCheckpoint, error) {
 	decoded, err := decodeBase58(digest)
@@ -446,9 +479,9 @@ type SuiCoinMetadata struct {
 	Decimals uint8
 }
 
-// suiCoinMetadataFrom validates one coin's metadata as either transport returns it. A nil
-// decimals or symbol is a declaration the chain did not make, and an out-of-range precision or an
-// unusable symbol is one the kernel will not use.
+// suiCoinMetadataFrom validates one coin's metadata as the chain returns it. A nil decimals or
+// symbol is a declaration the chain did not make, and an out-of-range precision or an unusable
+// symbol is one the kernel will not use.
 func suiCoinMetadataFrom(coinType string, decimals *int, symbol *string, name string) (SuiCoinMetadata, error) {
 	if decimals == nil {
 		return SuiCoinMetadata{}, errors.New("coin metadata declares no decimals")
@@ -471,14 +504,15 @@ func suiCoinMetadataFrom(coinType string, decimals *int, symbol *string, name st
 	}, nil
 }
 
-// suiBalanceRow is one balance as either transport spells it before normalization.
+// suiBalanceRow is one balance as the transport spells it before normalization.
 type suiBalanceRow struct {
 	coinType string
-	amount   string
+	amount   *big.Int
 }
 
 // suiBalancesFrom normalizes one enumeration of an address's balances: every coin type
-// canonical, no coin type twice, no malformed amount, zero rows dropped, sorted by coin type.
+// canonical, no coin type twice, no missing or negative amount, zero rows dropped, sorted by coin
+// type.
 func suiBalancesFrom(rows []suiBalanceRow) ([]SuiCoinBalance, error) {
 	balances := make([]SuiCoinBalance, 0, len(rows))
 	seen := make(map[string]struct{}, len(rows))
@@ -491,31 +525,17 @@ func suiBalancesFrom(rows []suiBalanceRow) ([]SuiCoinBalance, error) {
 			return nil, fmt.Errorf("Sui endpoint returned coin type %s twice", coinType)
 		}
 		seen[coinType] = struct{}{}
-		amount, err := parseSuiAmount(row.amount)
-		if err != nil {
-			return nil, fmt.Errorf("coin type %s balance: %w", coinType, err)
+		if row.amount == nil {
+			return nil, fmt.Errorf("coin type %s balance is missing", coinType)
 		}
-		if amount.Sign() == 0 {
+		if row.amount.Sign() < 0 {
+			return nil, fmt.Errorf("coin type %s balance %s is negative", coinType, row.amount)
+		}
+		if row.amount.Sign() == 0 {
 			continue
 		}
-		balances = append(balances, SuiCoinBalance{CoinType: coinType, Amount: amount})
+		balances = append(balances, SuiCoinBalance{CoinType: coinType, Amount: new(big.Int).Set(row.amount)})
 	}
 	sortSuiBalances(balances)
 	return balances, nil
-}
-
-func parseSuiAmount(raw string) (*big.Int, error) {
-	if raw == "" {
-		return nil, errors.New("empty amount")
-	}
-	for _, character := range raw {
-		if character < '0' || character > '9' {
-			return nil, fmt.Errorf("invalid amount %q", raw)
-		}
-	}
-	amount, ok := new(big.Int).SetString(raw, 10)
-	if !ok {
-		return nil, fmt.Errorf("invalid amount %q", raw)
-	}
-	return amount, nil
 }
