@@ -2,6 +2,7 @@ package portfolio
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -138,15 +139,27 @@ func TestChainStatusesAcceptsPinnedPendingVersion(t *testing.T) {
 }
 
 // newTestSentioAPIClient builds a client on the production transport, trusting the test server's
-// certificate, so these tests exercise the transport the indexers actually use.
+// certificate, so these tests exercise the transport the indexers actually use. Only the root
+// pool is borrowed from the test server: replacing the whole TLS config would drop the ALPN
+// advertisement the transport depends on, and hide exactly the failure the tests must catch.
 func newTestSentioAPIClient(server *httptest.Server, timeout time.Duration) *sentioAPIClient {
 	transport := newSentioTransport()
-	transport.TLSClientConfig = server.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+	transport.TLSClientConfig.RootCAs = server.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
 	return &sentioAPIClient{
 		apiKey:     "test-key",
 		httpClient: &http.Client{Timeout: timeout, Transport: transport},
 		statuses:   make(map[string]sentioStatusCache),
 	}
+}
+
+// startEdgeLikeTLS starts the test server the way the indexer's edge is configured: HTTP/2
+// preferred, HTTP/1.1 offered. httptest's own HTTP/2 mode lists only h2, and Go's TLS server then
+// lets an http/1.1-only client through as if it had sent no ALPN at all, which would hide a client
+// that stopped advertising its protocol.
+func startEdgeLikeTLS(server *httptest.Server) {
+	server.TLS = &tls.Config{NextProtos: []string{"h2", "http/1.1"}}
+	server.EnableHTTP2 = true
+	server.StartTLS()
 }
 
 // TestSentioAPIRetryAbandonsStalledConnection has the first connection the server accepts stall
@@ -170,6 +183,9 @@ func TestSentioAPIRetryAbandonsStalledConnection(t *testing.T) {
 				if request.ProtoMajor != 1 {
 					t.Errorf("request protocol = %s, want HTTP/1.1", request.Proto)
 				}
+				if request.TLS.NegotiatedProtocol != "http/1.1" {
+					t.Errorf("negotiated ALPN protocol = %q, want http/1.1 advertised explicitly", request.TLS.NegotiatedProtocol)
+				}
 				mutex.Lock()
 				requestCount++
 				if stalledConnection == "" {
@@ -189,8 +205,7 @@ func TestSentioAPIRetryAbandonsStalledConnection(t *testing.T) {
 				writer.Header().Set("content-type", "application/json")
 				_ = json.NewEncoder(writer).Encode(map[string]bool{"ok": true})
 			}))
-			server.EnableHTTP2 = true
-			server.StartTLS()
+			startEdgeLikeTLS(server)
 			t.Cleanup(server.Close)
 
 			client := newTestSentioAPIClient(server, 25*time.Millisecond)
@@ -238,8 +253,7 @@ func TestSentioAPIRequestsOverlap(t *testing.T) {
 		writer.Header().Set("content-type", "application/json")
 		_ = json.NewEncoder(writer).Encode(map[string]bool{"ok": true})
 	}))
-	server.EnableHTTP2 = true
-	server.StartTLS()
+	startEdgeLikeTLS(server)
 	t.Cleanup(server.Close)
 
 	client := newTestSentioAPIClient(server, 2*time.Second)

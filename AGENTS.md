@@ -24,7 +24,8 @@ by `EngineConfig.IndexerConcurrency`: the adapters share one API key, so admissi
 per engine, not per protocol. Do not add a second lock or a per-adapter limiter in front of it.
 
 `sentioAPIClient` keeps one `http.Client` that is never replaced and never locked, on a transport
-restricted to HTTP/1.1 (`newSentioTransport`). One connection per in-flight request means a stalled
+restricted to HTTP/1.1 and offering only http/1.1 through ALPN (`newSentioTransport`; a clone of the
+default transport still offers h2, and the edge would take it). One connection per in-flight request means a stalled
 request stalls only itself, and net/http closes a connection whose request timed out rather than
 returning it to the pool, so a retry never lands on it. Do not enable HTTP/2 on that transport
 and do not put a mutex or a client rotation around the request: multiplexing puts every chain of a

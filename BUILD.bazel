@@ -126,6 +126,7 @@ go_test(
         "sentio_lane_test.go",
         "sentio_presence_test.go",
         "sentio_test.go",
+        "sentio_transport_live_test.go",
         "sky_test.go",
         "stader_test.go",
         "stakewise_test.go",

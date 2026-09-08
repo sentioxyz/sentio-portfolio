@@ -3,6 +3,7 @@ package portfolio
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -88,10 +89,17 @@ func newSentioAPIClient() *sentioAPIClient {
 // a stalled request stalls only itself, and net/http closes a connection whose request timed out
 // instead of returning it to the pool, so a retry never lands on it, with no code here to make
 // it so.
+//
+// The TLS config must be replaced, not inherited. Cloning the default transport first runs its
+// HTTP/2 setup, which leaves "h2" in the cloned TLSClientConfig.NextProtos, and restricting
+// Protocols does not strip it: the client would still offer h2 through ALPN, the edge would take
+// it, and the HTTP/1.1 client would read the HTTP/2 frames as a malformed response. Offering only
+// http/1.1 is what makes the edge speak it.
 func newSentioTransport() *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Protocols = new(http.Protocols)
 	transport.Protocols.SetHTTP1(true)
+	transport.TLSClientConfig = &tls.Config{NextProtos: []string{"http/1.1"}}
 	transport.MaxIdleConnsPerHost = sentioIdleConnsPerHost
 	return transport
 }
