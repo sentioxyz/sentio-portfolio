@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -136,7 +137,24 @@ func TestChainStatusesAcceptsPinnedPendingVersion(t *testing.T) {
 	}
 }
 
-func TestSentioAPIRetryDropsPoisonedHTTP2Connection(t *testing.T) {
+// newTestSentioAPIClient builds a client on the production transport, trusting the test server's
+// certificate, so these tests exercise the transport the indexers actually use.
+func newTestSentioAPIClient(server *httptest.Server, timeout time.Duration) *sentioAPIClient {
+	transport := newSentioTransport()
+	transport.TLSClientConfig = server.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+	return &sentioAPIClient{
+		apiKey:     "test-key",
+		httpClient: &http.Client{Timeout: timeout, Transport: transport},
+		statuses:   make(map[string]sentioStatusCache),
+	}
+}
+
+// TestSentioAPIRetryAbandonsStalledConnection has the first connection the server accepts stall
+// every request forever, before the headers or mid-body. The client must time the request out,
+// leave that connection behind and succeed on a fresh one. It must also do so over HTTP/1.1
+// although the server offers HTTP/2: on a multiplexed connection the stall would have held up the
+// protocol's other requests, and the timed-out connection would have stayed in the pool.
+func TestSentioAPIRetryAbandonsStalledConnection(t *testing.T) {
 	for _, test := range []struct {
 		name              string
 		stallAfterHeaders bool
@@ -146,20 +164,20 @@ func TestSentioAPIRetryDropsPoisonedHTTP2Connection(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var mutex sync.Mutex
-			poisonedConnection := ""
+			stalledConnection := ""
 			requestCount := 0
 			server := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-				if request.ProtoMajor != 2 {
-					t.Errorf("request protocol = %s, want HTTP/2", request.Proto)
+				if request.ProtoMajor != 1 {
+					t.Errorf("request protocol = %s, want HTTP/1.1", request.Proto)
 				}
 				mutex.Lock()
 				requestCount++
-				if poisonedConnection == "" {
-					poisonedConnection = request.RemoteAddr
+				if stalledConnection == "" {
+					stalledConnection = request.RemoteAddr
 				}
-				poisoned := request.RemoteAddr == poisonedConnection
+				stalled := request.RemoteAddr == stalledConnection
 				mutex.Unlock()
-				if poisoned {
+				if stalled {
 					if test.stallAfterHeaders {
 						writer.Header().Set("content-type", "application/json")
 						writer.WriteHeader(http.StatusOK)
@@ -175,12 +193,7 @@ func TestSentioAPIRetryDropsPoisonedHTTP2Connection(t *testing.T) {
 			server.StartTLS()
 			t.Cleanup(server.Close)
 
-			httpClient := server.Client()
-			httpClient.Timeout = 25 * time.Millisecond
-			client := &sentioAPIClient{
-				apiKey: "test-key", httpClient: httpClient,
-				statuses: make(map[string]sentioStatusCache),
-			}
+			client := newTestSentioAPIClient(server, 25*time.Millisecond)
 			var response struct {
 				OK bool `json:"ok"`
 			}
@@ -195,7 +208,7 @@ func TestSentioAPIRetryDropsPoisonedHTTP2Connection(t *testing.T) {
 				t.Fatal(err)
 			}
 			if !response.OK {
-				t.Fatal("subsequent request did not retain the healthy transport")
+				t.Fatal("subsequent request did not decode")
 			}
 			mutex.Lock()
 			defer mutex.Unlock()
@@ -203,5 +216,52 @@ func TestSentioAPIRetryDropsPoisonedHTTP2Connection(t *testing.T) {
 				t.Fatalf("request count = %d, want 3", requestCount)
 			}
 		})
+	}
+}
+
+// TestSentioAPIRequestsOverlap proves one client serves concurrent requests concurrently. The
+// server holds the first request until the second has arrived, which can only happen while both
+// are in flight; a client that serialized its requests would time the first one out, retry, and
+// show up at the server three times instead of two.
+func TestSentioAPIRequestsOverlap(t *testing.T) {
+	var arrivals atomic.Int32
+	release := make(chan struct{})
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if arrivals.Add(1) == 2 {
+			close(release)
+		}
+		select {
+		case <-release:
+		case <-request.Context().Done():
+			return
+		}
+		writer.Header().Set("content-type", "application/json")
+		_ = json.NewEncoder(writer).Encode(map[string]bool{"ok": true})
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	t.Cleanup(server.Close)
+
+	client := newTestSentioAPIClient(server, 2*time.Second)
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			var response struct {
+				OK bool `json:"ok"`
+			}
+			err := client.doJSON(context.Background(), http.MethodGet, server.URL, nil, &response)
+			if err == nil && !response.OK {
+				err = fmt.Errorf("response did not decode")
+			}
+			results <- err
+		}()
+	}
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatalf("concurrent request failed: %v", err)
+		}
+	}
+	if got := arrivals.Load(); got != 2 {
+		t.Fatalf("server saw %d requests, want 2", got)
 	}
 }

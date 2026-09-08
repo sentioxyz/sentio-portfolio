@@ -17,6 +17,12 @@ import (
 const (
 	sentioRetryInitial   = 300 * time.Millisecond
 	sentioStatusCacheTTL = 30 * time.Second
+
+	// sentioIdleConnsPerHost is how many idle connections to the indexer one client keeps warm.
+	// The scan workers and the presence prefetcher put at most a handful of requests in flight
+	// per protocol; keeping that many connections avoids a TLS handshake per request once the
+	// pool has filled.
+	sentioIdleConnsPerHost = 8
 )
 
 // SentioIndexerConfig is supplied by the host at runtime. Endpoint values may
@@ -53,9 +59,11 @@ type sentioStatusCache struct {
 }
 
 type sentioAPIClient struct {
-	apiKey     string
+	apiKey string
+	// httpClient is shared by every request and never replaced. Its transport speaks HTTP/1.1
+	// only (see newSentioTransport), so requests from the scan workers run concurrently, each on
+	// its own connection, with nothing in front of them but the indexer lane.
 	httpClient *http.Client
-	httpMu     sync.Mutex
 	statusMu   sync.Mutex
 	statuses   map[string]sentioStatusCache
 }
@@ -65,29 +73,27 @@ func newSentioAPIClient() *sentioAPIClient {
 	if apiKey == "" {
 		apiKey = os.Getenv("NEXT_PUBLIC_SENTIO_API_KEY")
 	}
-	httpClient := &http.Client{Timeout: 25 * time.Second}
-	if transport, ok := http.DefaultTransport.(*http.Transport); ok {
-		httpClient.Transport = transport.Clone()
-	}
 	return &sentioAPIClient{
-		apiKey: apiKey, httpClient: httpClient,
-		statuses: make(map[string]sentioStatusCache),
+		apiKey:     apiKey,
+		httpClient: &http.Client{Timeout: 25 * time.Second, Transport: newSentioTransport()},
+		statuses:   make(map[string]sentioStatusCache),
 	}
 }
 
-func freshSentioHTTPClient(client *http.Client) *http.Client {
-	client.CloseIdleConnections()
-	transport := client.Transport
-	if transport == nil {
-		transport = http.DefaultTransport
-	}
-	httpTransport, ok := transport.(*http.Transport)
-	if !ok {
-		return client
-	}
-	fresh := *client
-	fresh.Transport = httpTransport.Clone()
-	return &fresh
+// newSentioTransport clones the default transport restricted to HTTP/1.1. Over HTTP/2 every
+// request of a protocol is multiplexed onto one connection: a connection whose peer has gone
+// silent stalls every stream on it, and once the client times one out the connection stays in
+// the pool for the retry to land on again. Recovering from that took a client rotation behind a
+// mutex, which serialized every chain of the protocol. With one connection per in-flight request
+// a stalled request stalls only itself, and net/http closes a connection whose request timed out
+// instead of returning it to the pool, so a retry never lands on it, with no code here to make
+// it so.
+func newSentioTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Protocols = new(http.Protocols)
+	transport.Protocols.SetHTTP1(true)
+	transport.MaxIdleConnsPerHost = sentioIdleConnsPerHost
+	return transport
 }
 
 func (c *sentioAPIClient) doJSON(
@@ -100,10 +106,7 @@ func (c *sentioAPIClient) doJSON(
 	if c.apiKey == "" {
 		return fmt.Errorf("Sentio API key is not configured")
 	}
-	c.httpMu.Lock()
-	defer c.httpMu.Unlock()
 	var last error
-	httpClient := c.httpClient
 	for attempt := 0; attempt < 3; attempt++ {
 		var reader io.Reader
 		if body != nil {
@@ -124,14 +127,12 @@ func (c *sentioAPIClient) doJSON(
 			request.Header.Set("content-type", "application/json")
 		}
 		startedAt := time.Now()
-		response, err := httpClient.Do(request)
-		transportFailed := err != nil
+		response, err := c.httpClient.Do(request)
 		if err == nil {
 			payload, readErr := io.ReadAll(io.LimitReader(response.Body, 4<<20))
 			response.Body.Close()
 			if readErr != nil {
 				err = readErr
-				transportFailed = true
 			} else if response.StatusCode != http.StatusOK {
 				err = fmt.Errorf(
 					"HTTP %d: %s",
@@ -151,13 +152,6 @@ func (c *sentioAPIClient) doJSON(
 			}
 		}
 		observeIndexerRequest(ctx, method, attempt, startedAt, err)
-		if transportFailed {
-			// A canceled HTTP/2 stream can leave its underlying connection alive but
-			// unable to serve subsequent streams. Retrying on that same connection
-			// only repeats the timeout, so force the next attempt onto a fresh one.
-			httpClient = freshSentioHTTPClient(httpClient)
-			c.httpClient = httpClient
-		}
 		last = err
 		if attempt < 2 {
 			timer := time.NewTimer(sentioRetryInitial << attempt)
