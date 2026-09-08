@@ -81,6 +81,27 @@ The provider is not the price source. `PriceProvider` alone supplies valuation.
 `suppressDuplicateHoldings` uses `Source.Contract` and the attributed account to
 avoid counting tokens already read by protocol adapters, so preserve provenance.
 
+## Sui reads
+
+Sui is read through its GraphQL RPC (`sui.go`), never through JSON-RPC:
+
+- `suix_getAllBalances` answers only for the head, so a balance read that way can never be
+  attributed to the checkpoint a scan pinned, and Mysten has withdrawn JSON-RPC from their
+  public fullnodes. GraphQL's `address(atCheckpoint:)` reads holdings at the pinned checkpoint,
+  which is the same settled-block contract the EVM chains keep.
+- A checkpoint is the pin: sequence number, 32-byte digest and timestamp fill `BlockRef` as a
+  block does. `DialSui` verifies the endpoint's chain identifier the way `DialRPC` verifies
+  `eth_chainId`.
+- Balances are answerable only inside the service's consistent range, about an hour of
+  checkpoints. A pinned scan outside it fails with `errSuiOutsideConsistentRange`; never fall
+  back to reading the head for it.
+- The chain enumerates holdings itself, so Sui needs no `WalletBalanceProvider`. Enumeration is
+  paginated to completion and fails past its bound rather than truncating.
+- Coin types are normalized with `NormalizeMoveType` (zero-padded lowercase addresses, generics
+  joined with a bare comma), the form the GraphQL `repr` and the host's price service both use.
+- Coin metadata comes from the chain's `coinMetadata` or not at all: a coin whose metadata is
+  absent or unusable is a reported gap, never a guessed symbol or precision.
+
 ## Historical valuation
 
 A scan pinned to fixed blocks holds what the account had then, so the engine
