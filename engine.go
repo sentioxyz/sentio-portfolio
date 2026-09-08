@@ -152,6 +152,50 @@ func NewEngineWithConfig(
 	}
 }
 
+// prefetchPresence starts, for every adapter that can answer it in one request, the question of
+// which chains hold anything for each scanned account. The probes run in the background while the
+// workers get through the adapters that need no indexer, so the index-backed adapters — which
+// come late in the adapter order — find their verdicts waiting.
+func (e *Engine) prefetchPresence(
+	ctx context.Context,
+	options ScanOptions,
+	chains map[ChainID]*chainScan,
+) {
+	if len(chains) < presenceMinChains {
+		return
+	}
+	accounts := make([]common.Address, 0, 1)
+	seen := make(map[common.Address]struct{})
+	for _, chainID := range SupportedChainIDs {
+		chain := chains[chainID]
+		if chain == nil {
+			continue
+		}
+		for _, account := range chain.accounts {
+			if _, exists := seen[account.Address]; exists {
+				continue
+			}
+			seen[account.Address] = struct{}{}
+			accounts = append(accounts, account.Address)
+		}
+	}
+	for _, adapter := range e.adapters {
+		info := adapter.Info()
+		if !options.includesProtocol(info.ID) {
+			continue
+		}
+		prefetcher, ok := adapter.(presencePrefetcher)
+		if !ok {
+			continue
+		}
+		// The probe's requests report under the protocol they serve; a chain of zero says "all".
+		prefetchCtx := withDeployment(ctx, info.ID, 0)
+		for _, account := range accounts {
+			prefetcher.prefetchPresence(prefetchCtx, account)
+		}
+	}
+}
+
 func (e *Engine) Protocols() []ProtocolInfo {
 	result := make([]ProtocolInfo, 0, len(e.adapters))
 	for _, adapter := range e.adapters {
@@ -293,6 +337,7 @@ func (e *Engine) ScanWithOptions(
 		pinned[chainID] = chain.block
 	}
 	ctx = withPinnedBlocks(ctx, pinned)
+	e.prefetchPresence(ctx, options, chains)
 	if options.includesProtocol(walletProtocolID) {
 		discoveryStartedAt := time.Now()
 		configureWalletBalances(ctx, e.walletBalanceProvider, address, chains)

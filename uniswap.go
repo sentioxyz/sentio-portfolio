@@ -216,6 +216,14 @@ type UniswapV4Adapter struct {
 	indexer *uniswapIndexer
 }
 
+func (a *UniswapV3Adapter) prefetchPresence(ctx context.Context, account common.Address) {
+	a.indexer.prefetchPresence(ctx, uniswapV3, account)
+}
+
+func (a *UniswapV4Adapter) prefetchPresence(ctx context.Context, account common.Address) {
+	a.indexer.prefetchPresence(ctx, uniswapV4, account)
+}
+
 func newUniswapAdapters(
 	v3Config SentioIndexerConfig,
 	v4Config SentioIndexerConfig,

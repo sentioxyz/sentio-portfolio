@@ -96,7 +96,7 @@ func TestScanMemoComputesOnce(t *testing.T) {
 		wait.Add(1)
 		go func(index int) {
 			defer wait.Done()
-			results[index] = memo.once("key", func() any {
+			results[index] = memo.once(context.Background(), "key", func() any {
 				computed.Add(1)
 				time.Sleep(5 * time.Millisecond)
 				return 42
@@ -112,11 +112,11 @@ func TestScanMemoComputesOnce(t *testing.T) {
 			t.Fatalf("caller %d got %v, want 42", index, result)
 		}
 	}
-	if memo.once("other", func() any { return "fresh" }) != "fresh" {
+	if memo.once(context.Background(), "other", func() any { return "fresh" }) != "fresh" {
 		t.Fatalf("a different key reused a cached value")
 	}
 	var nilMemo *scanMemo
-	if nilMemo.once("key", func() any { return "computed" }) != "computed" {
+	if nilMemo.once(context.Background(), "key", func() any { return "computed" }) != "computed" {
 		t.Fatalf("a nil memo must compute every time")
 	}
 }
@@ -190,4 +190,42 @@ func TestPendleMarketLookupWaitsForTheLane(t *testing.T) {
 		t.Fatal(err)
 	}
 	unlockSentioLane(holder)
+}
+
+func TestScanMemoStartComputesInTheBackground(t *testing.T) {
+	memo := newScanMemo()
+	release := make(chan struct{})
+	var computed atomic.Int32
+	memo.start("key", func() any {
+		computed.Add(1)
+		<-release
+		return "prefetched"
+	})
+	memo.start("key", func() any {
+		computed.Add(1)
+		return "duplicate"
+	})
+	waited := make(chan any, 1)
+	go func() {
+		waited <- memo.once(context.Background(), "key", func() any { computed.Add(1); return "recomputed" })
+	}()
+	select {
+	case value := <-waited:
+		t.Fatalf("once returned %v before the background computation finished", value)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case value := <-waited:
+		if value != "prefetched" {
+			t.Fatalf("once returned %v, want the prefetched value", value)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("once did not return after the background computation finished")
+	}
+	if computed.Load() != 1 {
+		t.Fatalf("compute ran %d times, want once", computed.Load())
+	}
+	var nilMemo *scanMemo
+	nilMemo.start("key", func() any { t.Fatalf("a nil memo must not start anything"); return nil })
 }

@@ -465,6 +465,10 @@ func (i *pendleIndexer) presenceProbe(account common.Address) presenceProbe {
 	}
 }
 
+func (i *pendleIndexer) prefetchPresence(ctx context.Context, account common.Address) {
+	i.api.prefetchPresence(ctx, i.presenceProbe(account), strings.ToLower(account.Hex()))
+}
+
 func (i *pendleIndexer) indexedRefs(
 	ctx context.Context,
 	block BlockRef,
@@ -496,8 +500,9 @@ func (i *pendleIndexer) indexedRefs(
 		)
 	}
 	queryBlock := min(block.Number, status.ProcessedBlock)
-	if _, empty := i.api.chainProvenEmpty(ctx, i.presenceProbe(account), block, strings.ToLower(account.Hex()), statuses); empty {
-		return pendleIndexedSnapshot{Block: queryBlock, Refs: make([]pendlePositionRef, 0)}, nil
+	if proof, empty := i.api.chainProvenEmpty(ctx, i.presenceProbe(account), block, strings.ToLower(account.Hex()), statuses); empty {
+		// The proof may predate this status read; the RPC tail then starts where it holds.
+		return pendleIndexedSnapshot{Block: proof.QueryBlock, Refs: make([]pendlePositionRef, 0)}, nil
 	}
 	after := pendleRefRowPrefix(block.ChainID, account)
 	tokens := make([]common.Address, 0)
@@ -812,6 +817,7 @@ func (i *pendleIndexer) PositionRefs(
 		return nil, fmt.Errorf("Pendle is not configured on chain %d", block.ChainID)
 	}
 	indexed, err := func() (pendleIndexedSnapshot, error) {
+		i.api.awaitPresence(ctx, i.presenceProbe(account), strings.ToLower(account.Hex()))
 		if err := lockSentioLane(ctx); err != nil {
 			return pendleIndexedSnapshot{}, err
 		}

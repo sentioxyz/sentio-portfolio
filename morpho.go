@@ -196,6 +196,14 @@ func newMorphoAdapter(config SentioIndexerConfig) *MorphoAdapter {
 	return newMorphoAdapterWithIndexer(newMorphoIndexer(config))
 }
 
+// prefetchPresence lets the scan ask every Morpho chain at once whether account holds anything,
+// before any worker reaches a Morpho chain.
+func (a *MorphoAdapter) prefetchPresence(ctx context.Context, account common.Address) {
+	if prefetcher, ok := a.indexer.(presencePrefetcher); ok {
+		prefetcher.prefetchPresence(ctx, account)
+	}
+}
+
 func newMorphoAdapterWithIndexer(indexer morphoPositionIndexer) *MorphoAdapter {
 	return &MorphoAdapter{
 		adapterBase: adapterBase{info: ProtocolInfo{

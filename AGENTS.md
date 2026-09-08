@@ -31,6 +31,14 @@ validation, same where clause or a superset of it — and the RPC tail after the
 must keep running for skipped chains. Refs are deleted when positions close, so never decide
 presence from the latest state of the index.
 
+The probe costs one request that the GraphQL server executes alias by alias, so it is slower
+than a single-chain page. The engine therefore runs it ahead of the workers
+(`presencePrefetcher`, started right after chain setup) rather than on the first chain job; an
+adapter that adds a probe must implement `prefetchPresence` so its cost stays off the critical
+path. A proof established at an earlier indexed block still holds — the chain job reports that
+block as its indexed block so the RPC tail starts there — except for an indexer with no RPC
+tail, which may only use a proof at the very block it would query.
+
 ## Wallet holdings
 
 A host-injected `WalletBalanceProvider` is the only ERC-20 discovery source for

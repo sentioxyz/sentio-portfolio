@@ -325,6 +325,14 @@ func newPendleAdapter(config SentioIndexerConfig) Adapter {
 	return newPendleAdapterWithIndexer(newPendleIndexer(config))
 }
 
+// prefetchPresence lets the scan ask every Pendle chain at once whether account holds anything,
+// before any worker reaches a Pendle chain.
+func (a *PendleAdapter) prefetchPresence(ctx context.Context, account common.Address) {
+	if prefetcher, ok := a.indexer.(presencePrefetcher); ok {
+		prefetcher.prefetchPresence(ctx, account)
+	}
+}
+
 func newPendleAdapterWithIndexer(indexer pendlePositionIndexer) *PendleAdapter {
 	return &PendleAdapter{
 		adapterBase: adapterBase{info: ProtocolInfo{

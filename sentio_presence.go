@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 // presenceMinChains is how many chains an indexer must be scanning before the probe pays for
@@ -46,38 +48,115 @@ type presenceProbe struct {
 	backfillMaxLag time.Duration
 }
 
-// presenceResult is the probe's verdict: for every chain proven to hold no rows for the account,
-// the checkpoint block the indexer reported at that chain's query block.
+// presenceProof is what the probe established for one chain: no rows for the account as of
+// QueryBlock, whose checkpoint the indexer reported as Checkpoint.
+type presenceProof struct {
+	QueryBlock uint64
+	Checkpoint uint64
+}
+
+// presenceResult is the probe's verdict: a proof for every chain shown to hold nothing.
 type presenceResult struct {
-	emptyCheckpoints map[ChainID]uint64
+	proofs map[ChainID]presenceProof
+}
+
+// presencePrefetcher is implemented by adapters whose indexer can answer, in one request, which
+// chains hold anything for an account. The engine calls it as the protocol phase starts, so the
+// probe runs while the workers are still on adapters that need no indexer at all.
+type presencePrefetcher interface {
+	prefetchPresence(ctx context.Context, account common.Address)
+}
+
+func presenceKey(probe presenceProbe, account string) string {
+	return probe.name + "@" + probe.config.GraphQLURL + "@" + account
 }
 
 // chainProvenEmpty reports whether the probe proved that the per-chain query for block would
-// return no rows, and the checkpoint block that query would have seen. It reports false whenever
-// there is nothing to prove it with — no scan scope, too few chains, a failed probe — so the
-// caller always has the full per-chain flow to fall back on. account keys the memo: a scan asks
-// about its root address and each attributed account separately.
+// return no rows, and hands back the proof: the block the emptiness holds at and the checkpoint
+// that query would have seen. It reports false whenever there is nothing to prove it with — no
+// scan scope, too few chains, a failed probe — so the caller always has the full per-chain flow
+// to fall back on. account keys the memo: a scan asks about its root address and each attributed
+// account separately.
+//
+// A proof established at an earlier query block still holds, because emptiness at a block is a
+// fact about that block. The caller must then treat proof.QueryBlock as its indexed block, so the
+// RPC tail covers everything after it. A proof from a later block than the caller would query is
+// not one it can use.
 func (c *sentioAPIClient) chainProvenEmpty(
 	ctx context.Context,
 	probe presenceProbe,
 	block BlockRef,
 	account string,
 	statuses map[ChainID]sentioChainStatus,
-) (uint64, bool) {
+) (presenceProof, bool) {
 	scope := scopeFrom(ctx)
 	if scope.memo == nil || len(scope.pinned) == 0 {
-		return 0, false
+		return presenceProof{}, false
 	}
-	targets := presenceTargets(probe, scope.pinned, statuses)
-	if len(targets) < presenceMinChains {
-		return 0, false
-	}
-	key := probe.name + "@" + probe.config.GraphQLURL + "@" + account
-	result, _ := scope.memo.once(key, func() any {
-		return c.runPresenceProbe(ctx, probe, targets, account)
+	result, _ := scope.memo.once(ctx, presenceKey(probe, account), func() any {
+		return c.presence(ctx, probe, scope.pinned, statuses, account)
 	}).(presenceResult)
-	checkpoint, empty := result.emptyCheckpoints[block.ChainID]
-	return checkpoint, empty
+	proof, proven := result.proofs[block.ChainID]
+	if !proven || proof.QueryBlock > min(block.Number, statuses[block.ChainID].ProcessedBlock) {
+		return presenceProof{}, false
+	}
+	return proof, true
+}
+
+// awaitPresence waits for a prefetched probe to finish. Callers invoke it before taking a lane
+// slot: the probe needs a slot of its own, so a chain job that held one while waiting on the probe
+// could starve it — and with a lane of one, deadlock the scan.
+func (c *sentioAPIClient) awaitPresence(ctx context.Context, probe presenceProbe, account string) {
+	scope := scopeFrom(ctx)
+	if scope.memo == nil {
+		return
+	}
+	scope.memo.await(ctx, presenceKey(probe, account))
+}
+
+// prefetchPresence starts the probe for account in the background, taking a prefetch slot and
+// then a lane slot, so that by the time a worker reaches the indexer's first chain the verdict is
+// ready or nearly so. It is a no-op outside a scan and when the probe was already started.
+func (c *sentioAPIClient) prefetchPresence(ctx context.Context, probe presenceProbe, account string) {
+	scope := scopeFrom(ctx)
+	if scope.memo == nil || len(scope.pinned) == 0 {
+		return
+	}
+	scope.memo.start(presenceKey(probe, account), func() any {
+		if scope.prefetchSlots != nil {
+			select {
+			case scope.prefetchSlots <- struct{}{}:
+				defer func() { <-scope.prefetchSlots }()
+			case <-ctx.Done():
+				return presenceResult{}
+			}
+		}
+		if err := lockSentioLane(ctx); err != nil {
+			return presenceResult{}
+		}
+		defer unlockSentioLane(ctx)
+		statuses, err := c.chainStatuses(ctx, probe.config, nil, false)
+		if err != nil {
+			return presenceResult{}
+		}
+		return c.presence(ctx, probe, scope.pinned, statuses, account)
+	})
+}
+
+// presence decides which chains are worth probing and runs the probe. It expects the caller to
+// hold a lane slot.
+func (c *sentioAPIClient) presence(
+	ctx context.Context,
+	probe presenceProbe,
+	pinned map[ChainID]BlockRef,
+	statuses map[ChainID]sentioChainStatus,
+	account string,
+) presenceResult {
+	targets := presenceTargets(probe, pinned, statuses)
+	if len(targets) < presenceMinChains {
+		return presenceResult{}
+	}
+	return c.runPresenceProbe(ctx, probe, targets, account)
 }
 
 // presenceTarget is one chain the probe asks about, at the block the per-chain query would use.
@@ -170,13 +249,13 @@ func (c *sentioAPIClient) runPresenceProbe(
 	if err != nil || len(payload.Errors) > 0 {
 		return presenceResult{}
 	}
-	empty := make(map[ChainID]uint64, len(targets))
+	proofs := make(map[ChainID]presenceProof, len(targets))
 	for chainID, target := range targets {
 		if checkpoint, proven := presenceChainEmpty(probe, payload.Data, chainID, target); proven {
-			empty[chainID] = checkpoint
+			proofs[chainID] = presenceProof{QueryBlock: target.queryBlock, Checkpoint: checkpoint}
 		}
 	}
-	return presenceResult{emptyCheckpoints: empty}
+	return presenceResult{proofs: proofs}
 }
 
 // presenceChainEmpty decides one chain: a valid checkpoint and no row in any field. It returns the
