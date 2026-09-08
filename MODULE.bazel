@@ -14,9 +14,14 @@ go_deps.from_file(go_mod = "//:go.mod")
 
 # sui-apis ships its .proto sources next to the generated .pb.go files it is consumed through.
 # Left to itself gazelle would also generate go_proto_library rules from those sources, including
-# for the vendored google well-known types, and the generated packages fail to build.
-go_deps.gazelle_override(
+# for the vendored google well-known types, and the generated packages fail to build. gazelle
+# forbids overrides from a non-root module, so this one is a dev dependency: it applies when this
+# repository is built on its own, and a host that consumes the kernel as a Bazel module must carry
+# its own "gazelle:proto disable" default, as sentio already does.
+go_deps_dev = use_extension("@gazelle//:extensions.bzl", "go_deps", dev_dependency = True)
+go_deps_dev.gazelle_override(
     directives = ["gazelle:proto disable_global"],
     path = "github.com/sentioxyz/sui-apis",
 )
+
 use_repo(go_deps, "com_github_ethereum_go_ethereum", "com_github_sentioxyz_sui_apis", "org_golang_google_grpc", "org_golang_google_protobuf")
