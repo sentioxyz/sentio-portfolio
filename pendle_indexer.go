@@ -340,6 +340,12 @@ func (i *pendleIndexer) MarketsForPT(
 	if len(pts) == 0 {
 		return nil, nil
 	}
+	// Valuation asks for markets after PositionRefs has released the lane, so this lookup takes
+	// its own slot: every indexer request counts against the shared API key's bound.
+	if err := lockSentioLane(ctx); err != nil {
+		return nil, err
+	}
+	defer unlockSentioLane(ctx)
 	requested := make(map[string]common.Address, len(pts))
 	for _, pt := range pts {
 		requested[strings.ToLower(pt.Hex())] = pt
