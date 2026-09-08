@@ -136,7 +136,7 @@ func newMethAdapter(indexer SentioIndexerConfig) Adapter {
 		}},
 		indexer:    indexer,
 		apiKey:     apiKey,
-		httpClient: &http.Client{Timeout: 25 * time.Second},
+		httpClient: &http.Client{Timeout: 25 * time.Second, Transport: newSentioTransport()},
 	}
 }
 

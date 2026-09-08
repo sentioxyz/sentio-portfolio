@@ -23,6 +23,15 @@ Every indexer request passes through one `indexerLane` per engine (`sentio_lane.
 by `EngineConfig.IndexerConcurrency`: the adapters share one API key, so admission is bounded
 per engine, not per protocol. Do not add a second lock or a per-adapter limiter in front of it.
 
+`sentioAPIClient` keeps one `http.Client` that is never replaced and never locked, on a transport
+restricted to HTTP/1.1 (`newSentioTransport`). One connection per in-flight request means a stalled
+request stalls only itself, and net/http closes a connection whose request timed out rather than
+returning it to the pool, so a retry never lands on it. Do not enable HTTP/2 on that transport
+and do not put a mutex or a client rotation around the request: multiplexing puts every chain of a
+protocol on one connection, and the lock that made rotation safe serialized them all behind one
+request. Besides the lane, the only place indexer requests wait on each other is the status cache,
+whose fetch runs under `statusMu` so concurrent chains of one protocol share one status read.
+
 An adapter whose protocol spans several chains should answer "which chains hold anything for
 this account" with one request rather than one per chain: `sentio_presence.go` aliases a
 time-travel query per chain, at that chain's own indexed block, and the per-chain flow skips
