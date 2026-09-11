@@ -1,7 +1,7 @@
 # Sentio Portfolio
 
 `sentio-portfolio` is the pure Go calculation kernel for wallet protocol
-positions on Ethereum, BSC, Base, and Arbitrum. It owns protocol adapters,
+positions on Ethereum, BSC, Base, Arbitrum, and Sui. It owns protocol adapters,
 latest/fixed-block RPC reads, account attribution, index-backed position reads,
 and valuation aggregation.
 
@@ -60,6 +60,33 @@ for every advertised chain before the engine can start; genesis support is
 spelled out rather than inferred from a zero value. Adapters continue to gate
 later markets, vaults, rewards, and replacement contracts with their narrower
 component deployment windows.
+
+Sui uses a separate `SuiReader` for direct wallet holdings and
+`engine.SuiProtocolReader(config)` for NAVI lending, NAVI Multiply, native NAVI
+vaults, and Volo strategy vaults (including Single Loop and Astros strategies).
+The two index-backed protocol IDs are `navi` and `volo-vaults`; each requires its
+own versioned index configuration. The reader shares the engine's indexer
+concurrency limit.
+
+Protocol reads require an immutable checkpoint and a durable index watermark
+covering it. Every entity query uses that checkpoint, including transferred
+account caps and vault receipts. Uncovered history is an error; no read falls
+back to the latest balance. Direct wallet history remains unavailable.
+
+Lending balances project the indexed reserve's interest indices to the pinned
+timestamp using integer RAY arithmetic and the protocol's fixed nine-decimal
+principal precision. Multiply groups retain both collateral and debt. Vault
+amounts use the stored NAV at the checkpoint (`valuation: stored_nav`), rather
+than simulating a rebalance or harvest. Volo includes pending deposits and
+claimable principal once, and reports its oldest contributing NAV/oracle time.
+These quantities exclude incentive rewards and withdrawal fees; they describe
+positions, not a guaranteed immediate redemption quote. Coin precision comes
+from on-chain metadata. The host must use historical prices for historical
+quantities and preserve price gaps.
+
+The accounting follows the official [NAVI contracts](https://github.com/naviprotocol/navi-smart-contracts)
+and [NAVI SDK](https://github.com/naviprotocol/naviprotocol-monorepo), with Volo
+integer redemption operations checked against its published Move bytecode.
 
 Run the local test suites with:
 
