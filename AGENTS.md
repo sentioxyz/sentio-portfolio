@@ -96,9 +96,11 @@ the `sui.rpc.v2` services a fullnode, or a proxy in front of one, serves. The ru
   head under the pin's name. Present that result as not read, never as nothing held. Neither
   JSON-RPC nor gRPC can read the past and the GraphQL service's consistent range is about an hour,
   so there is no transport to fall back to.
-- Protocol history uses `SuiProtocolReader` and versioned index entities at the exact checkpoint.
-  The durable watermark must cover that checkpoint; it never permits using newer position state.
-  Account caps and vault receipts are attributed using their ownership at that checkpoint.
+- NAVI and Volo protocol reads use `SuiProtocolReader.ReadLatest` with direct object state.
+  Shared objects are discovered through a host-injected Sui object directory; no dedicated
+  protocol processor is required. Check market inventory completeness against chain state,
+  attribute capabilities/receipts to their current owners, and report the latest read window.
+  Historical protocol requests are unsupported and must not read latest state under a past pin.
 - A checkpoint is the pin: sequence number, 32-byte digest and timestamp fill `BlockRef` as a
   block does. `GetCheckpoint` is asked with a read mask for those three fields only. The dialer
   verifies the endpoint's chain identifier (`GetServiceInfo.chain_id`, the base58 genesis digest

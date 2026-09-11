@@ -4,10 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"math/big"
-	"net/http"
-	"net/http/httptest"
-	"sort"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -87,7 +83,7 @@ func (f naviReaderFixture) CheckpointBySequence(_ context.Context, n uint64) (Su
 	return p, nil
 }
 func (f naviReaderFixture) Holdings(context.Context, SuiAddress, *SuiCheckpoint) (SuiHoldings, error) {
-	panic("protocol history must not read wallet head")
+	panic("protocol calculations must not read wallet holdings")
 }
 func (f naviReaderFixture) CoinMetadata(_ context.Context, types []string) (map[string]SuiCoinMetadata, map[string]error, error) {
 	out := map[string]SuiCoinMetadata{}
@@ -100,72 +96,80 @@ func (f naviReaderFixture) CoinMetadata(_ context.Context, types []string) (map[
 }
 func (f naviReaderFixture) Close() {}
 
-func historyObjectFixture(id, kind, owner, parent, key, objectType string, content map[string]any) suiHistoryObject {
+func protocolObjectFixture(id, kind, owner, parent, key, objectType string, content map[string]any) suiProtocolObject {
 	raw, _ := json.Marshal(content)
-	return suiHistoryObject{ID: naviAddress(id), Kind: kind, Owner: owner, Parent: parent, Key: key, ObjectType: objectType, Content: string(raw), Version: "1", Checkpoint: "90"}
+	return suiProtocolObject{ID: naviAddress(id), Kind: kind, Owner: owner, Parent: parent, Key: key, ObjectType: objectType, Content: string(raw), Version: "1"}
 }
 
-func naviFixtureServer(t *testing.T, objects []suiHistoryObject, values []suiHistoryValue, pin SuiCheckpoint) *SuiProtocolReader {
+type naviCalculationFixture struct {
+	objects []suiProtocolObject
+	values  []suiProtocolValue
+}
+
+func naviCalculationSource(t *testing.T, objects []suiProtocolObject, values []suiProtocolValue, pin SuiCheckpoint) *naviCalculationFixture {
 	t.Helper()
-	t.Setenv("PORTFOLIO_SENTIO_API_KEY", "test-key")
-	sort.Slice(objects, func(i, j int) bool { return objects[i].ID < objects[j].ID })
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var request struct {
-			Query     string         `json:"query"`
-			Variables map[string]any `json:"variables"`
+	return &naviCalculationFixture{objects, values}
+}
+func (f *naviCalculationFixture) Read(ctx context.Context, protocol string, owner SuiAddress, pin SuiCheckpoint, reader SuiReader) (SuiProtocolPositions, error) {
+	state := suiProtocolState{}
+	for _, o := range f.objects {
+		switch o.Kind {
+		case "account", "receipt":
+			if o.Owner == owner.Hex() {
+				state.Owned = append(state.Owned, o)
+			}
+		case "storage", "market", "reserve":
+			state.Topology = append(state.Topology, o)
+		case "principal":
+			state.Principals = append(state.Principals, o)
+		case "vault":
+			state.Vaults = append(state.Vaults, o)
+		case "receiptState":
+			state.ReceiptStates = append(state.ReceiptStates, o)
+		case "oracle", "oraclePrice":
+			state.OracleObjects = append(state.OracleObjects, o)
 		}
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			t.Error(err)
-			w.WriteHeader(400)
-			return
+	}
+	for _, v := range f.values {
+		if v.Kind == "emode" {
+			state.Emodes = append(state.Emodes, v)
 		}
-		data := map[string]any{}
-		if strings.Contains(request.Query, "indexerCheckpoints") {
-			data["indexerCheckpoints"] = []map[string]any{{"id": "sui_mainnet", "blockNumber": strconv.FormatUint(pin.Sequence, 10), "timestampMs": strconv.FormatInt(pin.Timestamp.UnixMilli(), 10), "digest": suiTestDigest}}
+		if v.Kind == "assetValue" {
+			state.AssetValues = append(state.AssetValues, v)
+		}
+	}
+	result := SuiProtocolPositions{ProtocolID: protocol, Checkpoint: pin}
+	if protocol == "navi" {
+		groups, err := naviLending(ctx, owner, pin, reader, state)
+		if err != nil {
+			result.Errors = append(result.Errors, err)
 		} else {
-			if request.Variables["block"] != strconv.FormatUint(pin.Sequence, 10) {
-				t.Errorf("unpinned query: %v", request.Variables)
-			}
-			if strings.Contains(request.Query, "suiHistoryObjects") {
-				rows := []suiHistoryObject{}
-				for _, row := range objects {
-					if (strings.Contains(request.Query, `kind: "`+row.Kind+`"`) || (strings.Contains(request.Query, "kind_in:") && strings.Contains(request.Query, strconv.Quote(row.Kind)))) || (strings.Contains(request.Query, `owner: "`+row.Owner+`"`) && row.Owner != "") {
-						rows = append(rows, row)
-					}
-				}
-				data["suiHistoryObjects"] = rows
-			} else {
-				rows := []suiHistoryValue{}
-				for _, row := range values {
-					if strings.Contains(request.Query, strconv.Quote(row.Kind)) {
-						rows = append(rows, row)
-					}
-				}
-				sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
-				data["suiHistoryValues"] = rows
-			}
+			result.Groups = append(result.Groups, groups...)
 		}
-		json.NewEncoder(w).Encode(map[string]any{"data": data})
-	}))
-	t.Cleanup(server.Close)
-	config := SentioIndexerConfig{GraphQLURL: server.URL, StatusURL: server.URL, ProcessorVersion: "1"}
-	return NewSuiProtocolReader(EngineConfig{SentioIndexers: map[string]SentioIndexerConfig{"navi": config, "volo-vaults": config}})
+	}
+	groups, err := suiVaults(ctx, protocol, pin, reader, state)
+	if err != nil {
+		result.Errors = append(result.Errors, err)
+	} else {
+		result.Groups = append(result.Groups, groups...)
+	}
+	return result, nil
 }
 
-func TestNaviHistoricalLendingAndTransferredMultiplyCap(t *testing.T) {
+func TestNaviLendingAndTransferredMultiplyCap(t *testing.T) {
 	pin, _ := newSuiCheckpoint(100, suiTestDigest, time.Unix(1000, 0))
 	owner, _ := ParseSuiAddress("0x11")
 	cap := naviAddress("0x22")
 	parent := naviAddress("0x33")
-	objects := []suiHistoryObject{
-		historyObjectFixture("0x22", "account", owner.Hex(), "", "", "", map[string]any{"owner": cap}),
-		historyObjectFixture("0x44", "principal", cap, parent, cap, "", map[string]any{"name": cap, "value": "2000000000"}),
-		historyObjectFixture("0x55", "reserve", "", naviAddress("0x66"), "0", "", map[string]any{"name": 0, "value": map[string]any{"id": 0, "coin_type": "2::sui::SUI", "current_borrow_index": naviRay.String(), "current_borrow_rate": "0", "last_update_timestamp": "1000000", "borrow_balance": map[string]any{"user_state": map[string]any{"id": parent}}, "supply_balance": map[string]any{"user_state": map[string]any{"id": naviAddress("0x77")}}}}),
-		historyObjectFixture("0x88", "storage", "", "", "", "", map[string]any{"reserves": map[string]any{"id": naviAddress("0x66")}}),
-		historyObjectFixture("0x99", "market", "", naviAddress("0x88"), "4", "", map[string]any{"value": map[string]any{"market_id": "4", "is_main_market": false}}),
+	objects := []suiProtocolObject{
+		protocolObjectFixture("0x22", "account", owner.Hex(), "", "", "", map[string]any{"owner": cap}),
+		protocolObjectFixture("0x44", "principal", cap, parent, cap, "", map[string]any{"name": cap, "value": "2000000000"}),
+		protocolObjectFixture("0x55", "reserve", "", naviAddress("0x66"), "0", "", map[string]any{"name": 0, "value": map[string]any{"id": 0, "coin_type": "2::sui::SUI", "current_borrow_index": naviRay.String(), "current_borrow_rate": "0", "last_update_timestamp": "1000000", "borrow_balance": map[string]any{"user_state": map[string]any{"id": parent}}, "supply_balance": map[string]any{"user_state": map[string]any{"id": naviAddress("0x77")}}}}),
+		protocolObjectFixture("0x88", "storage", "", "", "", "", map[string]any{"reserves": map[string]any{"id": naviAddress("0x66")}}),
+		protocolObjectFixture("0x99", "market", "", naviAddress("0x88"), "4", "", map[string]any{"value": map[string]any{"market_id": "4", "is_main_market": false}}),
 	}
-	rows := []suiHistoryValue{{ID: "emode:4:" + cap, Kind: "emode", Account: cap, Market: "4", Content: `{"entered":true}`, Checkpoint: "90"}}
-	source := naviFixtureServer(t, objects, rows, pin)
+	rows := []suiProtocolValue{{ID: "emode:4:" + cap, Kind: "emode", Account: cap, Market: "4", Content: `{"entered":true}`}}
+	source := naviCalculationSource(t, objects, rows, pin)
 	reader := naviReaderFixture{pin: pin, metadata: map[string]SuiCoinMetadata{suiLongType: {CoinType: suiLongType, Symbol: "SUI", Decimals: 9}}}
 	result, err := source.Read(context.Background(), "navi", owner, pin, reader)
 	if err != nil || len(result.Errors) != 0 || len(result.Groups) != 1 {
@@ -175,7 +179,7 @@ func TestNaviHistoricalLendingAndTransferredMultiplyCap(t *testing.T) {
 	if group.Label != "Multiply" || group.Components[0].Kind != "debt" || group.Components[0].AmountRaw != "2000000000" {
 		t.Fatalf("wrong multiply %+v", group)
 	}
-	// Removing historical cap ownership must prevent attributing its debt, even
+	// Removing cap ownership must prevent attributing its debt, even
 	// though its principal table still exists unchanged.
 	objects[0].Owner = naviAddress("0x99")
 	result, err = source.Read(context.Background(), "navi", owner, pin, reader)
@@ -186,28 +190,11 @@ func TestNaviHistoricalLendingAndTransferredMultiplyCap(t *testing.T) {
 	}
 }
 
-func TestNaviHistoryRejectsUncoveredAndFutureRows(t *testing.T) {
-	pin, _ := newSuiCheckpoint(100, suiTestDigest, time.Unix(1000, 0))
-	source := naviFixtureServer(t, nil, nil, pin)
-	owner, _ := ParseSuiAddress("0x1")
-	requested := pin
-	requested.Sequence++
-	if _, err := source.Read(context.Background(), "navi", owner, requested, naviReaderFixture{}); err == nil {
-		t.Fatal("uncovered checkpoint accepted")
-	}
-	if err := historyRowAt("101", 100); err == nil {
-		t.Fatal("future state accepted")
-	}
-	if err := historyRowAt("garbage", 100); err == nil {
-		t.Fatal("malformed state accepted")
-	}
-}
-
-func TestNaviHistoryReportsPrincipalWithoutReserve(t *testing.T) {
+func TestNaviReportsPrincipalWithoutReserve(t *testing.T) {
 	pin, _ := newSuiCheckpoint(100, suiTestDigest, time.Unix(1000, 0))
 	owner, _ := ParseSuiAddress("0x11")
-	objects := []suiHistoryObject{historyObjectFixture("0x44", "principal", owner.Hex(), naviAddress("0x33"), owner.Hex(), "", map[string]any{"name": owner.Hex(), "value": "2000000000"})}
-	source := naviFixtureServer(t, objects, nil, pin)
+	objects := []suiProtocolObject{protocolObjectFixture("0x44", "principal", owner.Hex(), naviAddress("0x33"), owner.Hex(), "", map[string]any{"name": owner.Hex(), "value": "2000000000"})}
+	source := naviCalculationSource(t, objects, nil, pin)
 	result, err := source.Read(context.Background(), "navi", owner, pin, naviReaderFixture{pin: pin})
 	if err == nil && len(result.Errors) == 0 {
 		t.Fatal("missing reserve silently hid an indexed principal")
@@ -220,18 +207,18 @@ func TestVoloPendingDepositAndWithdrawalDoNotDoubleCount(t *testing.T) {
 	receipt := naviAddress("0x22")
 	vault := naviAddress("0x33")
 	parent := naviAddress("0x44")
-	objects := []suiHistoryObject{
-		historyObjectFixture(receipt, "receipt", owner.Hex(), "", vault, "", map[string]any{"vault_id": vault}),
-		historyObjectFixture(vault, "vault", "", "", "", "0x1::vault::Vault<0x2::sui::SUI>", map[string]any{"total_shares": "1000000000", "asset_types": []string{"2::sui::SUI"}, "receipts": map[string]any{"id": parent}}),
-		historyObjectFixture("0x55", "receiptState", "", parent, receipt, "", map[string]any{"name": receipt, "value": map[string]any{"shares": "500000000", "pending_withdraw_shares": "250000000", "pending_deposit_balance": "200000000", "claimable_principal": "300000000"}}),
-		historyObjectFixture("0x66", "oracle", "", "", "", "", map[string]any{"aggregators": map[string]any{"id": naviAddress("0x77")}}),
-		historyObjectFixture("0x88", "oraclePrice", "", naviAddress("0x77"), "2::sui::SUI", "", map[string]any{"name": "2::sui::SUI", "value": map[string]any{"price": "1000000000000000000", "decimals": "9", "last_updated": "1000000"}}),
+	objects := []suiProtocolObject{
+		protocolObjectFixture(receipt, "receipt", owner.Hex(), "", vault, "", map[string]any{"vault_id": vault}),
+		protocolObjectFixture(vault, "vault", "", "", "", "0x1::vault::Vault<0x2::sui::SUI>", map[string]any{"total_shares": "1000000000", "asset_types": []string{"2::sui::SUI"}, "receipts": map[string]any{"id": parent}}),
+		protocolObjectFixture("0x55", "receiptState", "", parent, receipt, "", map[string]any{"name": receipt, "value": map[string]any{"shares": "500000000", "pending_withdraw_shares": "250000000", "pending_deposit_balance": "200000000", "claimable_principal": "300000000"}}),
+		protocolObjectFixture("0x66", "oracle", "", "", "", "", map[string]any{"aggregators": map[string]any{"id": naviAddress("0x77")}}),
+		protocolObjectFixture("0x88", "oraclePrice", "", naviAddress("0x77"), "2::sui::SUI", "", map[string]any{"name": "2::sui::SUI", "value": map[string]any{"price": "1000000000000000000", "decimals": "9", "last_updated": "1000000"}}),
 	}
-	values := []suiHistoryValue{
-		{ID: "assetValue:" + vault + ":2::sui::SUI", Kind: "assetValue", Account: vault, Content: `{"asset":"2::sui::SUI","amount":"2000000000","timestamp":"1000000"}`, Checkpoint: "90"},
-		{ID: "oraclePrice:2::sui::SUI", Kind: "oraclePrice", Account: "2::sui::SUI", Content: `{"asset":"2::sui::SUI","amount":"1000000000000000000","timestamp":"1000000"}`, Checkpoint: "90"},
+	values := []suiProtocolValue{
+		{ID: "assetValue:" + vault + ":2::sui::SUI", Kind: "assetValue", Account: vault, Content: `{"asset":"2::sui::SUI","amount":"2000000000","timestamp":"1000000"}`},
+		{ID: "oraclePrice:2::sui::SUI", Kind: "oraclePrice", Account: "2::sui::SUI", Content: `{"asset":"2::sui::SUI","amount":"1000000000000000000","timestamp":"1000000"}`},
 	}
-	source := naviFixtureServer(t, objects, values, pin)
+	source := naviCalculationSource(t, objects, values, pin)
 	reader := naviReaderFixture{pin: pin, metadata: map[string]SuiCoinMetadata{suiLongType: {CoinType: suiLongType, Symbol: "SUI", Decimals: 9}}}
 	result, err := source.Read(context.Background(), "volo-vaults", owner, pin, reader)
 	if err != nil || len(result.Errors) != 0 || len(result.Groups) != 1 {
@@ -246,24 +233,16 @@ func TestVoloPendingDepositAndWithdrawalDoNotDoubleCount(t *testing.T) {
 	}
 }
 
-func TestNaviSharedIndexerAdmission(t *testing.T) {
-	engine := NewEngineWithConfig(nil, nil, EngineConfig{IndexerConcurrency: 2})
-	reader := engine.SuiProtocolReader(EngineConfig{})
-	if reader.lane != engine.indexerLane {
-		t.Fatal("Sui created a separate indexer lane")
-	}
-}
-
 func TestNaviVaultStoredNAVAndReceiptTransfer(t *testing.T) {
 	pin, _ := newSuiCheckpoint(100, suiTestDigest, time.Unix(1000, 0))
 	owner, _ := ParseSuiAddress("0x11")
 	receipt, vault, parent := naviAddress("0x22"), naviAddress("0x33"), naviAddress("0x44")
-	objects := []suiHistoryObject{
-		historyObjectFixture(receipt, "receipt", owner.Hex(), "", vault, "", map[string]any{"vault_id": vault}),
-		historyObjectFixture(vault, "vault", "", "", "", "0x1::navi_vault::Vault<0x2::sui::SUI>", map[string]any{"total_shares": "3", "total_assets": "1000000001", "user_states": map[string]any{"id": parent}}),
-		historyObjectFixture("0x55", "receiptState", "", parent, receipt, "", map[string]any{"name": receipt, "value": map[string]any{"shares": "2"}}),
+	objects := []suiProtocolObject{
+		protocolObjectFixture(receipt, "receipt", owner.Hex(), "", vault, "", map[string]any{"vault_address": vault}),
+		protocolObjectFixture(vault, "vault", "", "", "", "0x1::navi_vault::Vault<0x2::sui::SUI>", map[string]any{"total_shares": "3", "total_assets": "1000000001", "user_states": map[string]any{"id": parent}}),
+		protocolObjectFixture("0x55", "receiptState", "", parent, receipt, "", map[string]any{"name": receipt, "value": map[string]any{"shares": "2"}}),
 	}
-	source := naviFixtureServer(t, objects, nil, pin)
+	source := naviCalculationSource(t, objects, nil, pin)
 	chain := naviReaderFixture{pin: pin, metadata: map[string]SuiCoinMetadata{suiLongType: {CoinType: suiLongType, Symbol: "SUI", Decimals: 9}}}
 	result, err := source.Read(context.Background(), "navi", owner, pin, chain)
 	if err != nil || len(result.Errors) > 0 || len(result.Groups) != 1 {
@@ -279,20 +258,19 @@ func TestNaviVaultStoredNAVAndReceiptTransfer(t *testing.T) {
 	}
 }
 
-func TestVoloHistoryRejectsFutureOracleAndWrongParent(t *testing.T) {
+func TestVoloRejectsFutureOracleAndWrongParent(t *testing.T) {
 	pin, _ := newSuiCheckpoint(100, suiTestDigest, time.Unix(1000, 0))
 	parent := naviAddress("0x22")
-	rows := []suiHistoryObject{
-		historyObjectFixture("0x11", "oracle", "", "", "", "", map[string]any{"aggregators": map[string]any{"id": parent}}),
-		historyObjectFixture("0x33", "oraclePrice", "", parent, "2::sui::SUI", "", map[string]any{"name": "2::sui::SUI", "value": map[string]any{"decimals": "9", "price": "1000000000000000000", "last_updated": "1000001"}}),
+	rows := []suiProtocolObject{
+		protocolObjectFixture("0x11", "oracle", "", "", "", "", map[string]any{"aggregators": map[string]any{"id": parent}}),
+		protocolObjectFixture("0x33", "oraclePrice", "", parent, "2::sui::SUI", "", map[string]any{"name": "2::sui::SUI", "value": map[string]any{"decimals": "9", "price": "1000000000000000000", "last_updated": "1000001"}}),
 	}
-	source := naviFixtureServer(t, rows, nil, pin)
-	if _, _, err := source.voloOraclePrices(context.Background(), pin, nil); err == nil {
+	if _, _, err := voloOraclePrices(pin, nil, rows); err == nil {
 		t.Fatal("future oracle accepted")
 	}
 	rows[1].Content = strings.ReplaceAll(rows[1].Content, "1000001", "1000000")
 	rows[1].Parent = naviAddress("0x44")
-	if _, _, err := source.voloOraclePrices(context.Background(), pin, nil); err == nil {
+	if _, _, err := voloOraclePrices(pin, nil, rows); err == nil {
 		t.Fatal("other oracle's entry accepted")
 	}
 }

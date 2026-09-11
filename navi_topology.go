@@ -15,9 +15,9 @@ type naviBalanceTable struct {
 	Side    string
 }
 
-// Relationships come from objects at the requested checkpoint, not a manifest
-// of today's markets. The same object types cover subsequently created markets.
-func naviBalanceTables(rows []suiHistoryObject) (map[string]naviBalanceTable, error) {
+// Relationships come from chain objects. The same defining types cover newly
+// created markets without adding an address manifest.
+func naviBalanceTables(rows []suiProtocolObject) (map[string]naviBalanceTable, error) {
 	storages := make(map[string]suiFields)
 	markets := make(map[string]string)
 	marketIDs := make(map[string]bool)
@@ -63,14 +63,14 @@ func naviBalanceTables(rows []suiHistoryObject) (map[string]naviBalanceTable, er
 	}
 	for storage := range markets {
 		if storages[storage] == nil {
-			return nil, fmt.Errorf("NAVI market's Storage is not indexed")
+			return nil, fmt.Errorf("NAVI market's Storage is unavailable")
 		}
 	}
 	parents := make(map[string]string)
 	for id, fields := range storages {
 		market, ok := markets[id]
 		if !ok {
-			return nil, fmt.Errorf("NAVI Storage has no market identity at this checkpoint")
+			return nil, fmt.Errorf("NAVI Storage has no market identity in the observed state")
 		}
 		table, err := fields.object("reserves")
 		if err != nil {
@@ -93,7 +93,7 @@ func naviBalanceTables(rows []suiHistoryObject) (map[string]naviBalanceTable, er
 		}
 		market, ok := parents[row.Parent]
 		if !ok {
-			return nil, fmt.Errorf("NAVI reserve's Storage is not indexed")
+			return nil, fmt.Errorf("NAVI reserve's Storage is unavailable")
 		}
 		fields, err := suiObjectFields(row.Content)
 		if err != nil {

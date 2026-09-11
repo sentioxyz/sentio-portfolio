@@ -62,34 +62,40 @@ later markets, vaults, rewards, and replacement contracts with their narrower
 component deployment windows.
 
 Sui uses a separate `SuiReader` for direct wallet holdings and
-`engine.SuiProtocolReader(config)` for NAVI lending, NAVI Multiply, native NAVI
-vaults, and Volo strategy vaults (including Single Loop and Astros strategies).
-The two index-backed protocol IDs are `navi` and `volo-vaults`; each requires its
-own versioned index configuration. The reader shares the engine's indexer
-concurrency limit.
+`NewSuiProtocolReader(directory)` for latest NAVI lending, NAVI Multiply,
+native NAVI vaults, and Volo strategy vaults (including Single Loop and Astros).
+The protocol IDs are `navi` and `volo-vaults`. `ReadLatest` takes a `SuiObjectReader`
+(`SuiGRPCClient` implements it); neither protocol requires a dedicated processor.
+The host supplies a Sui GraphQL endpoint through `NewSuiGraphQLDirectory` for
+shared-object discovery. Endpoint configuration stays outside the kernel.
 
-NAVI markets and reserves are discovered from indexed Storage, MarketInfo and
-ReserveData objects. The reader joins their table handles at the requested
-checkpoint to attribute supply and borrow principals. New markets, reserves,
-and vaults using the protocol's existing object types need no address-list
-update. Before MarketInfo existed, the sole Storage identifies legacy market 0;
-incomplete or ambiguous relationships fail with a coverage error.
+The directory discovers Storage objects by defining type. Their current
+MarketInfo and reserve tables establish the market relationships, and the main
+Storage's `last_market_id` checks inventory completeness. New markets and
+reserves need no address-list update. Capability ownership identifies Multiply
+accounts, including child capabilities that share one logical account. User
+principals and e-mode entries are batched point reads of derived dynamic field
+IDs, without enumerating the protocol's user tables.
 
-Protocol reads require an immutable checkpoint and a durable index watermark
-covering it. Every entity query uses that checkpoint, including transferred
-account caps and vault receipts. Uncovered history is an error; no read falls
-back to the latest balance. Direct wallet history remains unavailable.
+Wallet-owned receipts discover every native and Volo vault the wallet uses,
+including strategy variants. NAVI receipts use `vault_address`; Volo receipts
+use `vault_id`. Vault shares, NAV tables and oracle prices come from current
+chain state. Fresh or emptied receipts with no state entry contribute no
+position; RPC failures remain coverage errors.
 
-Lending balances project the indexed reserve's interest indices to the pinned
-timestamp using integer RAY arithmetic and the protocol's fixed nine-decimal
-principal precision. Multiply groups retain both collateral and debt. Vault
-amounts use the stored NAV at the checkpoint (`valuation: stored_nav`), rather
-than simulating a rebalance or harvest. Volo includes pending deposits and
-claimable principal once, and reports its oldest contributing NAV/oracle time.
-These quantities exclude incentive rewards and withdrawal fees; they describe
-positions, not a guaranteed immediate redemption quote. Coin precision comes
-from on-chain metadata. The host must use historical prices for historical
-quantities and preserve price gaps.
+Reads report a latest observation window (`headBeforeRead`/`headAfterRead`),
+not an atomic portfolio at one checkpoint. History is not supported. Hosts must
+reject historical requests before reading current state. They must preserve the
+window metadata when combining wallet and protocol snapshots.
+
+Lending projects reserve interest indices to the observed timestamp using
+integer RAY arithmetic and NAVI's fixed nine-decimal principal precision.
+Multiply retains collateral and debt. Vault amounts use stored NAV
+(`valuation: stored_nav`), without simulating a rebalance or harvest. Volo
+includes pending deposits and claimable principal once, and reports the oldest
+contributing NAV/oracle timestamp. Incentive rewards and withdrawal fees are
+excluded; amounts describe positions, not an immediate redemption quote. Coin
+precision comes from on-chain metadata, and the host supplies current prices.
 
 The accounting follows the official [NAVI contracts](https://github.com/naviprotocol/navi-smart-contracts)
 and [NAVI SDK](https://github.com/naviprotocol/naviprotocol-monorepo), with Volo

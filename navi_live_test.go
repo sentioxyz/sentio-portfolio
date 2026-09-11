@@ -12,16 +12,15 @@ import (
 
 // Expected quantities must come from an independent chain/explorer observation,
 // supplied at runtime. No deployment identifiers or captured responses belong here.
-func TestSuiProtocolLiveHistory(t *testing.T) {
-	raw := os.Getenv("PORTFOLIO_SUI_HISTORY_CASE")
+func TestSuiProtocolLiveLatest(t *testing.T) {
+	raw := os.Getenv("PORTFOLIO_SUI_LATEST_CASE")
 	if raw == "" {
-		t.Skip("set PORTFOLIO_SUI_HISTORY_CASE and runtime RPC/index configuration")
+		t.Skip("set PORTFOLIO_SUI_LATEST_CASE and runtime gRPC and Sui object-directory configuration")
 	}
 	var sample struct {
-		Protocol   string
-		Owner      string
-		Checkpoint uint64
-		Expected   map[string]string // component kind + ':' + normalized coin type
+		Protocol string
+		Owner    string
+		Expected map[string]string // component kind + ':' + normalized coin type
 	}
 	if err := json.Unmarshal([]byte(raw), &sample); err != nil {
 		t.Fatal(err)
@@ -40,21 +39,16 @@ func TestSuiProtocolLiveHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	config := SentioIndexerConfig{GraphQLURL: os.Getenv("PORTFOLIO_SUI_HISTORY_GRAPHQL_URL"), StatusURL: os.Getenv("PORTFOLIO_SUI_HISTORY_STATUS_URL"), ProcessorVersion: os.Getenv("PORTFOLIO_SUI_HISTORY_VERSION")}
-	reader := NewSuiProtocolReader(EngineConfig{SentioIndexers: map[string]SentioIndexerConfig{sample.Protocol: config}})
-	pin, err := rpc.CheckpointBySequence(ctx, sample.Checkpoint)
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := reader.Read(ctx, sample.Protocol, owner, pin, rpc)
+	reader := NewSuiProtocolReader(NewSuiGraphQLDirectory(os.Getenv("PORTFOLIO_SUI_DIRECTORY_URL")))
+	result, err := reader.ReadLatest(ctx, sample.Protocol, owner, rpc)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(result.Errors) > 0 {
 		t.Fatal(result.Errors)
 	}
-	if result.Checkpoint != pin {
-		t.Fatal("result pin changed")
+	if result.HeadBeforeRead > result.Checkpoint.Sequence {
+		t.Fatal("invalid latest observation window")
 	}
 	amounts := make(map[string]*big.Int)
 	for _, group := range result.Groups {
@@ -75,7 +69,7 @@ func TestSuiProtocolLiveHistory(t *testing.T) {
 		actual[key] = n.String()
 	}
 	if !reflect.DeepEqual(actual, sample.Expected) {
-		t.Fatalf("quantities at checkpoint %d: got %v, want %v", pin.Sequence, actual, sample.Expected)
+		t.Fatalf("quantities at checkpoint %d: got %v, want %v", result.Checkpoint.Sequence, actual, sample.Expected)
 	}
-	t.Logf("reconciled %d quantities at checkpoint %d", len(actual), pin.Sequence)
+	t.Logf("reconciled %d quantities at checkpoint %d", len(actual), result.Checkpoint.Sequence)
 }

@@ -2,10 +2,10 @@ package portfolio
 
 import "testing"
 
-func naviTopologyFixture() []suiHistoryObject {
-	return []suiHistoryObject{
-		historyObjectFixture("0x10", "storage", "", "", "", "", map[string]any{"reserves": map[string]any{"id": naviAddress("0x11")}}),
-		historyObjectFixture("0x12", "reserve", "", naviAddress("0x11"), "201", "", map[string]any{"name": 201, "value": map[string]any{
+func naviTopologyFixture() []suiProtocolObject {
+	return []suiProtocolObject{
+		protocolObjectFixture("0x10", "storage", "", "", "", "", map[string]any{"reserves": map[string]any{"id": naviAddress("0x11")}}),
+		protocolObjectFixture("0x12", "reserve", "", naviAddress("0x11"), "201", "", map[string]any{"name": 201, "value": map[string]any{
 			"id": 201, "coin_type": "2::sui::SUI",
 			"supply_balance": map[string]any{"user_state": map[string]any{"id": naviAddress("0x13")}},
 			"borrow_balance": map[string]any{"user_state": map[string]any{"id": naviAddress("0x14")}},
@@ -13,8 +13,8 @@ func naviTopologyFixture() []suiHistoryObject {
 	}
 }
 
-func naviMarketFixture(storage, market string, main bool) suiHistoryObject {
-	return historyObjectFixture("0x20", "market", "", naviAddress(storage), market, "", map[string]any{"value": map[string]any{"market_id": market, "is_main_market": main}})
+func naviMarketFixture(storage, market string, main bool) suiProtocolObject {
+	return protocolObjectFixture("0x20", "market", "", naviAddress(storage), market, "", map[string]any{"value": map[string]any{"market_id": market, "is_main_market": main}})
 }
 
 func TestNaviTopologyDiscoversUnlistedMarketAndReserve(t *testing.T) {
@@ -42,7 +42,7 @@ func TestNaviTopologyLegacyMarketBoundary(t *testing.T) {
 	if err != nil || after[naviAddress("0x13")].Reserve.Market != "0" {
 		t.Fatalf("explicit main market: %v %v", after, err)
 	}
-	newStorage := historyObjectFixture("0x30", "storage", "", "", "", "", map[string]any{"reserves": map[string]any{"id": naviAddress("0x31")}})
+	newStorage := protocolObjectFixture("0x30", "storage", "", "", "", "", map[string]any{"reserves": map[string]any{"id": naviAddress("0x31")}})
 	if _, err := naviBalanceTables(append(naviTopologyFixture(), newStorage)); err == nil {
 		t.Fatal("multiple storages without metadata were defaulted to market 0")
 	}
@@ -61,18 +61,22 @@ func TestNaviTopologyLegacyMarketBoundary(t *testing.T) {
 func TestNaviTopologyRejectsAmbiguousRelationships(t *testing.T) {
 	for _, test := range []struct {
 		name string
-		edit func([]suiHistoryObject) []suiHistoryObject
+		edit func([]suiProtocolObject) []suiProtocolObject
 	}{
-		{"orphan reserve", func(r []suiHistoryObject) []suiHistoryObject { return r[1:] }},
-		{"orphan market", func(r []suiHistoryObject) []suiHistoryObject { return append(r, naviMarketFixture("0x99", "0", true)) }},
-		{"incorrect main flag", func(r []suiHistoryObject) []suiHistoryObject { return append(r, naviMarketFixture("0x10", "99", true)) }},
-		{"reserve identity", func(r []suiHistoryObject) []suiHistoryObject { r[1].Key = "0"; return r }},
-		{"duplicate reserve", func(r []suiHistoryObject) []suiHistoryObject {
+		{"orphan reserve", func(r []suiProtocolObject) []suiProtocolObject { return r[1:] }},
+		{"orphan market", func(r []suiProtocolObject) []suiProtocolObject {
+			return append(r, naviMarketFixture("0x99", "0", true))
+		}},
+		{"incorrect main flag", func(r []suiProtocolObject) []suiProtocolObject {
+			return append(r, naviMarketFixture("0x10", "99", true))
+		}},
+		{"reserve identity", func(r []suiProtocolObject) []suiProtocolObject { r[1].Key = "0"; return r }},
+		{"duplicate reserve", func(r []suiProtocolObject) []suiProtocolObject {
 			duplicate := r[1]
 			duplicate.ID = naviAddress("0x99")
 			return append(r, duplicate)
 		}},
-		{"shared principal table", func(r []suiHistoryObject) []suiHistoryObject {
+		{"shared principal table", func(r []suiProtocolObject) []suiProtocolObject {
 			r[1].Content = `{"name":201,"value":{"id":201,"coin_type":"2::sui::SUI","supply_balance":{"user_state":{"id":"0x13"}},"borrow_balance":{"user_state":{"id":"0x13"}}}}`
 			return r
 		}},

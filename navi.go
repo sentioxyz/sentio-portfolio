@@ -9,54 +9,9 @@ import (
 	"strings"
 )
 
-// Read pins every index query to the requested checkpoint. Index progress is a
-// coverage prerequisite, never permission to substitute its head for the pin.
-func (r *SuiProtocolReader) Read(ctx context.Context, protocolID string, owner SuiAddress, pin SuiCheckpoint, reader SuiReader) (SuiProtocolPositions, error) {
-	name := map[string]string{"navi": "NAVI", "volo-vaults": "Volo Vaults"}[protocolID]
-	result := SuiProtocolPositions{ProtocolID: protocolID, ProtocolName: name, Checkpoint: pin}
-	if name == "" {
-		return result, fmt.Errorf("unsupported Sui protocol")
-	}
-	if pin.Timestamp.UnixMilli() <= 0 || pin.Digest == ([32]byte{}) {
-		return result, fmt.Errorf("invalid Sui checkpoint pin")
-	}
-	watermark, err := r.LatestCheckpoint(ctx, protocolID)
-	if err != nil {
-		return result, err
-	}
-	if watermark.Sequence < pin.Sequence {
-		return result, fmt.Errorf("%s history covers checkpoint %d; requested %d", name, watermark.Sequence, pin.Sequence)
-	}
-	owned, err := r.objects(ctx, protocolID, pin.Sequence, `owner: `+strconv.Quote(owner.Hex()))
-	if err != nil {
-		return result, err
-	}
-	for _, object := range owned {
-		if object.Owner != owner.Hex() {
-			return result, fmt.Errorf("history returned an object belonging to another owner")
-		}
-	}
-	if protocolID == "navi" {
-		groups, err := r.naviLending(ctx, owner, pin, reader, owned)
-		if err != nil {
-			result.Errors = append(result.Errors, err)
-		} else {
-			result.Groups = append(result.Groups, groups...)
-		}
-	}
-	groups, err := r.suiVaults(ctx, protocolID, pin, reader, owned)
-	if err != nil {
-		result.Errors = append(result.Errors, err)
-	} else {
-		result.Groups = append(result.Groups, groups...)
-	}
-	sort.Slice(result.Groups, func(i, j int) bool { return result.Groups[i].ID < result.Groups[j].ID })
-	return result, nil
-}
-
-func (r *SuiProtocolReader) naviLending(ctx context.Context, owner SuiAddress, pin SuiCheckpoint, reader SuiReader, owned []suiHistoryObject) ([]SuiProtocolGroup, error) {
+func naviLending(ctx context.Context, owner SuiAddress, pin SuiCheckpoint, reader SuiReader, state suiProtocolState) ([]SuiProtocolGroup, error) {
 	accounts := map[string]bool{owner.Hex(): true}
-	for _, object := range owned {
+	for _, object := range state.Owned {
 		if object.Kind != "account" {
 			continue
 		}
@@ -70,25 +25,11 @@ func (r *SuiProtocolReader) naviLending(ctx context.Context, owner SuiAddress, p
 		}
 		accounts[account] = true
 	}
-	names := make([]string, 0, len(accounts))
-	for account := range accounts {
-		names = append(names, account)
-	}
-	sort.Strings(names)
-	topology, err := r.objects(ctx, "navi", pin.Sequence, `kind_in: ["storage", "market", "reserve"]`)
+	tables, err := naviBalanceTables(state.Topology)
 	if err != nil {
 		return nil, err
 	}
-	tables, err := naviBalanceTables(topology)
-	if err != nil {
-		return nil, err
-	}
-	// Keep orphan principals in the response so incomplete topology is reported,
-	// rather than hiding a position by filtering its unknown parent out upstream.
-	principals, err := r.objects(ctx, "navi", pin.Sequence, `kind: "principal", owner_in: `+quotedStrings(names))
-	if err != nil {
-		return nil, err
-	}
+	principals := state.Principals
 	type position struct {
 		account   string
 		table     naviBalanceTable
@@ -132,10 +73,7 @@ func (r *SuiProtocolReader) naviLending(ctx context.Context, owner SuiAddress, p
 	if err != nil {
 		return nil, err
 	}
-	emodeRows, err := r.values(ctx, "navi", pin.Sequence, `kind: "emode", account_in: `+quotedStrings(names))
-	if err != nil {
-		return nil, err
-	}
+	emodeRows := state.Emodes
 	emodes := map[string]bool{}
 	for _, row := range emodeRows {
 		if row.Kind != "emode" || !accounts[row.Account] || row.ID != "emode:"+row.Market+":"+row.Account {
@@ -221,17 +159,17 @@ func suiProtocolMetadata(ctx context.Context, reader SuiReader, wanted map[strin
 	return metadata, nil
 }
 
-func (r *SuiProtocolReader) suiVaults(ctx context.Context, protocolID string, pin SuiCheckpoint, reader SuiReader, owned []suiHistoryObject) ([]SuiProtocolGroup, error) {
-	receipts := make(map[string]suiHistoryObject)
+func suiVaults(ctx context.Context, protocolID string, pin SuiCheckpoint, reader SuiReader, state suiProtocolState) ([]SuiProtocolGroup, error) {
+	receipts := make(map[string]suiProtocolObject)
 	vaultSet := make(map[string]bool)
 	ids := []string{}
-	for _, object := range owned {
+	for _, object := range state.Owned {
 		if object.Kind == "receipt" {
 			fields, err := suiObjectFields(object.Content)
 			if err != nil {
 				return nil, err
 			}
-			vault, err := fields.address("vault_id")
+			vault, err := suiReceiptVault(fields, protocolID)
 			if err != nil || vault != object.Key {
 				return nil, fmt.Errorf("invalid receipt vault attribution")
 			}
@@ -251,14 +189,7 @@ func (r *SuiProtocolReader) suiVaults(ctx context.Context, protocolID string, pi
 		}
 		vaultIDs = append(vaultIDs, id)
 	}
-	vaults, err := r.objects(ctx, protocolID, pin.Sequence, `kind: "vault", id_in: `+quotedStrings(vaultIDs))
-	if err != nil {
-		return nil, err
-	}
-	states, err := r.objects(ctx, protocolID, pin.Sequence, `kind: "receiptState", key_in: `+quotedStrings(ids))
-	if err != nil {
-		return nil, err
-	}
+	vaults, states := state.Vaults, state.ReceiptStates
 	byID := make(map[string]suiFields)
 	coins := make(map[string]string)
 	tokens := make(map[string]bool)
@@ -279,7 +210,7 @@ func (r *SuiProtocolReader) suiVaults(ctx context.Context, protocolID string, pi
 		tokens[coin] = true
 	}
 	if len(byID) != len(vaultSet) {
-		return nil, fmt.Errorf("owned receipt's vault was not indexed")
+		return nil, fmt.Errorf("owned receipt's vault was unavailable")
 	}
 	metadata, err := suiProtocolMetadata(ctx, reader, tokens)
 	if err != nil {
@@ -287,7 +218,15 @@ func (r *SuiProtocolReader) suiVaults(ctx context.Context, protocolID string, pi
 	}
 	var valuations map[string]voloValuation
 	if protocolID == "volo-vaults" {
-		valuations, err = r.voloValuations(ctx, pin, vaultIDs, byID, coins, metadata)
+		active, activeErr := suiActiveShareVaults(state)
+		if activeErr != nil {
+			return nil, activeErr
+		}
+		activeIDs := []string{}
+		for id := range active {
+			activeIDs = append(activeIDs, id)
+		}
+		valuations, err = voloValuations(pin, activeIDs, byID, coins, metadata, state)
 		if err != nil {
 			return nil, err
 		}
@@ -401,13 +340,13 @@ func voloBaseAmount(shares, totalShares, value, price *big.Int, decimals uint8) 
 	return claim.Mul(claim, big.NewInt(1_000_000_000_000_000_000)).Div(claim, normalized)
 }
 
-func (r *SuiProtocolReader) voloValuations(ctx context.Context, pin SuiCheckpoint, vaultIDs []string, vaults map[string]suiFields, coins map[string]string, metadata map[string]SuiCoinMetadata) (map[string]voloValuation, error) {
-	rows, err := r.values(ctx, "volo-vaults", pin.Sequence, `kind: "assetValue"`)
-	if err != nil {
-		return nil, err
+func voloValuations(pin SuiCheckpoint, vaultIDs []string, vaults map[string]suiFields, coins map[string]string, metadata map[string]SuiCoinMetadata, state suiProtocolState) (map[string]voloValuation, error) {
+	if len(vaultIDs) == 0 {
+		return map[string]voloValuation{}, nil
 	}
+	rows := state.AssetValues
 	values := make(map[string]map[string]*big.Int)
-	prices, priceTimes, err := r.voloOraclePrices(ctx, pin, metadata)
+	prices, priceTimes, err := voloOraclePrices(pin, metadata, state.OracleObjects)
 	if err != nil {
 		return nil, err
 	}
@@ -461,7 +400,7 @@ func (r *SuiProtocolReader) voloValuations(ctx context.Context, pin SuiCheckpoin
 			name = strings.TrimPrefix(name, "0x")
 			value, ok := values[id][name]
 			if !ok || seen[name] {
-				return nil, fmt.Errorf("Volo vault asset valuation is not indexed")
+				return nil, fmt.Errorf("Volo vault asset valuation is unavailable")
 			}
 			seen[name] = true
 			oldest = min(oldest, timestamps[id][name])
@@ -469,20 +408,15 @@ func (r *SuiProtocolReader) voloValuations(ctx context.Context, pin SuiCheckpoin
 		}
 		price := prices[coins[id]]
 		if price == nil || price.Sign() == 0 {
-			return nil, fmt.Errorf("Volo vault base-coin oracle is not indexed")
+			return nil, fmt.Errorf("Volo vault base-coin oracle is unavailable")
 		}
 		result[id] = voloValuation{Value: total, Price: price, OldestTimestampMS: min(oldest, priceTimes[coins[id]])}
 	}
 	return result, nil
 }
 
-// Oracle table objects predate AssetPriceUpdated. Replaying only that newer
-// event loses the first vaults' price history and unchanged oracle entries.
-func (r *SuiProtocolReader) voloOraclePrices(ctx context.Context, pin SuiCheckpoint, metadata map[string]SuiCoinMetadata) (map[string]*big.Int, map[string]uint64, error) {
-	rows, err := r.objects(ctx, "volo-vaults", pin.Sequence, `kind_in: ["oracle", "oraclePrice"]`)
-	if err != nil {
-		return nil, nil, err
-	}
+// Oracle table entries are authoritative even when no recent price event exists.
+func voloOraclePrices(pin SuiCheckpoint, metadata map[string]SuiCoinMetadata, rows []suiProtocolObject) (map[string]*big.Int, map[string]uint64, error) {
 	parent := ""
 	for _, row := range rows {
 		if row.Kind != "oracle" {
@@ -505,7 +439,7 @@ func (r *SuiProtocolReader) voloOraclePrices(ctx context.Context, pin SuiCheckpo
 		}
 	}
 	if parent == "" {
-		return nil, nil, fmt.Errorf("Volo oracle configuration is not indexed")
+		return nil, nil, fmt.Errorf("Volo oracle configuration is unavailable")
 	}
 	prices, times := make(map[string]*big.Int), make(map[string]uint64)
 	for _, row := range rows {
