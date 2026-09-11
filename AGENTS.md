@@ -93,12 +93,15 @@ the `sui.rpc.v2` services a fullnode, or a proxy in front of one, serves. The ru
   applies here too.
 - Direct wallet history is unavailable. A pinned read (`Holdings` with a non-nil checkpoint)
   returns no balances with `HistoryUnsupported` set and makes no round trip; it never reads the
-  head under the pin's name. Present that result as not read, never as nothing held. Neither
-  JSON-RPC nor gRPC can read the past and the GraphQL service's consistent range is about an hour,
-  so there is no transport to fall back to.
+  head under the pin's name. Present that result as not read, never as nothing held. Reading
+  specific retained object versions through gRPC does not establish complete wallet holdings
+  at a historical checkpoint; there is no wallet-history fallback.
 - NAVI and Volo protocol reads use `SuiProtocolReader.ReadLatest` with direct object state.
-  Shared objects are discovered through a host-injected Sui object directory; no dedicated
-  protocol processor is required. Check market inventory completeness against chain state,
+  Root objects are discovered through `SuiObjectLineageReader` over the same gRPC connection:
+  NAVI market-counter versions and their producing transactions, and Volo package publication.
+  Cache root IDs, refresh NAVI discovery when the counter version changes, and never scan
+  checkpoint ranges. Missing retained lineage is a coverage error. No dedicated protocol
+  processor is required. Check market inventory completeness against chain state,
   attribute capabilities/receipts to their current owners, and report the latest read window.
   Historical protocol requests are unsupported and must not read latest state under a past pin.
 - A checkpoint is the pin: sequence number, 32-byte digest and timestamp fill `BlockRef` as a

@@ -6,12 +6,14 @@ import (
 	"sort"
 )
 
-// SuiProtocolReader reads latest on-chain NAVI and Volo state. A shared-object
-// directory discovers protocol roots; it supplies no balances or NAV values.
-type SuiProtocolReader struct{ directory SuiObjectDirectory }
+// SuiProtocolReader reads latest NAVI and Volo state through the same reader as
+// wallet holdings. Object lineage discovers and caches protocol root IDs only.
+type SuiProtocolReader struct {
+	markets, oracle suiRootCache
+}
 
-func NewSuiProtocolReader(directory SuiObjectDirectory) *SuiProtocolReader {
-	return &SuiProtocolReader{directory: directory}
+func NewSuiProtocolReader() *SuiProtocolReader {
+	return &SuiProtocolReader{markets: suiRootCache{gate: make(chan struct{}, 1)}, oracle: suiRootCache{gate: make(chan struct{}, 1)}}
 }
 
 func (r *SuiProtocolReader) ProtocolIDs() []string { return []string{"navi", "volo-vaults"} }
@@ -75,9 +77,6 @@ func (r *SuiProtocolReader) ReadLatest(ctx context.Context, protocolID string, o
 	objects, ok := reader.(SuiObjectReader)
 	if !ok {
 		return result, fmt.Errorf("Sui object reads are unavailable")
-	}
-	if r.directory == nil {
-		return result, fmt.Errorf("Sui object directory is not configured")
 	}
 	before, err := reader.LatestCheckpoint(ctx)
 	if err != nil {

@@ -128,7 +128,7 @@ func (r *SuiProtocolReader) loadLatest(ctx context.Context, protocolID string, o
 }
 
 func (r *SuiProtocolReader) loadNavi(ctx context.Context, owner SuiAddress, reader SuiObjectReader, state *suiProtocolState) error {
-	ids, err := r.directory.ObjectsByType(ctx, naviStorageType)
+	ids, err := r.discoverNaviMarkets(ctx, reader)
 	if err != nil {
 		return err
 	}
@@ -439,7 +439,7 @@ func (r *SuiProtocolReader) loadVoloValuation(ctx context.Context, reader SuiObj
 	if len(active) == 0 {
 		return nil
 	}
-	ids, err := r.directory.ObjectsByType(ctx, voloVaultPackage+"::vault_oracle::OracleConfig")
+	ids, err := r.discoverVoloOracle(ctx, reader)
 	if err != nil {
 		return err
 	}

@@ -15,7 +15,7 @@ import (
 func TestSuiProtocolLiveLatest(t *testing.T) {
 	raw := os.Getenv("PORTFOLIO_SUI_LATEST_CASE")
 	if raw == "" {
-		t.Skip("set PORTFOLIO_SUI_LATEST_CASE and runtime gRPC and Sui object-directory configuration")
+		t.Skip("set PORTFOLIO_SUI_LATEST_CASE and runtime gRPC configuration")
 	}
 	var sample struct {
 		Protocol string
@@ -39,7 +39,7 @@ func TestSuiProtocolLiveLatest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader := NewSuiProtocolReader(NewSuiGraphQLDirectory(os.Getenv("PORTFOLIO_SUI_DIRECTORY_URL")))
+	reader := NewSuiProtocolReader()
 	result, err := reader.ReadLatest(ctx, sample.Protocol, owner, rpc)
 	if err != nil {
 		t.Fatal(err)

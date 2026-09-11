@@ -14,7 +14,7 @@ import (
 const suiObjectLimit = 4096
 const suiObjectPageSize = 100
 
-var suiObjectReadMask = []string{"object_id", "version", "owner", "object_type", "json"}
+var suiObjectReadMask = []string{"object_id", "version", "owner", "object_type", "json", "previous_transaction"}
 var _ SuiObjectReader = (*SuiGRPCClient)(nil)
 
 func decodeSuiObject(object *rpcv2.Object) (SuiObject, error) {
@@ -54,7 +54,7 @@ func decodeSuiObject(object *rpcv2.Object) (SuiObject, error) {
 	default:
 		return SuiObject{}, fmt.Errorf("unknown Sui object owner kind")
 	}
-	return SuiObject{ID: id.Hex(), ObjectType: typ, Owner: owner, OwnerKind: kind.String(), Content: string(content), Version: object.GetVersion()}, nil
+	return SuiObject{ID: id.Hex(), ObjectType: typ, Owner: owner, OwnerKind: kind.String(), Content: string(content), Version: object.GetVersion(), PreviousTransaction: object.GetPreviousTransaction()}, nil
 }
 
 // Objects batches point reads. Only explicit NotFound entries are omitted;

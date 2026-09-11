@@ -12,11 +12,13 @@ import (
 
 type latestSuiFixture struct {
 	naviReaderFixture
-	objects     map[string]SuiObject
-	tables      map[string][]SuiObject
-	directory   map[string][]string
-	failObjects bool
-	enumerated  []string
+	objects          map[string]SuiObject
+	tables           map[string][]SuiObject
+	transactions     map[string][]SuiObjectChange
+	versions         map[uint64]SuiObject
+	transactionReads int
+	failObjects      bool
+	enumerated       []string
 }
 
 func (f *latestSuiFixture) Objects(_ context.Context, ids []string) (map[string]SuiObject, error) {
@@ -49,8 +51,19 @@ func (f *latestSuiFixture) DynamicFields(_ context.Context, id string) ([]SuiObj
 	}
 	return rows, nil
 }
-func (f *latestSuiFixture) ObjectsByType(_ context.Context, typ string) ([]string, error) {
-	return f.directory[typ], nil
+func (f *latestSuiFixture) TransactionObjectChanges(_ context.Context, digest string) ([]SuiObjectChange, error) {
+	f.transactionReads++
+	return f.transactions[digest], nil
+}
+func (f *latestSuiFixture) ObjectAtVersion(_ context.Context, id string, version uint64) (SuiObject, error) {
+	object, ok := f.versions[version]
+	if !ok || object.ID != id {
+		return SuiObject{}, fmt.Errorf("missing object version")
+	}
+	return object, nil
+}
+func (f *latestSuiFixture) PreviousTransaction(_ context.Context, id string) (string, error) {
+	return f.objects[id].PreviousTransaction, nil
 }
 func latestObject(id, typ, kind, owner string, fields map[string]any) SuiObject {
 	id = naviAddress(id)
@@ -63,7 +76,7 @@ func latestObject(id, typ, kind, owner string, fields map[string]any) SuiObject 
 }
 func latestFixture() *latestSuiFixture {
 	pin, _ := newSuiCheckpoint(100, suiTestDigest, time.Unix(1000, 0))
-	return &latestSuiFixture{naviReaderFixture: naviReaderFixture{pin: pin, metadata: map[string]SuiCoinMetadata{suiLongType: {CoinType: suiLongType, Symbol: "SUI", Decimals: 9}}}, objects: map[string]SuiObject{}, tables: map[string][]SuiObject{}, directory: map[string][]string{}}
+	return &latestSuiFixture{naviReaderFixture: naviReaderFixture{pin: pin, metadata: map[string]SuiCoinMetadata{suiLongType: {CoinType: suiLongType, Symbol: "SUI", Decimals: 9}}}, objects: map[string]SuiObject{}, tables: map[string][]SuiObject{}, transactions: map[string][]SuiObjectChange{}, versions: map[uint64]SuiObject{}}
 }
 func (f *latestSuiFixture) addMarket(number, last int, account string, amount string, emode bool) {
 	storage := naviAddress(fmt.Sprintf("0x%x", 0x100+number))
@@ -76,11 +89,20 @@ func (f *latestSuiFixture) addMarket(number, last int, account string, amount st
 	emodes := naviAddress(fmt.Sprintf("0x%x", 0x500+number))
 	f.objects[storage] = latestObject(storage, naviStorageType, "SHARED", "", map[string]any{"reserves_count": 1, "reserves": map[string]any{"id": reserves}})
 	market := latestObject(fmt.Sprintf("0x%x", 0x600+number), suiFieldType(naviMarketKeyType, "0x1e4a13a0494d5facdbe8473e74127b838c2d446ecec0ce262e2eddafa77259cb::storage::MarketInfo"), "OBJECT", storage, map[string]any{"value": map[string]any{"market_id": number, "last_market_id": last, "is_main_market": number == 0}})
+	if number == 0 && last > 0 {
+		initial := latestObject(market.ID, market.ObjectType, "OBJECT", storage, map[string]any{"value": map[string]any{"market_id": 0, "last_market_id": 0, "is_main_market": true}})
+		f.versions[1] = initial
+		market.Version = 2
+		market.PreviousTransaction = suiTestDigest
+		f.transactions[suiTestDigest] = []SuiObjectChange{{ID: market.ID, InputVersion: 1, OutputVersion: 2}}
+	}
+	if number > 0 {
+		f.transactions[suiTestDigest] = append(f.transactions[suiTestDigest], SuiObjectChange{ID: storage, ObjectType: suiType(naviStorageType), OwnerKind: "SHARED", Created: true, OutputVersion: 2})
+	}
 	mode := latestObject(fmt.Sprintf("0x%x", 0x700+number), suiFieldType(naviEmodeKeyType, "0x1e4a13a0494d5facdbe8473e74127b838c2d446ecec0ce262e2eddafa77259cb::storage::Emode"), "OBJECT", storage, map[string]any{"value": map[string]any{"user_emode_id": map[string]any{"id": emodes}}})
 	f.tables[storage] = []SuiObject{market, mode}
 	reserve := latestObject(fmt.Sprintf("0x%x", 0x800+number), suiFieldType("u8", "0xd899cf7d2b5db716bd2cf55599fb0d5ee38a3061e7b6bb6eebf73fa5bc4c81ca::storage::ReserveData"), "OBJECT", reserves, map[string]any{"name": 0, "value": map[string]any{"id": 0, "coin_type": "2::sui::SUI", "current_supply_index": naviRay.String(), "current_supply_rate": "0", "last_update_timestamp": "1000000", "supply_balance": map[string]any{"user_state": map[string]any{"id": supply}}, "borrow_balance": map[string]any{"user_state": map[string]any{"id": borrow}}}})
 	f.tables[reserves] = []SuiObject{reserve}
-	f.directory[naviStorageType] = append(f.directory[naviStorageType], storage)
 	if amount != "" {
 		id, _ := suiAddressFieldID(supply, account)
 		f.objects[id] = latestObject(id, suiFieldType("address", "u256"), "OBJECT", supply, map[string]any{"name": naviAddress(account), "value": amount})
@@ -105,7 +127,7 @@ func TestNaviLatestDiscoversNewMarketAndDeduplicatesChildCaps(t *testing.T) {
 		o := latestObject(id, naviAccountType, "ADDRESS", owner.Hex(), map[string]any{"owner": naviAddress("0x22")})
 		f.objects[o.ID] = o
 	}
-	r := NewSuiProtocolReader(f)
+	r := NewSuiProtocolReader()
 	got, err := r.ReadLatest(context.Background(), "navi", owner, f)
 	if err != nil || len(got.Errors) > 0 || len(got.Groups) != 2 {
 		t.Fatalf("%+v %v", got, err)
@@ -132,7 +154,7 @@ func TestNaviLatestRejectsIncompleteMarketDirectory(t *testing.T) {
 	f := latestFixture()
 	owner, _ := ParseSuiAddress("0x11")
 	f.addMarket(0, 1, owner.Hex(), "1", false)
-	got, err := NewSuiProtocolReader(f).ReadLatest(context.Background(), "navi", owner, f)
+	got, err := NewSuiProtocolReader().ReadLatest(context.Background(), "navi", owner, f)
 	if err != nil || len(got.Errors) != 1 || !strings.Contains(got.Errors[0].Error(), "market inventory") || len(got.Groups) != 0 {
 		t.Fatalf("incomplete %+v %v", got, err)
 	}
@@ -142,7 +164,7 @@ func TestNaviLatestRejectsMissingReserve(t *testing.T) {
 	owner, _ := ParseSuiAddress("0x11")
 	f.addMarket(0, 0, owner.Hex(), "1", false)
 	f.tables[naviAddress("0x200")] = nil
-	got, err := NewSuiProtocolReader(f).ReadLatest(context.Background(), "navi", owner, f)
+	got, err := NewSuiProtocolReader().ReadLatest(context.Background(), "navi", owner, f)
 	if err != nil || len(got.Errors) != 1 || len(got.Groups) != 0 {
 		t.Fatalf("reserve gap %+v %v", got, err)
 	}
@@ -152,7 +174,7 @@ func TestNaviLatestPointReadFailureIsNotZero(t *testing.T) {
 	owner, _ := ParseSuiAddress("0x11")
 	f.addMarket(0, 0, owner.Hex(), "1", false)
 	f.failObjects = true
-	got, err := NewSuiProtocolReader(f).ReadLatest(context.Background(), "navi", owner, f)
+	got, err := NewSuiProtocolReader().ReadLatest(context.Background(), "navi", owner, f)
 	if err != nil || len(got.Errors) != 1 || len(got.Groups) != 0 {
 		t.Fatalf("point read gap %+v %v", got, err)
 	}
@@ -163,7 +185,7 @@ func TestLatestVaultReceiptFindsUnlistedVaultAndEmptyState(t *testing.T) {
 	receipt, vault, parent := naviAddress("0x22"), naviAddress("0x33"), naviAddress("0x44")
 	f.objects[receipt] = latestObject(receipt, naviVaultPackage+"::navi_vault::Receipt", "ADDRESS", owner.Hex(), map[string]any{"vault_address": vault})
 	f.objects[vault] = latestObject(vault, naviVaultPackage+"::navi_vault::Vault<0x2::sui::SUI>", "SHARED", "", map[string]any{"total_shares": "3", "total_assets": "1000000001", "user_states": map[string]any{"id": parent}})
-	r := NewSuiProtocolReader(f)
+	r := NewSuiProtocolReader()
 	state := suiProtocolState{}
 	if err := r.loadVaults(context.Background(), "navi", owner, f, &state); err != nil {
 		t.Fatal(err)

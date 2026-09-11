@@ -62,16 +62,21 @@ later markets, vaults, rewards, and replacement contracts with their narrower
 component deployment windows.
 
 Sui uses a separate `SuiReader` for direct wallet holdings and
-`NewSuiProtocolReader(directory)` for latest NAVI lending, NAVI Multiply,
+`NewSuiProtocolReader()` for latest NAVI lending, NAVI Multiply,
 native NAVI vaults, and Volo strategy vaults (including Single Loop and Astros).
 The protocol IDs are `navi` and `volo-vaults`. `ReadLatest` takes a `SuiObjectReader`
-(`SuiGRPCClient` implements it); neither protocol requires a dedicated processor.
-The host supplies a Sui GraphQL endpoint through `NewSuiGraphQLDirectory` for
-shared-object discovery. Endpoint configuration stays outside the kernel.
+with `SuiObjectLineageReader` (`SuiGRPCClient` implements both). All discovery and
+state reads use that gRPC connection; neither protocol requires a dedicated
+processor or a separate object-directory service.
 
-The directory discovers Storage objects by defining type. Their current
-MarketInfo and reserve tables establish the market relationships, and the main
-Storage's `last_market_id` checks inventory completeness. New markets and
+NAVI discovery follows the main Storage's market-counter object through its
+producing transactions and previous object versions. Created Storage objects
+are checked against current chain state and the counter's change. This visits
+market-creation transactions, without scanning checkpoint ranges. Root IDs are
+cached by counter version; new versions extend the inventory. The endpoint must
+retain those specific transactions and object versions; missing lineage is an
+explicit coverage error. MarketInfo and reserve tables establish relationships,
+and `last_market_id` checks inventory completeness. New markets and
 reserves need no address-list update. Capability ownership identifies Multiply
 accounts, including child capabilities that share one logical account. User
 principals and e-mode entries are batched point reads of derived dynamic field
@@ -79,7 +84,8 @@ IDs, without enumerating the protocol's user tables.
 
 Wallet-owned receipts discover every native and Volo vault the wallet uses,
 including strategy variants. NAVI receipts use `vault_address`; Volo receipts
-use `vault_id`. Vault shares, NAV tables and oracle prices come from current
+use `vault_id`. The Volo oracle is discovered once from its defining package's
+publication transaction. Vault shares, NAV tables and oracle prices come from current
 chain state. Fresh or emptied receipts with no state entry contribute no
 position; RPC failures remain coverage errors.
 
