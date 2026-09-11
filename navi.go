@@ -75,111 +75,58 @@ func (r *SuiProtocolReader) naviLending(ctx context.Context, owner SuiAddress, p
 		names = append(names, account)
 	}
 	sort.Strings(names)
+	topology, err := r.objects(ctx, "navi", pin.Sequence, `kind_in: ["storage", "market", "reserve"]`)
+	if err != nil {
+		return nil, err
+	}
+	tables, err := naviBalanceTables(topology)
+	if err != nil {
+		return nil, err
+	}
+	// Keep orphan principals in the response so incomplete topology is reported,
+	// rather than hiding a position by filtering its unknown parent out upstream.
 	principals, err := r.objects(ctx, "navi", pin.Sequence, `kind: "principal", owner_in: `+quotedStrings(names))
 	if err != nil {
 		return nil, err
 	}
 	type position struct {
-		account, market, asset, side, parent string
-		principal                            *big.Int
+		account   string
+		table     naviBalanceTable
+		principal *big.Int
 	}
 	positions := []position{}
-	seen := map[string]bool{}
+	seen := make(map[string]bool)
+	tokens := make(map[string]bool)
 	for _, row := range principals {
-		if row.Kind != "principal" || !accounts[row.Owner] {
-			return nil, fmt.Errorf("unexpected lending principal owner")
+		table, ok := tables[row.Parent]
+		if !ok || row.Kind != "principal" || !accounts[row.Owner] {
+			return nil, fmt.Errorf("unexpected lending principal attribution")
 		}
 		fields, err := suiObjectFields(row.Content)
 		if err != nil {
 			return nil, err
 		}
 		account, err := fields.address("name")
-		if err != nil || account != row.Owner {
-			return nil, fmt.Errorf("invalid lending principal attribution")
+		if err != nil || account != row.Owner || row.Key != account {
+			return nil, fmt.Errorf("invalid lending principal identity")
 		}
-		amount, err := fields.uint("value")
-		if err != nil {
-			return nil, err
-		}
-		parts := strings.Split(row.Key, ":")
-		if len(parts) != 3 || (parts[2] != "supply" && parts[2] != "borrow") {
-			return nil, fmt.Errorf("invalid principal reserve key")
-		}
-		for _, id := range parts[:2] {
-			if n, e := strconv.ParseUint(id, 10, 64); e != nil || strconv.FormatUint(n, 10) != id {
-				return nil, fmt.Errorf("invalid principal market or asset")
-			}
-		}
-		identity := row.Owner + ":" + row.Key
+		identity := row.Parent + ":" + account
 		if seen[identity] {
 			return nil, fmt.Errorf("duplicate lending principal")
 		}
 		seen[identity] = true
+		amount, err := fields.uint("value")
+		if err != nil {
+			return nil, err
+		}
 		if amount.Sign() == 0 {
 			continue
 		}
-		positions = append(positions, position{row.Owner, parts[0], parts[1], parts[2], row.Parent, amount})
+		positions = append(positions, position{account, table, amount})
+		tokens[table.Reserve.CoinType] = true
 	}
 	if len(positions) == 0 {
 		return nil, nil
-	}
-	reserves, err := r.objects(ctx, "navi", pin.Sequence, `kind: "reserve"`)
-	if err != nil {
-		return nil, err
-	}
-	byKey := map[string]suiFields{}
-	coinTypes := map[string]string{}
-	for _, row := range reserves {
-		if row.Kind != "reserve" || byKey[row.Key] != nil {
-			return nil, fmt.Errorf("invalid or duplicate NAVI reserve")
-		}
-		fields, err := suiObjectFields(row.Content)
-		if err != nil {
-			return nil, err
-		}
-		reserve, err := fields.object("value")
-		if err != nil {
-			return nil, err
-		}
-		asset, err := reserve.uint("id")
-		if err != nil {
-			return nil, err
-		}
-		parts := strings.Split(row.Key, ":")
-		if len(parts) != 2 || parts[1] != asset.String() {
-			return nil, fmt.Errorf("invalid NAVI reserve identity")
-		}
-		raw, err := reserve.text("coin_type")
-		if err != nil {
-			return nil, err
-		}
-		coin, err := suiCoinType(raw)
-		if err != nil {
-			return nil, err
-		}
-		byKey[row.Key] = reserve
-		coinTypes[row.Key] = coin
-	}
-	tokens := map[string]bool{}
-	for _, p := range positions {
-		key := p.market + ":" + p.asset
-		reserve := byKey[key]
-		if reserve == nil {
-			return nil, fmt.Errorf("NAVI reserve %s is not indexed at checkpoint %d", key, pin.Sequence)
-		}
-		balance, err := reserve.object(p.side + "_balance")
-		if err != nil {
-			return nil, err
-		}
-		table, err := balance.object("user_state")
-		if err != nil {
-			return nil, err
-		}
-		parent, err := table.address("id")
-		if err != nil || parent != p.parent {
-			return nil, fmt.Errorf("principal belongs to another NAVI reserve")
-		}
-		tokens[coinTypes[key]] = true
 	}
 	metadata, err := suiProtocolMetadata(ctx, reader, tokens)
 	if err != nil {
@@ -206,22 +153,23 @@ func (r *SuiProtocolReader) naviLending(ctx context.Context, owner SuiAddress, p
 	}
 	groups := map[string]*SuiProtocolGroup{}
 	for _, p := range positions {
-		reserveKey := p.market + ":" + p.asset
-		reserve := byKey[reserveKey]
-		coin := metadata[coinTypes[reserveKey]]
+		ref := p.table.Reserve
+		reserve := ref.Fields
+		coin := metadata[ref.CoinType]
+		side := p.table.Side
 		last, err := reserve.uint("last_update_timestamp")
 		if err != nil || !last.IsUint64() {
 			return nil, fmt.Errorf("invalid NAVI reserve time")
 		}
-		index, err := reserve.uint("current_" + p.side + "_index")
+		index, err := reserve.uint("current_" + side + "_index")
 		if err != nil {
 			return nil, err
 		}
-		rate, err := reserve.uint("current_" + p.side + "_rate")
+		rate, err := reserve.uint("current_" + side + "_rate")
 		if err != nil {
 			return nil, err
 		}
-		index, err = naviIndexAt(index, rate, last.Uint64(), uint64(pin.Timestamp.UnixMilli()), p.side == "borrow")
+		index, err = naviIndexAt(index, rate, last.Uint64(), uint64(pin.Timestamp.UnixMilli()), side == "borrow")
 		if err != nil {
 			return nil, err
 		}
@@ -229,21 +177,21 @@ func (r *SuiProtocolReader) naviLending(ctx context.Context, owner SuiAddress, p
 		if amount.Sign() == 0 {
 			continue
 		}
-		groupKey := p.market + ":" + p.account
+		groupKey := ref.Market + ":" + p.account
 		group := groups[groupKey]
 		if group == nil {
 			product, label := "lending", "Lending"
 			if p.account != owner.Hex() && emodes[groupKey] {
 				product, label = "multiply", "Multiply"
 			}
-			group = &SuiProtocolGroup{ID: "navi:" + groupKey, MarketID: p.market, Label: label, Metadata: map[string]any{"product": product, "account": p.account}}
+			group = &SuiProtocolGroup{ID: "navi:" + groupKey, MarketID: ref.Market, Label: label, Metadata: map[string]any{"product": product, "account": p.account}}
 			groups[groupKey] = group
 		}
 		kind := "asset"
-		if p.side == "borrow" {
+		if side == "borrow" {
 			kind = "debt"
 		}
-		group.Components = append(group.Components, SuiProtocolComponent{Kind: kind, Coin: coin, AmountRaw: amount.String(), Metadata: map[string]any{"reserve": p.asset, "scaledPrincipal": p.principal.String()}})
+		group.Components = append(group.Components, SuiProtocolComponent{Kind: kind, Coin: coin, AmountRaw: amount.String(), Metadata: map[string]any{"reserve": ref.Asset, "scaledPrincipal": p.principal.String()}})
 	}
 	result := []SuiProtocolGroup{}
 	for _, group := range groups {

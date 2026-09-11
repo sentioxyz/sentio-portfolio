@@ -68,6 +68,13 @@ The two index-backed protocol IDs are `navi` and `volo-vaults`; each requires it
 own versioned index configuration. The reader shares the engine's indexer
 concurrency limit.
 
+NAVI markets and reserves are discovered from indexed Storage, MarketInfo and
+ReserveData objects. The reader joins their table handles at the requested
+checkpoint to attribute supply and borrow principals. New markets, reserves,
+and vaults using the protocol's existing object types need no address-list
+update. Before MarketInfo existed, the sole Storage identifies legacy market 0;
+incomplete or ambiguous relationships fail with a coverage error.
+
 Protocol reads require an immutable checkpoint and a durable index watermark
 covering it. Every entity query uses that checkpoint, including transferred
 account caps and vault receipts. Uncovered history is an error; no read falls

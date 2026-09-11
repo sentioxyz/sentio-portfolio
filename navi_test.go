@@ -159,8 +159,10 @@ func TestNaviHistoricalLendingAndTransferredMultiplyCap(t *testing.T) {
 	parent := naviAddress("0x33")
 	objects := []suiHistoryObject{
 		historyObjectFixture("0x22", "account", owner.Hex(), "", "", "", map[string]any{"owner": cap}),
-		historyObjectFixture("0x44", "principal", cap, parent, "4:0:borrow", "", map[string]any{"name": cap, "value": "2000000000"}),
-		historyObjectFixture("0x55", "reserve", "", "", "4:0", "", map[string]any{"value": map[string]any{"id": 0, "coin_type": "2::sui::SUI", "current_borrow_index": naviRay.String(), "current_borrow_rate": "0", "last_update_timestamp": "1000000", "borrow_balance": map[string]any{"user_state": map[string]any{"id": parent}}}}),
+		historyObjectFixture("0x44", "principal", cap, parent, cap, "", map[string]any{"name": cap, "value": "2000000000"}),
+		historyObjectFixture("0x55", "reserve", "", naviAddress("0x66"), "0", "", map[string]any{"name": 0, "value": map[string]any{"id": 0, "coin_type": "2::sui::SUI", "current_borrow_index": naviRay.String(), "current_borrow_rate": "0", "last_update_timestamp": "1000000", "borrow_balance": map[string]any{"user_state": map[string]any{"id": parent}}, "supply_balance": map[string]any{"user_state": map[string]any{"id": naviAddress("0x77")}}}}),
+		historyObjectFixture("0x88", "storage", "", "", "", "", map[string]any{"reserves": map[string]any{"id": naviAddress("0x66")}}),
+		historyObjectFixture("0x99", "market", "", naviAddress("0x88"), "4", "", map[string]any{"value": map[string]any{"market_id": "4", "is_main_market": false}}),
 	}
 	rows := []suiHistoryValue{{ID: "emode:4:" + cap, Kind: "emode", Account: cap, Market: "4", Content: `{"entered":true}`, Checkpoint: "90"}}
 	source := naviFixtureServer(t, objects, rows, pin)
@@ -198,6 +200,17 @@ func TestNaviHistoryRejectsUncoveredAndFutureRows(t *testing.T) {
 	}
 	if err := historyRowAt("garbage", 100); err == nil {
 		t.Fatal("malformed state accepted")
+	}
+}
+
+func TestNaviHistoryReportsPrincipalWithoutReserve(t *testing.T) {
+	pin, _ := newSuiCheckpoint(100, suiTestDigest, time.Unix(1000, 0))
+	owner, _ := ParseSuiAddress("0x11")
+	objects := []suiHistoryObject{historyObjectFixture("0x44", "principal", owner.Hex(), naviAddress("0x33"), owner.Hex(), "", map[string]any{"name": owner.Hex(), "value": "2000000000"})}
+	source := naviFixtureServer(t, objects, nil, pin)
+	result, err := source.Read(context.Background(), "navi", owner, pin, naviReaderFixture{pin: pin})
+	if err == nil && len(result.Errors) == 0 {
+		t.Fatal("missing reserve silently hid an indexed principal")
 	}
 }
 
