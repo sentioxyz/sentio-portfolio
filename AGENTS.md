@@ -104,6 +104,10 @@ the `sui.rpc.v2` services a fullnode, or a proxy in front of one, serves. The ru
   processor is required. Check market inventory completeness against chain state,
   attribute capabilities/receipts to their current owners, and report the latest read window.
   Historical protocol requests are unsupported and must not read latest state under a past pin.
+- Suilend lending uses current directly owned obligation capabilities and point reads of
+  obligations, their parent links and lending markets. Never enumerate the global obligation
+  table or use explorer quantities as position state. Match Move WAD rounding and compound
+  reserve interest to the observed checkpoint timestamp; preserve the latest read window.
 - A checkpoint is the pin: sequence number, 32-byte digest and timestamp fill `BlockRef` as a
   block does. `GetCheckpoint` is asked with a read mask for those three fields only. The dialer
   verifies the endpoint's chain identifier (`GetServiceInfo.chain_id`, the base58 genesis digest

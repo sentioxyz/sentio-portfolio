@@ -63,11 +63,30 @@ component deployment windows.
 
 Sui uses a separate `SuiReader` for direct wallet holdings and
 `NewSuiProtocolReader()` for latest NAVI lending, NAVI Multiply,
-native NAVI vaults, and Volo strategy vaults (including Single Loop and Astros).
-The protocol IDs are `navi` and `volo-vaults`. `ReadLatest` takes a `SuiObjectReader`
-with `SuiObjectLineageReader` (`SuiGRPCClient` implements both). All discovery and
-state reads use that gRPC connection; neither protocol requires a dedicated
-processor or a separate object-directory service.
+native NAVI vaults, Volo strategy vaults (including Single Loop and Astros),
+and Suilend lending. The protocol IDs are `navi`, `volo-vaults`, and `suilend`.
+`ReadLatest` takes a `SuiObjectReader`; NAVI and Volo discovery also requires
+`SuiObjectLineageReader` (`SuiGRPCClient` implements both). All discovery and
+state reads use that gRPC connection; these protocols require no dedicated
+processor or separate object-directory service.
+
+Suilend discovers every directly owned `ObligationOwnerCap` from its defining
+package, deduplicates capabilities pointing to the same obligation, and follows
+the obligation to its lending market. Market type, reserve index/coin identity,
+and the dynamic object-field link back to the market's obligation table are
+validated. This includes isolated lending markets without a market allowlist;
+it does not enumerate the global obligation table. Strategies with nested
+capabilities, liquid staking, standalone wallet cTokens and incentive rewards
+are outside this lending surface.
+
+Deposits convert cTokens through net reserve supply (available + borrowed -
+unclaimed spread fees). Borrows apply the cumulative borrow index. Reserves
+accrue to the observed checkpoint timestamp using the on-chain piecewise APR
+curve, per-second compounding and spread fee. All operations use integer WAD
+arithmetic and the Move operation order; raw token amounts are floored only
+after conversion. Metadata comes from the chain and must agree with reserve
+precision. USD prices remain the host's responsibility. The formulas follow
+[Suilend's Move contracts](https://github.com/suilend/suilend/tree/devel/contracts/suilend/sources).
 
 NAVI discovery follows the main Storage's market-counter object through its
 producing transactions and previous object versions. Created Storage objects
