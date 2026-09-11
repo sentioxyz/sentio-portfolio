@@ -1,7 +1,7 @@
 # Sentio Portfolio
 
 `sentio-portfolio` is the pure Go calculation kernel for wallet protocol
-positions on Ethereum, BSC, Base, and Arbitrum. It owns protocol adapters,
+positions on Ethereum, BSC, Base, Arbitrum, and Sui. It owns protocol adapters,
 latest/fixed-block RPC reads, account attribution, index-backed position reads,
 and valuation aggregation.
 
@@ -60,6 +60,52 @@ for every advertised chain before the engine can start; genesis support is
 spelled out rather than inferred from a zero value. Adapters continue to gate
 later markets, vaults, rewards, and replacement contracts with their narrower
 component deployment windows.
+
+Sui uses a separate `SuiReader` for direct wallet holdings and
+`NewSuiProtocolReader()` for latest NAVI lending, NAVI Multiply,
+native NAVI vaults, and Volo strategy vaults (including Single Loop and Astros).
+The protocol IDs are `navi` and `volo-vaults`. `ReadLatest` takes a `SuiObjectReader`
+with `SuiObjectLineageReader` (`SuiGRPCClient` implements both). All discovery and
+state reads use that gRPC connection; neither protocol requires a dedicated
+processor or a separate object-directory service.
+
+NAVI discovery follows the main Storage's market-counter object through its
+producing transactions and previous object versions. Created Storage objects
+are checked against current chain state and the counter's change. This visits
+market-creation transactions, without scanning checkpoint ranges. Root IDs are
+cached by counter version; new versions extend the inventory. The endpoint must
+retain those specific transactions and object versions; missing lineage is an
+explicit coverage error. MarketInfo and reserve tables establish relationships,
+and `last_market_id` checks inventory completeness. New markets and
+reserves need no address-list update. Capability ownership identifies Multiply
+accounts, including child capabilities that share one logical account. User
+principals and e-mode entries are batched point reads of derived dynamic field
+IDs, without enumerating the protocol's user tables.
+
+Wallet-owned receipts discover every native and Volo vault the wallet uses,
+including strategy variants. NAVI receipts use `vault_address`; Volo receipts
+use `vault_id`. The Volo oracle is discovered once from its defining package's
+publication transaction. Vault shares, NAV tables and oracle prices come from current
+chain state. Fresh or emptied receipts with no state entry contribute no
+position; RPC failures remain coverage errors.
+
+Reads report a latest observation window (`headBeforeRead`/`headAfterRead`),
+not an atomic portfolio at one checkpoint. History is not supported. Hosts must
+reject historical requests before reading current state. They must preserve the
+window metadata when combining wallet and protocol snapshots.
+
+Lending projects reserve interest indices to the observed timestamp using
+integer RAY arithmetic and NAVI's fixed nine-decimal principal precision.
+Multiply retains collateral and debt. Vault amounts use stored NAV
+(`valuation: stored_nav`), without simulating a rebalance or harvest. Volo
+includes pending deposits and claimable principal once, and reports the oldest
+contributing NAV/oracle timestamp. Incentive rewards and withdrawal fees are
+excluded; amounts describe positions, not an immediate redemption quote. Coin
+precision comes from on-chain metadata, and the host supplies current prices.
+
+The accounting follows the official [NAVI contracts](https://github.com/naviprotocol/navi-smart-contracts)
+and [NAVI SDK](https://github.com/naviprotocol/naviprotocol-monorepo), with Volo
+integer redemption operations checked against its published Move bytecode.
 
 Run the local test suites with:
 
