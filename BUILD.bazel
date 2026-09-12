@@ -141,6 +141,7 @@ go_test(
         "navi_test.go",
         "navi_discovery_test.go",
         "navi_latest_test.go",
+        "volo_valuation_test.go",
         "sui_lineage_grpc_test.go",
         "sui_objects_grpc_test.go",
         "navi_topology_test.go",
