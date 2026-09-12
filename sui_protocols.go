@@ -65,6 +65,7 @@ type suiProtocolValue struct {
 type suiProtocolState struct {
 	Owned, Topology, Principals, Vaults, ReceiptStates, OracleObjects []suiProtocolObject
 	Emodes, AssetValues                                               []suiProtocolValue
+	VaultPrices                                                       map[string]suiProtocolObject
 }
 
 // ReadLatest reports head observations explicitly; they need not be ordered

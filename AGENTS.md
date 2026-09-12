@@ -113,6 +113,13 @@ the `sui.rpc.v2` services a fullnode, or a proxy in front of one, serves. The ru
   reserve interest forward to the observed checkpoint timestamp; preserve the head observations.
   For NAVI and Suilend, use stored interest when a reserve is newer than the observed head.
   Volo NAV and oracle timestamps are object metadata, not assertions against that head.
+- Volo's stored USD NAV must use the base-coin oracle version from the same valuation
+  transaction, never a newer global quote. Follow the nonzero NAV timestamp fields to that
+  transaction and read its quote version over gRPC. Keep a separate quote per vault, including
+  vaults with the same base coin. Missing retained versions or mixed nonzero NAV periods are
+  coverage errors. Report `valuation=settled_nav` and the NAV/quote timestamps: current receipt
+  ownership does not make a stored valuation a live strategy valuation. Zero asset rows do not
+  determine the valuation period. Ordinary portfolio history remains unsupported.
 - A checkpoint is the pin: sequence number, 32-byte digest and timestamp fill `BlockRef` as a
   block does. `GetCheckpoint` is asked with a read mask for those three fields only. The dialer
   verifies the endpoint's chain identifier (`GetServiceInfo.chain_id`, the base58 genesis digest

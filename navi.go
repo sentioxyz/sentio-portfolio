@@ -293,6 +293,8 @@ func suiVaults(ctx context.Context, protocolID string, reader SuiReader, state s
 					return nil, fmt.Errorf("Volo normalized base price is zero")
 				}
 				group.Metadata["navOldestTimestampMs"] = strconv.FormatUint(valuation.OldestTimestampMS, 10)
+				group.Metadata["valuationPriceTimestampMs"] = strconv.FormatUint(valuation.PriceTimestampMS, 10)
+				group.Metadata["valuation"] = "settled_nav"
 			}
 			group.Components = append(group.Components, SuiProtocolComponent{Kind: "asset", Coin: coin, AmountRaw: amount.String()})
 		}
@@ -323,6 +325,7 @@ func suiVaults(ctx context.Context, protocolID string, reader SuiReader, state s
 type voloValuation struct {
 	Value, Price      *big.Int
 	OldestTimestampMS uint64
+	PriceTimestampMS  uint64
 }
 
 func voloBaseAmount(shares, totalShares, value, price *big.Int, decimals uint8) *big.Int {
@@ -349,9 +352,11 @@ func voloValuations(vaultIDs []string, vaults map[string]suiFields, coins map[st
 	}
 	rows := state.AssetValues
 	values := make(map[string]map[string]*big.Int)
-	prices, priceTimes, err := voloOraclePrices(metadata, state.OracleObjects)
-	if err != nil {
-		return nil, err
+	oracles := []suiProtocolObject{}
+	for _, object := range state.OracleObjects {
+		if object.Kind == "oracle" {
+			oracles = append(oracles, object)
+		}
 	}
 	timestamps := make(map[string]map[string]uint64)
 	for _, row := range rows {
@@ -388,6 +393,15 @@ func voloValuations(vaultIDs []string, vaults map[string]suiFields, coins map[st
 	}
 	result := make(map[string]voloValuation)
 	for _, id := range vaultIDs {
+		quote, ok := state.VaultPrices[id]
+		if !ok {
+			return nil, fmt.Errorf("Volo settlement quote is unavailable")
+		}
+		quoteRows := append(append([]suiProtocolObject{}, oracles...), quote)
+		prices, priceTimes, err := voloOraclePrices(metadata, quoteRows)
+		if err != nil {
+			return nil, err
+		}
 		assets, ok := vaults[id]["asset_types"].([]any)
 		if !ok {
 			return nil, fmt.Errorf("vault asset inventory is missing")
@@ -406,14 +420,19 @@ func voloValuations(vaultIDs []string, vaults map[string]suiFields, coins map[st
 				return nil, fmt.Errorf("Volo vault asset valuation is unavailable")
 			}
 			seen[name] = true
-			oldest = min(oldest, timestamps[id][name])
+			if value.Sign() > 0 {
+				if timestamps[id][name] != priceTimes[coins[id]] {
+					return nil, fmt.Errorf("Volo NAV and settlement quote timestamps disagree")
+				}
+				oldest = min(oldest, timestamps[id][name])
+			}
 			total.Add(total, value)
 		}
 		price := prices[coins[id]]
 		if price == nil || price.Sign() == 0 {
 			return nil, fmt.Errorf("Volo vault base-coin oracle is unavailable")
 		}
-		result[id] = voloValuation{Value: total, Price: price, OldestTimestampMS: oldest}
+		result[id] = voloValuation{Value: total, Price: price, OldestTimestampMS: oldest, PriceTimestampMS: priceTimes[coins[id]]}
 	}
 	return result, nil
 }

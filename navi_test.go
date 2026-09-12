@@ -111,7 +111,7 @@ func naviCalculationSource(t *testing.T, objects []suiProtocolObject, values []s
 	return &naviCalculationFixture{objects, values}
 }
 func (f *naviCalculationFixture) Read(ctx context.Context, protocol string, owner SuiAddress, pin SuiCheckpoint, reader SuiReader) (SuiProtocolPositions, error) {
-	state := suiProtocolState{}
+	state := suiProtocolState{VaultPrices: map[string]suiProtocolObject{}}
 	for _, o := range f.objects {
 		switch o.Kind {
 		case "account", "receipt":
@@ -136,6 +136,15 @@ func (f *naviCalculationFixture) Read(ctx context.Context, protocol string, owne
 		}
 		if v.Kind == "assetValue" {
 			state.AssetValues = append(state.AssetValues, v)
+		}
+	}
+	for _, vault := range state.Vaults {
+		coin, _ := suiCoinTypeFromVault(vault.ObjectType)
+		for _, quote := range state.OracleObjects {
+			quoteCoin, _ := suiCoinType(quote.Key)
+			if quote.Kind == "oraclePrice" && quoteCoin == coin {
+				state.VaultPrices[vault.ID] = quote
+			}
 		}
 	}
 	result := SuiProtocolPositions{ProtocolID: protocol, Checkpoint: pin}

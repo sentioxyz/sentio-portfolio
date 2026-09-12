@@ -20,8 +20,9 @@ type SuiObjectReader interface {
 }
 
 // SuiObjectLineageReader follows specific object versions and their producing
-// transactions to discover protocol roots. It does not reconstruct balances at
-// historical checkpoints, or scan a checkpoint range.
+// transactions to discover protocol roots and identify quotes paired with stored
+// NAV. It does not reconstruct balances at historical checkpoints, or scan a
+// checkpoint range.
 type SuiObjectLineageReader interface {
 	ObjectAtVersion(context.Context, string, uint64) (SuiObject, error)
 	PreviousTransaction(context.Context, string) (string, error)

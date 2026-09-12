@@ -463,7 +463,10 @@ func (r *SuiProtocolReader) loadVoloValuation(ctx context.Context, reader SuiObj
 		return err
 	}
 	tables := []string{oracleParent}
-	type navTables struct{ vault, values, times string }
+	type navTables struct {
+		vault, values, times, coin string
+		assets                     map[string]bool
+	}
 	nav := []navTables{}
 	for _, vault := range state.Vaults {
 		if !active[vault.ID] {
@@ -482,13 +485,30 @@ func (r *SuiProtocolReader) loadVoloValuation(ctx context.Context, reader SuiObj
 			return err
 		}
 		tables = append(tables, values, times)
-		nav = append(nav, navTables{vault.ID, values, times})
+		coin, err := suiCoinTypeFromVault(vault.ObjectType)
+		if err != nil {
+			return err
+		}
+		assets, ok := fields["asset_types"].([]any)
+		if !ok {
+			return fmt.Errorf("Volo vault asset inventory is missing")
+		}
+		wanted := map[string]bool{}
+		for _, asset := range assets {
+			name, ok := asset.(string)
+			if !ok || wanted[name] {
+				return fmt.Errorf("invalid Volo vault asset inventory")
+			}
+			wanted[name] = true
+		}
+		nav = append(nav, navTables{vault.ID, values, times, coin, wanted})
 	}
 	entries, err := smallSuiTables(ctx, reader, tables)
 	if err != nil {
 		return err
 	}
 	state.OracleObjects = append(state.OracleObjects, protocolObject(oracle, "oracle", ""))
+	quotes := map[string]SuiObject{}
 	for _, object := range entries[oracleParent] {
 		if object.ObjectType != suiFieldType("0x1::ascii::String", voloVaultPackage+"::vault_oracle::PriceInfo") {
 			return fmt.Errorf("invalid Volo oracle price type")
@@ -501,8 +521,16 @@ func (r *SuiProtocolReader) loadVoloValuation(ctx context.Context, reader SuiObj
 		if err != nil {
 			return err
 		}
-		state.OracleObjects = append(state.OracleObjects, protocolObject(object, "oraclePrice", key))
+		coin, err := suiCoinType(key)
+		if err != nil {
+			return err
+		}
+		if _, exists := quotes[coin]; exists {
+			return fmt.Errorf("duplicate Volo oracle coin")
+		}
+		quotes[coin] = object
 	}
+	state.VaultPrices = map[string]suiProtocolObject{}
 	for _, n := range nav {
 		values, err := suiStringUintTable(entries[n.values], "u256")
 		if err != nil {
@@ -523,8 +551,107 @@ func (r *SuiProtocolReader) loadVoloValuation(ctx context.Context, reader SuiObj
 			content, _ := json.Marshal(map[string]string{"amount": value, "timestamp": timestamp, "asset": asset})
 			state.AssetValues = append(state.AssetValues, suiProtocolValue{ID: "assetValue:" + n.vault + ":" + asset, Kind: "assetValue", Account: n.vault, Content: string(content)})
 		}
+		quote, err := voloSettlementQuote(ctx, reader, quotes[n.coin], values, entries[n.times], n.assets)
+		if err != nil {
+			return fmt.Errorf("Volo vault %s valuation: %w", n.vault, err)
+		}
+		fields, err := suiObjectFields(quote.Content)
+		if err != nil {
+			return err
+		}
+		key, err := fields.text("name")
+		if err != nil {
+			return err
+		}
+		state.VaultPrices[n.vault] = protocolObject(quote, "oraclePrice", key)
 	}
 	return nil
+}
+
+// The NAV tables contain USD values written by a settlement transaction, not
+// live strategy balances. Use the base-coin quote written by that transaction;
+// a newer quote would turn a token price decline into fictitious token yield.
+func voloSettlementQuote(ctx context.Context, reader SuiObjectReader, current SuiObject, values map[string]string, times []SuiObject, wanted map[string]bool) (SuiObject, error) {
+	if current.ID == "" {
+		return SuiObject{}, fmt.Errorf("base-coin oracle is unavailable")
+	}
+	var anchor SuiObject
+	var timestamp uint64
+	for _, object := range times {
+		fields, err := suiObjectFields(object.Content)
+		if err != nil {
+			return SuiObject{}, err
+		}
+		name, err := fields.text("name")
+		if err != nil {
+			return SuiObject{}, err
+		}
+		if !wanted[name] || values[name] == "0" {
+			continue
+		}
+		stamp, err := fields.uint("value")
+		if err != nil || !stamp.IsUint64() || stamp.Sign() == 0 {
+			return SuiObject{}, fmt.Errorf("invalid NAV timestamp")
+		}
+		if anchor.ID != "" && (timestamp != stamp.Uint64() || anchor.PreviousTransaction != object.PreviousTransaction) {
+			return SuiObject{}, fmt.Errorf("NAV assets do not share a settlement transaction")
+		}
+		anchor, timestamp = object, stamp.Uint64()
+	}
+	if anchor.ID == "" {
+		// An entirely zero NAV is zero in every quote; no historical read is needed.
+		return current, nil
+	}
+	if err := validateSuiTransactionDigest(anchor.PreviousTransaction); err != nil {
+		return SuiObject{}, fmt.Errorf("NAV settlement transaction is unavailable")
+	}
+	quote := current
+	if current.PreviousTransaction != anchor.PreviousTransaction || current.Version != anchor.Version {
+		lineage, ok := reader.(SuiObjectLineageReader)
+		if !ok {
+			return SuiObject{}, fmt.Errorf("settlement object-version reads are unavailable")
+		}
+		changes, err := lineage.TransactionObjectChanges(ctx, anchor.PreviousTransaction)
+		if err != nil {
+			return SuiObject{}, fmt.Errorf("settlement transaction: %w", err)
+		}
+		var version uint64
+		anchorMatched := false
+		for _, change := range changes {
+			if change.ID == anchor.ID && change.OutputVersion == anchor.Version {
+				anchorMatched = true
+			}
+			if change.ID == current.ID {
+				version = change.OutputVersion
+			}
+		}
+		if !anchorMatched || version == 0 {
+			return SuiObject{}, fmt.Errorf("matching settlement quote version is unavailable")
+		}
+		quote, err = lineage.ObjectAtVersion(ctx, current.ID, version)
+		if err != nil {
+			return SuiObject{}, fmt.Errorf("settlement quote version: %w", err)
+		}
+		if quote.ID != current.ID || quote.Version != version || quote.PreviousTransaction != anchor.PreviousTransaction {
+			return SuiObject{}, fmt.Errorf("settlement quote lineage mismatch")
+		}
+	}
+	if quote.Owner != current.Owner || quote.OwnerKind != "OBJECT" || quote.ObjectType != current.ObjectType {
+		return SuiObject{}, fmt.Errorf("settlement quote attribution mismatch")
+	}
+	fields, err := suiObjectFields(quote.Content)
+	if err != nil {
+		return SuiObject{}, err
+	}
+	info, err := fields.object("value")
+	if err != nil {
+		return SuiObject{}, err
+	}
+	stamp, err := info.uint("last_updated")
+	if err != nil || !stamp.IsUint64() || stamp.Uint64() != timestamp {
+		return SuiObject{}, fmt.Errorf("NAV and settlement quote timestamps disagree")
+	}
+	return quote, nil
 }
 
 func suiStringUintTable(objects []SuiObject, valueType string) (map[string]string, error) {
