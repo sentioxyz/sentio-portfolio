@@ -78,6 +78,72 @@ func latestFixture() *latestSuiFixture {
 	pin, _ := newSuiCheckpoint(100, suiTestDigest, time.Unix(1000, 0))
 	return &latestSuiFixture{naviReaderFixture: naviReaderFixture{pin: pin, metadata: map[string]SuiCoinMetadata{suiLongType: {CoinType: suiLongType, Symbol: "SUI", Decimals: 9}}}, objects: map[string]SuiObject{}, tables: map[string][]SuiObject{}, transactions: map[string][]SuiObjectChange{}, versions: map[uint64]SuiObject{}}
 }
+
+type latestHeadFixture struct {
+	*latestSuiFixture
+	heads     []SuiCheckpoint
+	headReads int
+}
+
+func (f *latestHeadFixture) LatestCheckpoint(context.Context) (SuiCheckpoint, error) {
+	if f.headReads >= len(f.heads) {
+		return SuiCheckpoint{}, errors.New("unexpected additional head read")
+	}
+	head := f.heads[f.headReads]
+	f.headReads++
+	return head, nil
+}
+
+func TestSuiLatestKeepsPositionsWhenBackendHeadsDiffer(t *testing.T) {
+	for _, protocol := range []string{"navi", "volo-vaults", "suilend"} {
+		for _, skew := range []string{"head regresses", "objects ahead of both heads"} {
+			t.Run(protocol+"/"+skew, func(t *testing.T) {
+				f := latestFixture()
+				owner, _ := ParseSuiAddress("0x11")
+				want := "1000000000"
+				switch protocol {
+				case "navi":
+					f.addMarket(0, 0, owner.Hex(), want, false)
+				case "volo-vaults":
+					receipt, vault, parent := naviAddress("0x22"), naviAddress("0x33"), naviAddress("0x44")
+					f.objects[receipt] = latestObject(receipt, voloVaultPackage+"::receipt::Receipt", "ADDRESS", owner.Hex(), map[string]any{"vault_id": vault})
+					f.objects[vault] = latestObject(vault, voloVaultPackage+"::vault::Vault<0x2::sui::SUI>", "SHARED", "", map[string]any{"total_shares": "0", "receipts": map[string]any{"id": parent}})
+					id, _ := suiAddressFieldID(parent, receipt)
+					f.objects[id] = latestObject(id, suiFieldType("address", voloVaultPackage+"::vault_receipt_info::VaultReceiptInfo"), "OBJECT", parent, map[string]any{"name": receipt, "value": map[string]any{"shares": "0", "pending_withdraw_shares": "0", "pending_deposit_balance": want, "claimable_principal": "0"}})
+				case "suilend":
+					f, owner = suilendFixture()
+					want = "110000000000"
+				}
+				before, after := f.pin, f.pin
+				after.Sequence--
+				after.Timestamp = after.Timestamp.Add(-time.Second)
+				if skew == "objects ahead of both heads" {
+					before.Sequence = after.Sequence - 1
+					before.Timestamp = after.Timestamp.Add(-time.Second)
+				}
+				reader := &latestHeadFixture{latestSuiFixture: f, heads: []SuiCheckpoint{before, after}}
+				got, err := NewSuiProtocolReader().ReadLatest(context.Background(), protocol, owner, reader)
+				if err != nil || len(got.Errors) != 0 || len(got.Groups) != 1 {
+					t.Fatalf("latest positions: %+v, %v", got, err)
+				}
+				group := got.Groups[0]
+				if group.Components[0].AmountRaw != want {
+					t.Fatalf("amount = %s, want %s", group.Components[0].AmountRaw, want)
+				}
+				if protocol == "suilend" && (len(group.Components) != 2 || group.Components[1].Kind != "debt" || group.Components[1].AmountRaw != "75000000000") {
+					t.Fatalf("head skew changed debt: %+v", group.Components)
+				}
+				if got.Checkpoint != after || got.HeadBeforeRead != before.Sequence || group.Metadata["headBeforeRead"] != fmt.Sprint(before.Sequence) || group.Metadata["headAfterRead"] != fmt.Sprint(after.Sequence) {
+					t.Fatalf("head observations were rewritten: %+v", got)
+				}
+				if reader.headReads != 2 {
+					t.Fatalf("head skew retried the read: %d calls", reader.headReads)
+				}
+			})
+		}
+	}
+}
+
 func (f *latestSuiFixture) addMarket(number, last int, account string, amount string, emode bool) {
 	storage := naviAddress(fmt.Sprintf("0x%x", 0x100+number))
 	if number == 0 {
@@ -190,7 +256,7 @@ func TestLatestVaultReceiptFindsUnlistedVaultAndEmptyState(t *testing.T) {
 	if err := r.loadVaults(context.Background(), "navi", owner, f, &state); err != nil {
 		t.Fatal(err)
 	}
-	groups, err := suiVaults(context.Background(), "navi", f.pin, f, state)
+	groups, err := suiVaults(context.Background(), "navi", f, state)
 	if err != nil || len(groups) != 0 {
 		t.Fatalf("fresh receipt %v %v", groups, err)
 	}
@@ -200,7 +266,7 @@ func TestLatestVaultReceiptFindsUnlistedVaultAndEmptyState(t *testing.T) {
 	if err := r.loadVaults(context.Background(), "navi", owner, f, &state); err != nil {
 		t.Fatal(err)
 	}
-	groups, err = suiVaults(context.Background(), "navi", f.pin, f, state)
+	groups, err = suiVaults(context.Background(), "navi", f, state)
 	if err != nil || len(groups) != 1 || groups[0].Components[0].AmountRaw != "666666667" {
 		t.Fatalf("vault %v %v", groups, err)
 	}

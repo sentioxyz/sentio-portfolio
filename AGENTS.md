@@ -86,9 +86,12 @@ avoid counting tokens already read by protocol adapters, so preserve provenance.
 Sui is read through `SuiReader` (`sui.go`), implemented by `SuiGRPCClient` (`sui_grpc.go`) over
 the `sui.rpc.v2` services a fullnode, or a proxy in front of one, serves. The rules:
 
-- The services answer for the head only. A holdings read is bracketed by two head observations
-  (`GetServiceInfo` before, `GetCheckpoint` after) and reported as a window: `Checkpoint` is the
-  head seen after the read and `HeadBeforeRead` the one seen before. A consumer must surface a
+- The services answer for the head only. A holdings read records two head observations
+  (`GetServiceInfo` before, `GetCheckpoint` after): `Checkpoint` is the
+  head seen after the read and `HeadBeforeRead` the one seen before. Pooled backends may return
+  regressing heads or objects newer than either head; preserve these observations without
+  rejecting positions, clamping metadata, or retrying just to order the heads. They are not
+  bounds on the object versions returned. A consumer must surface a
   head read as such; the rule that a latest amount is never labelled with an earlier `BlockRef`
   applies here too.
 - Direct wallet history is unavailable. A pinned read (`Holdings` with a non-nil checkpoint)
@@ -107,7 +110,9 @@ the `sui.rpc.v2` services a fullnode, or a proxy in front of one, serves. The ru
 - Suilend lending uses current directly owned obligation capabilities and point reads of
   obligations, their parent links and lending markets. Never enumerate the global obligation
   table or use explorer quantities as position state. Match Move WAD rounding and compound
-  reserve interest to the observed checkpoint timestamp; preserve the latest read window.
+  reserve interest forward to the observed checkpoint timestamp; preserve the head observations.
+  For NAVI and Suilend, use stored interest when a reserve is newer than the observed head.
+  Volo NAV and oracle timestamps are object metadata, not assertions against that head.
 - A checkpoint is the pin: sequence number, 32-byte digest and timestamp fill `BlockRef` as a
   block does. `GetCheckpoint` is asked with a read mask for those three fields only. The dialer
   verifies the endpoint's chain identifier (`GetServiceInfo.chain_id`, the base58 genesis digest

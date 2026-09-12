@@ -40,9 +40,6 @@ func readSuilendLatest(ctx context.Context, owner SuiAddress, reader SuiReader) 
 	if err != nil {
 		return result, err
 	}
-	if after.Sequence < before.Sequence || after.Timestamp.Before(before.Timestamp) {
-		return result, fmt.Errorf("Sui head moved backwards during protocol read")
-	}
 	result.Checkpoint, result.HeadBeforeRead = after, before.Sequence
 	if readErr == nil {
 		result.Groups, readErr = suilendLending(ctx, owner, after, reader, state)
@@ -275,7 +272,9 @@ func suilendLending(ctx context.Context, owner SuiAddress, pin SuiCheckpoint, re
 				if pin.Timestamp.Unix() < 0 {
 					return nil, fmt.Errorf("invalid Suilend checkpoint time")
 				}
-				reserve, err = reserve.at(uint64(pin.Timestamp.Unix()))
+				// A newer backend may supply a reserve ahead of the observed head.
+				// Retain its stored interest rather than compound backwards.
+				reserve, err = reserve.at(max(reserve.updated, uint64(pin.Timestamp.Unix())))
 				if err != nil {
 					return nil, err
 				}

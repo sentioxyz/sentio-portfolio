@@ -67,7 +67,8 @@ type suiProtocolState struct {
 	Emodes, AssetValues                                               []suiProtocolValue
 }
 
-// ReadLatest reports the observation window explicitly; it cannot read history.
+// ReadLatest reports head observations explicitly; they need not be ordered
+// when requests reach different backends. It cannot read history.
 func (r *SuiProtocolReader) ReadLatest(ctx context.Context, protocolID string, owner SuiAddress, reader SuiReader) (SuiProtocolPositions, error) {
 	if protocolID == "suilend" {
 		return readSuilendLatest(ctx, owner, reader)
@@ -90,9 +91,6 @@ func (r *SuiProtocolReader) ReadLatest(ctx context.Context, protocolID string, o
 	if err != nil {
 		return result, err
 	}
-	if after.Sequence < before.Sequence || after.Timestamp.Before(before.Timestamp) {
-		return result, fmt.Errorf("Sui head moved backwards during protocol read")
-	}
 	result.Checkpoint, result.HeadBeforeRead = after, before.Sequence
 	if protocolID == "navi" {
 		if lendingErr == nil {
@@ -108,7 +106,7 @@ func (r *SuiProtocolReader) ReadLatest(ctx context.Context, protocolID string, o
 	}
 	if vaultErr == nil {
 		var groups []SuiProtocolGroup
-		groups, vaultErr = suiVaults(ctx, protocolID, after, reader, state)
+		groups, vaultErr = suiVaults(ctx, protocolID, reader, state)
 		if vaultErr == nil {
 			result.Groups = append(result.Groups, groups...)
 		}

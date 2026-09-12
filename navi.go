@@ -107,7 +107,10 @@ func naviLending(ctx context.Context, owner SuiAddress, pin SuiCheckpoint, reade
 		if err != nil {
 			return nil, err
 		}
-		index, err = naviIndexAt(index, rate, last.Uint64(), uint64(pin.Timestamp.UnixMilli()), side == "borrow")
+		// Latest objects and head observations may come from different backends.
+		// Keep the stored index if the reserve is ahead of the observed head.
+		target := max(last.Uint64(), uint64(pin.Timestamp.UnixMilli()))
+		index, err = naviIndexAt(index, rate, last.Uint64(), target, side == "borrow")
 		if err != nil {
 			return nil, err
 		}
@@ -159,7 +162,7 @@ func suiProtocolMetadata(ctx context.Context, reader SuiReader, wanted map[strin
 	return metadata, nil
 }
 
-func suiVaults(ctx context.Context, protocolID string, pin SuiCheckpoint, reader SuiReader, state suiProtocolState) ([]SuiProtocolGroup, error) {
+func suiVaults(ctx context.Context, protocolID string, reader SuiReader, state suiProtocolState) ([]SuiProtocolGroup, error) {
 	receipts := make(map[string]suiProtocolObject)
 	vaultSet := make(map[string]bool)
 	ids := []string{}
@@ -226,7 +229,7 @@ func suiVaults(ctx context.Context, protocolID string, pin SuiCheckpoint, reader
 		for id := range active {
 			activeIDs = append(activeIDs, id)
 		}
-		valuations, err = voloValuations(pin, activeIDs, byID, coins, metadata, state)
+		valuations, err = voloValuations(activeIDs, byID, coins, metadata, state)
 		if err != nil {
 			return nil, err
 		}
@@ -340,13 +343,13 @@ func voloBaseAmount(shares, totalShares, value, price *big.Int, decimals uint8) 
 	return claim.Mul(claim, big.NewInt(1_000_000_000_000_000_000)).Div(claim, normalized)
 }
 
-func voloValuations(pin SuiCheckpoint, vaultIDs []string, vaults map[string]suiFields, coins map[string]string, metadata map[string]SuiCoinMetadata, state suiProtocolState) (map[string]voloValuation, error) {
+func voloValuations(vaultIDs []string, vaults map[string]suiFields, coins map[string]string, metadata map[string]SuiCoinMetadata, state suiProtocolState) (map[string]voloValuation, error) {
 	if len(vaultIDs) == 0 {
 		return map[string]voloValuation{}, nil
 	}
 	rows := state.AssetValues
 	values := make(map[string]map[string]*big.Int)
-	prices, priceTimes, err := voloOraclePrices(pin, metadata, state.OracleObjects)
+	prices, priceTimes, err := voloOraclePrices(metadata, state.OracleObjects)
 	if err != nil {
 		return nil, err
 	}
@@ -361,8 +364,8 @@ func voloValuations(pin SuiCheckpoint, vaultIDs []string, vaults map[string]suiF
 			return nil, err
 		}
 		timestamp, err := fields.uint("timestamp")
-		if err != nil || !timestamp.IsUint64() || timestamp.Sign() == 0 || timestamp.Uint64() > uint64(pin.Timestamp.UnixMilli()) {
-			return nil, fmt.Errorf("invalid or future Volo valuation timestamp")
+		if err != nil || !timestamp.IsUint64() || timestamp.Sign() == 0 {
+			return nil, fmt.Errorf("invalid Volo valuation timestamp")
 		}
 		asset, err := fields.text("asset")
 		if err != nil {
@@ -390,7 +393,7 @@ func voloValuations(pin SuiCheckpoint, vaultIDs []string, vaults map[string]suiF
 			return nil, fmt.Errorf("vault asset inventory is missing")
 		}
 		total := new(big.Int)
-		oldest := uint64(pin.Timestamp.UnixMilli())
+		oldest := priceTimes[coins[id]]
 		seen := make(map[string]bool)
 		for _, asset := range assets {
 			name, ok := asset.(string)
@@ -410,13 +413,13 @@ func voloValuations(pin SuiCheckpoint, vaultIDs []string, vaults map[string]suiF
 		if price == nil || price.Sign() == 0 {
 			return nil, fmt.Errorf("Volo vault base-coin oracle is unavailable")
 		}
-		result[id] = voloValuation{Value: total, Price: price, OldestTimestampMS: min(oldest, priceTimes[coins[id]])}
+		result[id] = voloValuation{Value: total, Price: price, OldestTimestampMS: oldest}
 	}
 	return result, nil
 }
 
 // Oracle table entries are authoritative even when no recent price event exists.
-func voloOraclePrices(pin SuiCheckpoint, metadata map[string]SuiCoinMetadata, rows []suiProtocolObject) (map[string]*big.Int, map[string]uint64, error) {
+func voloOraclePrices(metadata map[string]SuiCoinMetadata, rows []suiProtocolObject) (map[string]*big.Int, map[string]uint64, error) {
 	parent := ""
 	for _, row := range rows {
 		if row.Kind != "oracle" {
@@ -477,8 +480,8 @@ func voloOraclePrices(pin SuiCheckpoint, metadata map[string]SuiCoinMetadata, ro
 			return nil, nil, err
 		}
 		timestamp, err := info.uint("last_updated")
-		if err != nil || !timestamp.IsUint64() || timestamp.Uint64() > uint64(pin.Timestamp.UnixMilli()) {
-			return nil, nil, fmt.Errorf("invalid or future Volo oracle timestamp")
+		if err != nil || !timestamp.IsUint64() {
+			return nil, nil, fmt.Errorf("invalid Volo oracle timestamp")
 		}
 		if prices[coin] != nil {
 			return nil, nil, fmt.Errorf("duplicate Volo oracle coin")
