@@ -55,11 +55,10 @@ type SuiReader interface {
 
 // SuiHoldings is what an address holds and which chain state that claim is about.
 //
-// A head read is reported as a window rather than a point: the balances were read from the head
-// somewhere between two checkpoints the reader observed. Checkpoint is the later of them and
-// HeadBeforeRead the earlier, so the balances belong to a state no later than Checkpoint and no
-// earlier than HeadBeforeRead. A consumer must surface that distinction rather than label a head
-// read as the state at a checkpoint.
+// A head read reports two observations: Checkpoint is the head seen after the read,
+// and HeadBeforeRead the head seen before it. Requests may reach different backends,
+// so these observations need not increase or bound the states supplying balances.
+// A consumer must not label a latest read as the state at a particular checkpoint.
 //
 // A pinned read carries the pin as Checkpoint and HeadBeforeRead, no balances, and
 // HistoryUnsupported set.

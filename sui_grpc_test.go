@@ -359,7 +359,7 @@ func TestSuiGRPCHoldingsAtAFixedCheckpointAreEmptyByDecision(t *testing.T) {
 	}
 }
 
-func TestSuiGRPCHoldingsKeepTheWindowOrderedWhenTheHeadReadsBackwards(t *testing.T) {
+func TestSuiGRPCHoldingsPreserveHeadObservationsWhenBackendsDiffer(t *testing.T) {
 	server := newSuiGRPCTestServer(t)
 	server.head = 320_000_010
 	server.headStep = ^uint64(0) - 3 // each head read answers four lower, as a lagging backend would
@@ -371,8 +371,11 @@ func TestSuiGRPCHoldingsKeepTheWindowOrderedWhenTheHeadReadsBackwards(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if holdings.HeadBeforeRead > holdings.Checkpoint.Sequence {
-		t.Fatalf("window %d..%d ends before it starts", holdings.HeadBeforeRead, holdings.Checkpoint.Sequence)
+	if holdings.HeadBeforeRead != holdings.Checkpoint.Sequence+4 {
+		t.Fatalf("head observations were rewritten: %d..%d", holdings.HeadBeforeRead, holdings.Checkpoint.Sequence)
+	}
+	if len(holdings.Balances) != 1 || holdings.Balances[0].Amount.Int64() != 1 {
+		t.Fatalf("head skew lost balances: %+v", holdings.Balances)
 	}
 }
 

@@ -288,10 +288,11 @@ func (c *SuiGRPCClient) CheckpointBySequence(ctx context.Context, sequence uint6
 	return checkpoint, nil
 }
 
-// Holdings reads owner's balances from the head when pin is nil, bracketed by two head
-// observations so the caller knows the window the balances belong to. A non-nil pin is answered
-// with no balances and HistoryUnsupported, without a round trip: the service cannot read the past,
-// and reading the head under the pin's name would label one state with another's name.
+// Holdings reads owner's balances from the head when pin is nil and reports head
+// observations before and after the read. These need not be ordered across backends.
+// A non-nil pin is answered with no balances and HistoryUnsupported, without a round trip:
+// the service cannot read the past, and reading the head under the pin's name would label
+// one state with another's name.
 func (c *SuiGRPCClient) Holdings(
 	ctx context.Context,
 	owner SuiAddress,
@@ -319,12 +320,6 @@ func (c *SuiGRPCClient) Holdings(
 	after, err := c.LatestCheckpoint(ctx)
 	if err != nil {
 		return SuiHoldings{}, err
-	}
-	if after.Sequence < before {
-		// A pool routing the two head reads to different backends can answer the second from a
-		// node that is behind. The balances still came from some head in between, so keep the
-		// window ordered rather than report one that ends before it starts.
-		before = after.Sequence
 	}
 	return SuiHoldings{Balances: balances, Checkpoint: after, HeadBeforeRead: before}, nil
 }

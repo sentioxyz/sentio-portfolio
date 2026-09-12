@@ -147,7 +147,7 @@ func (f *naviCalculationFixture) Read(ctx context.Context, protocol string, owne
 			result.Groups = append(result.Groups, groups...)
 		}
 	}
-	groups, err := suiVaults(ctx, protocol, pin, reader, state)
+	groups, err := suiVaults(ctx, protocol, reader, state)
 	if err != nil {
 		result.Errors = append(result.Errors, err)
 	} else {
@@ -231,6 +231,16 @@ func TestVoloPendingDepositAndWithdrawalDoNotDoubleCount(t *testing.T) {
 	if sum.String() != "1500000000" {
 		t.Fatalf("pending withdrawal counted twice: %s", sum)
 	}
+	// A different backend can report a head older than the NAV and oracle
+	// objects. These are latest reads, not objects pinned to that checkpoint.
+	pin.Timestamp = pin.Timestamp.Add(-time.Second)
+	result, err = source.Read(context.Background(), "volo-vaults", owner, pin, reader)
+	if err != nil || len(result.Errors) != 0 || len(result.Groups) != 1 {
+		t.Fatalf("NAV ahead of observed head: %+v %v", result, err)
+	}
+	if result.Groups[0].Components[0].AmountRaw != "1000000000" || result.Groups[0].Metadata["navOldestTimestampMs"] != "1000000" {
+		t.Fatalf("latest NAV or its timestamp changed: %+v", result.Groups[0])
+	}
 }
 
 func TestNaviVaultStoredNAVAndReceiptTransfer(t *testing.T) {
@@ -258,19 +268,18 @@ func TestNaviVaultStoredNAVAndReceiptTransfer(t *testing.T) {
 	}
 }
 
-func TestVoloRejectsFutureOracleAndWrongParent(t *testing.T) {
-	pin, _ := newSuiCheckpoint(100, suiTestDigest, time.Unix(1000, 0))
+func TestVoloRejectsInvalidOracleTimestampAndWrongParent(t *testing.T) {
 	parent := naviAddress("0x22")
 	rows := []suiProtocolObject{
 		protocolObjectFixture("0x11", "oracle", "", "", "", "", map[string]any{"aggregators": map[string]any{"id": parent}}),
-		protocolObjectFixture("0x33", "oraclePrice", "", parent, "2::sui::SUI", "", map[string]any{"name": "2::sui::SUI", "value": map[string]any{"decimals": "9", "price": "1000000000000000000", "last_updated": "1000001"}}),
+		protocolObjectFixture("0x33", "oraclePrice", "", parent, "2::sui::SUI", "", map[string]any{"name": "2::sui::SUI", "value": map[string]any{"decimals": "9", "price": "1000000000000000000", "last_updated": "18446744073709551616"}}),
 	}
-	if _, _, err := voloOraclePrices(pin, nil, rows); err == nil {
-		t.Fatal("future oracle accepted")
+	if _, _, err := voloOraclePrices(nil, rows); err == nil {
+		t.Fatal("overflowing oracle timestamp accepted")
 	}
-	rows[1].Content = strings.ReplaceAll(rows[1].Content, "1000001", "1000000")
+	rows[1].Content = strings.ReplaceAll(rows[1].Content, "18446744073709551616", "1000000")
 	rows[1].Parent = naviAddress("0x44")
-	if _, _, err := voloOraclePrices(pin, nil, rows); err == nil {
+	if _, _, err := voloOraclePrices(nil, rows); err == nil {
 		t.Fatal("other oracle's entry accepted")
 	}
 }

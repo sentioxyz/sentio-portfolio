@@ -108,13 +108,19 @@ publication transaction. Vault shares, NAV tables and oracle prices come from cu
 chain state. Fresh or emptied receipts with no state entry contribute no
 position; RPC failures remain coverage errors.
 
-Reads report a latest observation window (`headBeforeRead`/`headAfterRead`),
-not an atomic portfolio at one checkpoint. History is not supported. Hosts must
-reject historical requests before reading current state. They must preserve the
-window metadata when combining wallet and protocol snapshots.
+Latest reads report the heads observed before and after reading
+(`headBeforeRead`/`headAfterRead`). A load-balanced endpoint can route these calls
+to nodes at different heights. Regressing heads do not discard positions or
+trigger synchronization retries; the original observations are preserved. They
+do not bound the object versions read or describe an atomic portfolio at one
+checkpoint. History is not supported. Hosts must reject historical requests
+before reading current state and preserve this metadata when combining snapshots.
 
-Lending projects reserve interest indices to the observed timestamp using
+Lending projects reserve interest indices forward to the observed timestamp using
 integer RAY arithmetic and NAVI's fixed nine-decimal principal precision.
+If a NAVI or Suilend reserve is newer than the observed head, its stored interest
+is used without projecting backwards. Volo NAV and oracle timestamps describe
+the objects read and need not precede the independently observed head.
 Multiply retains collateral and debt. Vault amounts use stored NAV
 (`valuation: stored_nav`), without simulating a rebalance or harvest. Volo
 includes pending deposits and claimable principal once, and reports the oldest

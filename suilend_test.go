@@ -143,10 +143,7 @@ func TestSuilendRejectsIncompleteOrInconsistentState(t *testing.T) {
 			editSuilendReserve(f, func(o suiFields) { o["coin_type"] = "3::fake::COIN" })
 		},
 		"wrong decimals": func(f *latestSuiFixture) { editSuilendReserve(f, func(o suiFields) { o["mint_decimals"] = 6 }) },
-		"future reserve": func(f *latestSuiFixture) {
-			editSuilendReserve(f, func(o suiFields) { o["interest_last_update_timestamp_s"] = "1001" })
-		},
-		"zero supply": func(f *latestSuiFixture) { editSuilendReserve(f, func(o suiFields) { o["ctoken_supply"] = "0" }) },
+		"zero supply":    func(f *latestSuiFixture) { editSuilendReserve(f, func(o suiFields) { o["ctoken_supply"] = "0" }) },
 		"invalid curve": func(f *latestSuiFixture) {
 			editSuilendReserve(f, func(o suiFields) {
 				o["config"] = map[string]any{"element": map[string]any{"interest_rate_utils": "ZAA=", "interest_rate_aprs": []any{"0", "0"}, "spread_fee_bps": "0"}}
