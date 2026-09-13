@@ -6,7 +6,7 @@ import (
 	"sort"
 )
 
-// SuiProtocolReader reads latest lending and vault state through the same reader as
+// SuiProtocolReader reads latest lending, vault and liquidity state through the same reader as
 // wallet holdings. Object lineage discovers and caches protocol root IDs only.
 type SuiProtocolReader struct {
 	markets, oracle suiRootCache
@@ -16,7 +16,9 @@ func NewSuiProtocolReader() *SuiProtocolReader {
 	return &SuiProtocolReader{markets: suiRootCache{gate: make(chan struct{}, 1)}, oracle: suiRootCache{gate: make(chan struct{}, 1)}}
 }
 
-func (r *SuiProtocolReader) ProtocolIDs() []string { return []string{"navi", "volo-vaults", "suilend"} }
+func (r *SuiProtocolReader) ProtocolIDs() []string {
+	return []string{"navi", "volo-vaults", "suilend", "cetus", "bluefin"}
+}
 
 type SuiProtocolComponent struct {
 	Kind                 string
@@ -71,6 +73,9 @@ type suiProtocolState struct {
 // ReadLatest reports head observations explicitly; they need not be ordered
 // when requests reach different backends. It cannot read history.
 func (r *SuiProtocolReader) ReadLatest(ctx context.Context, protocolID string, owner SuiAddress, reader SuiReader) (SuiProtocolPositions, error) {
+	if protocolID == "cetus" || protocolID == "bluefin" {
+		return readSuiCLMMLatest(ctx, protocolID, owner, reader)
+	}
 	if protocolID == "suilend" {
 		return readSuilendLatest(ctx, owner, reader)
 	}
