@@ -64,11 +64,31 @@ component deployment windows.
 Sui uses a separate `SuiReader` for direct wallet holdings and
 `NewSuiProtocolReader()` for latest NAVI lending, NAVI Multiply,
 native NAVI vaults, Volo strategy vaults (including Single Loop and Astros),
-and Suilend lending. The protocol IDs are `navi`, `volo-vaults`, and `suilend`.
+Suilend lending, and Cetus/Bluefin concentrated liquidity. The protocol IDs are
+`navi`, `volo-vaults`, `suilend`, `cetus`, and `bluefin`.
 `ReadLatest` takes a `SuiObjectReader`; NAVI and Volo discovery also requires
 `SuiObjectLineageReader` (`SuiGRPCClient` implements both). All discovery and
 state reads use that gRPC connection; these protocols require no dedicated
 processor or separate object-directory service.
+
+Cetus and Bluefin discover directly owned `position::Position` NFTs from their
+defining packages. Each position names its pool; only those pools, the two active
+boundary ticks, and Cetus position accounting fields are fetched. Discovery never
+enumerates a global position or tick table. Pool types, coin types, ownership,
+field keys, and NFT/accounting identities must agree. Missing state is a coverage
+error. A zero-liquidity NFT still contributes unpaid fees and rewards.
+
+Principal uses the pool and boundary square-root prices with Q64 integer withdrawal
+rounding. Fees include stored amounts plus uncollected inside growth, with wrapping
+u128 counters. Rewards advance from stored growth to the observed checkpoint time
+using pool liquidity and emission rates; Bluefin emissions stop at their configured
+end time. When pool state is newer than the observed head, stored growth is retained.
+Coin metadata and USD valuation follow the same path as the other Sui protocols.
+Each NFT remains a separate group, with principal, fees and rewards identified in
+component metadata. This surface covers directly held CLMM positions; farm/strategy
+wrappers, Cetus vault shares and Bluefin perpetual accounts are not enumerated.
+The accounting layouts follow the [Cetus SDK](https://github.com/CetusProtocol/cetus-clmm-sui-sdk)
+and [Bluefin contract interfaces](https://github.com/fireflyprotocol/bluefin-spot-contract-interface).
 
 Suilend discovers every directly owned `ObligationOwnerCap` from its defining
 package, deduplicates capabilities pointing to the same obligation, and follows
