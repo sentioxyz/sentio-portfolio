@@ -75,8 +75,12 @@ Cetus and Bluefin discover directly owned `position::Position` NFTs from their
 defining packages. Each position names its pool; only those pools, the two active
 boundary ticks, and Cetus position accounting fields are fetched. Discovery never
 enumerates a global position or tick table. Pool types, coin types, ownership,
-field keys, and NFT/accounting identities must agree. Missing state is a coverage
-error. A zero-liquidity NFT still contributes unpaid fees and rewards.
+field keys, and NFT/accounting identities must agree. Cetus calculations use the
+pool's `PositionInfo` liquidity; the NFT's display liquidity can remain stale after
+a liquidity cut. Accounting is read before choosing active boundary ticks, and its
+object ID/version are included in group metadata. Missing state is a coverage
+error. A zero-liquidity position still contributes unpaid fees and rewards without
+reading boundary ticks.
 
 Principal uses the pool and boundary square-root prices with Q64 integer withdrawal
 rounding. Fees include stored amounts plus uncollected inside growth, with wrapping
