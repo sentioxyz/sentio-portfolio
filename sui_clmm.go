@@ -38,6 +38,7 @@ type suiCLMMPosition struct {
 	fees, lastFees       [2]*big.Int
 	rewards, lastRewards []*big.Int
 	stateID              string
+	stateVersion         uint64
 	ticks                [2]suiCLMMTick
 }
 type suiCLMMTick struct {
@@ -148,8 +149,9 @@ func loadSuiCLMM(ctx context.Context, owner SuiAddress, reader SuiObjectReader, 
 		}
 		pools[id] = pool
 	}
-	// A single bounded batch contains only the owned positions' accounting
-	// records and active boundaries, even for pools with millions of positions.
+	// Read only the owned positions' accounting records. Cetus NFTs hold display
+	// liquidity that can remain stale after apply_liquidity_cut; PositionInfo is
+	// authoritative for calculations and determines which boundaries are needed.
 	ids = nil
 	for i := range positions {
 		p := &positions[i]
@@ -165,24 +167,15 @@ func loadSuiCLMM(ctx context.Context, owner SuiAddress, reader SuiObjectReader, 
 			}
 			ids = append(ids, p.stateID)
 		}
-		if p.liquidity.Sign() > 0 {
-			for _, tick := range []int32{p.lower, p.upper} {
-				id, _, _, e := suiCLMMTickKey(pool.tickTable, tick, pkg)
-				if e != nil {
-					return nil, nil, e
-				}
-				ids = append(ids, id)
-			}
+	}
+	if pkg == cetusCLMMPackage {
+		objects, err = reader.Objects(ctx, ids)
+		if err != nil {
+			return nil, nil, err
 		}
-	}
-	objects, err = reader.Objects(ctx, ids)
-	if err != nil {
-		return nil, nil, err
-	}
-	for i := range positions {
-		p := &positions[i]
-		pool := pools[p.pool]
-		if pkg == cetusCLMMPackage {
+		for i := range positions {
+			p := &positions[i]
+			pool := pools[p.pool]
 			valueType := cetusTablePackage + "::linked_table::Node<0x2::object::ID," + pkg + "::position::PositionInfo>"
 			field, e := suiCLMMField(objects, p.stateID, pool.positionTable, "0x2::object::ID", valueType)
 			if e != nil {
@@ -192,11 +185,40 @@ func loadSuiCLMM(ctx context.Context, owner SuiAddress, reader SuiObjectReader, 
 				return nil, nil, fmt.Errorf("CLMM position table key mismatch")
 			}
 			f := parser.object(parser.object(field, "value"), "value")
-			if parser.address(f, "position_id") != p.object.ID || parser.uint(f, "liquidity", 128).Cmp(p.liquidity) != 0 || parser.tick(f, "tick_lower_index") != p.lower || parser.tick(f, "tick_upper_index") != p.upper {
+			if parser.address(f, "position_id") != p.object.ID || parser.tick(f, "tick_lower_index") != p.lower || parser.tick(f, "tick_upper_index") != p.upper {
 				return nil, nil, fmt.Errorf("CLMM position accounting disagrees with NFT")
 			}
+			p.liquidity = parser.uint(f, "liquidity", 128)
+			p.stateVersion = objects[p.stateID].Version
 			parseSuiCLMMAccrual(parser, f, p, pkg)
+			if parser.err != nil {
+				return nil, nil, parser.err
+			}
 		}
+	}
+	// Zero-liquidity positions retain stored fees/rewards without tick reads:
+	// their boundaries may already have been removed from the pool.
+	ids = nil
+	for _, p := range positions {
+		if p.liquidity.Sign() > 0 {
+			for _, tick := range []int32{p.lower, p.upper} {
+				id, _, _, e := suiCLMMTickKey(pools[p.pool].tickTable, tick, pkg)
+				if e != nil {
+					return nil, nil, e
+				}
+				ids = append(ids, id)
+			}
+		}
+	}
+	if len(ids) > 0 {
+		objects, err = reader.Objects(ctx, ids)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	for i := range positions {
+		p := &positions[i]
+		pool := pools[p.pool]
 		if len(p.rewards) > len(pool.rewards) {
 			return nil, nil, fmt.Errorf("CLMM position has unknown rewards")
 		}
@@ -332,6 +354,10 @@ func suiCLMMGroups(ctx context.Context, reader SuiReader, protocol string, posit
 	for _, p := range positions {
 		pool := pools[p.pool]
 		g := SuiProtocolGroup{ID: protocol + ":" + p.object.ID, MarketID: p.pool, Label: "Liquidity", Metadata: map[string]any{"positionId": p.object.ID, "positionVersion": fmt.Sprint(p.object.Version), "poolVersion": fmt.Sprint(pool.object.Version), "liquidity": p.liquidity.String(), "tickLower": p.lower, "tickUpper": p.upper, "currentTick": pool.current, "sqrtPriceX64": pool.price.String(), "ownership": "direct"}}
+		if p.stateID != "" {
+			g.Metadata["positionInfoId"] = p.stateID
+			g.Metadata["positionInfoVersion"] = fmt.Sprint(p.stateVersion)
+		}
 		add := func(coin, kind, role string, amount *big.Int) {
 			if amount.Sign() == 0 {
 				return

@@ -145,6 +145,114 @@ func TestSuiCLMMZeroLiquidityRetainsOwedWithoutTicks(t *testing.T) {
 	}
 }
 
+// Objects must not be requested for boundaries that no longer exist after a
+// liquidity cut. Returning an error models the transport's missing-object path.
+type clmmStrictObjects struct{ *latestSuiFixture }
+
+func (f clmmStrictObjects) Objects(ctx context.Context, ids []string) (map[string]SuiObject, error) {
+	for _, id := range ids {
+		if _, ok := f.objects[id]; !ok {
+			return nil, fmt.Errorf("unexpected object read: %s", id)
+		}
+	}
+	return f.latestSuiFixture.Objects(ctx, ids)
+}
+
+func TestSuiCetusUsesAccountingLiquidity(t *testing.T) {
+	for _, tc := range []struct {
+		name, nft, accounting string
+		want                  []string
+	}{
+		{"partial cut", "100", "40", []string{"20", "20", "165", "289", "927"}},
+		{"full cut", "100", "0", []string{"5", "9", "7"}},
+		{"stale empty NFT", "0", "40", []string{"20", "20", "165", "289", "927"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, owner := clmmFixture("cetus")
+			editSuilendObject(f, naviAddress("0x22"), func(fields suiFields) { fields["liquidity"] = tc.nft })
+			position, _ := ParseSuiAddress("0x22")
+			stateID, _ := suiCLMMFieldID(naviAddress("0x24"), "0x2::object::ID", position[:])
+			editSuilendObject(f, stateID, func(fields suiFields) {
+				v, _ := fields.object("value")
+				v, _ = v.object("value")
+				v["liquidity"] = tc.accounting
+			})
+			state := f.objects[stateID]
+			state.Version = 2
+			f.objects[stateID] = state
+			if tc.accounting == "0" {
+				for _, tick := range []int32{-100, 100} {
+					id, _, _, _ := suiCLMMTickKey(naviAddress("0x23"), tick, cetusCLMMPackage)
+					delete(f.objects, id)
+				}
+			}
+			got, err := NewSuiProtocolReader().ReadLatest(context.Background(), "cetus", owner, clmmStrictObjects{f})
+			if err != nil || len(got.Errors) != 0 || len(got.Groups) != 1 {
+				t.Fatalf("accounting liquidity: %+v %v", got, err)
+			}
+			g := got.Groups[0]
+			if len(g.Components) != len(tc.want) {
+				t.Fatalf("components: %+v", g.Components)
+			}
+			for i, amount := range tc.want {
+				if g.Components[i].AmountRaw != amount {
+					t.Fatalf("component %d: got %s, want %s", i, g.Components[i].AmountRaw, amount)
+				}
+			}
+			if g.Metadata["liquidity"] != tc.accounting || g.Metadata["positionInfoId"] != stateID || g.Metadata["positionInfoVersion"] != "2" || g.Metadata["positionVersion"] != "1" {
+				t.Fatalf("accounting provenance: %+v", g.Metadata)
+			}
+		})
+	}
+}
+
+func TestSuiCetusRejectsInvalidAccounting(t *testing.T) {
+	for _, failure := range []string{"missing", "owner", "type", "field ID", "table key", "position ID", "lower tick", "upper tick", "liquidity missing", "liquidity overflow"} {
+		t.Run(failure, func(t *testing.T) {
+			f, owner := clmmFixture("cetus")
+			position, _ := ParseSuiAddress("0x22")
+			stateID, _ := suiCLMMFieldID(naviAddress("0x24"), "0x2::object::ID", position[:])
+			switch failure {
+			case "missing":
+				delete(f.objects, stateID)
+			case "owner", "type":
+				o := f.objects[stateID]
+				if failure == "owner" {
+					o.Owner = naviAddress("0x99")
+				} else {
+					o.ObjectType = suiType("0x99::fake::PositionInfo")
+				}
+				f.objects[stateID] = o
+			default:
+				editSuilendObject(f, stateID, func(fields suiFields) {
+					v, _ := fields.object("value")
+					v, _ = v.object("value")
+					switch failure {
+					case "field ID":
+						fields["id"] = naviAddress("0x99")
+					case "table key":
+						fields["name"] = naviAddress("0x99")
+					case "position ID":
+						v["position_id"] = naviAddress("0x99")
+					case "lower tick":
+						v["tick_lower_index"] = clmmTickBits(-101)
+					case "upper tick":
+						v["tick_upper_index"] = clmmTickBits(101)
+					case "liquidity missing":
+						delete(v, "liquidity")
+					case "liquidity overflow":
+						v["liquidity"] = suiCLMMMod128.String()
+					}
+				})
+			}
+			got, err := NewSuiProtocolReader().ReadLatest(context.Background(), "cetus", owner, f)
+			if err != nil || len(got.Errors) == 0 || len(got.Groups) != 0 {
+				t.Fatalf("accepted invalid accounting: %+v %v", got, err)
+			}
+		})
+	}
+}
+
 func TestSuiCLMMRejectsIncompleteState(t *testing.T) {
 	for _, protocol := range []string{"cetus", "bluefin"} {
 		for _, failure := range []string{"missing pool", "wrong pool coins", "wrong field owner", "missing tick", "wrong tick key", "missing growth", "missing metadata", "wide integer", "bad NFT identity"} {
