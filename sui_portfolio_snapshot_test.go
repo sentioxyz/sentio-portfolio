@@ -178,3 +178,26 @@ func TestSuiDailyOwnershipAndMissingDependencies(t *testing.T) {
 		t.Fatal("missing market became zero balance")
 	}
 }
+
+func TestSuiDailyMetadataFailureIsAccountScoped(t *testing.T) {
+	input, owner, _ := dailyFixture(t, "navi")
+	badCoin, _ := NormalizeMoveType("0x123::test::INVALID")
+	input.Metadata = append(input.Metadata, SuiCoinMetadata{CoinType: badCoin, Decimals: 255})
+	c, err := NewSuiPortfolioCalculator(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = c.Calculate(owner.Hex()); err != nil {
+		t.Fatal(err)
+	}
+	for i := range input.Metadata {
+		input.Metadata[i].Decimals = 255
+	}
+	c, err = NewSuiPortfolioCalculator(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = c.Calculate(owner.Hex()); err == nil {
+		t.Fatal("invalid precision was emitted")
+	}
+}

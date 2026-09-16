@@ -345,6 +345,12 @@ func (d *suiSQLData) CoinMetadata(_ context.Context, coins []string) (map[string
 		if !ok {
 			return nil, nil, fmt.Errorf("Sui indexed token metadata is incomplete")
 		}
+		// Validate on use: a full daily inventory can contain an unrelated coin
+		// with unusable metadata without invalidating every other account.
+		decimals := int(meta.Decimals)
+		if _, err := suiCoinMetadataFrom(coin, &decimals, &meta.Symbol, meta.Name); err != nil {
+			return nil, nil, err
+		}
 		result[coin] = meta
 	}
 	return result, nil, nil

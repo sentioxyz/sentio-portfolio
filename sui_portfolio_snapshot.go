@@ -119,12 +119,8 @@ func NewSuiPortfolioCalculator(input SuiPortfolioInput) (*SuiPortfolioCalculator
 	}
 	for _, meta := range input.Metadata {
 		normalized, e := NormalizeMoveType(meta.CoinType)
-		decimals := int(meta.Decimals)
 		if e != nil || normalized != meta.CoinType {
 			return nil, fmt.Errorf("invalid daily coin identity")
-		}
-		if _, e := suiCoinMetadataFrom(meta.CoinType, &decimals, &meta.Symbol, meta.Name); e != nil {
-			return nil, e
 		}
 		if c.data.metadata[meta.CoinType].CoinType != "" {
 			return nil, fmt.Errorf("duplicate daily coin metadata")
