@@ -3,17 +3,20 @@ package portfolio
 import (
 	"context"
 	"fmt"
-	"sort"
 )
 
-// SuiProtocolReader reads latest lending, vault and liquidity state through the same reader as
-// wallet holdings. Object lineage discovers and caches protocol root IDs only.
+// SuiProtocolReader routes lending and vault protocols through configured indexes.
+// All protocol quantities come from dedicated processor indexes.
 type SuiProtocolReader struct {
-	markets, oracle suiRootCache
+	navi    *NaviHistoryReader
+	volo    *VoloHistoryReader
+	suilend *SuilendHistoryReader
+	cetus   *CetusHistoryReader
+	bluefin *BluefinHistoryReader
 }
 
 func NewSuiProtocolReader() *SuiProtocolReader {
-	return &SuiProtocolReader{markets: suiRootCache{gate: make(chan struct{}, 1)}, oracle: suiRootCache{gate: make(chan struct{}, 1)}}
+	return &SuiProtocolReader{}
 }
 
 func (r *SuiProtocolReader) ProtocolIDs() []string {
@@ -68,67 +71,68 @@ type suiProtocolState struct {
 	Owned, Topology, Principals, Vaults, ReceiptStates, OracleObjects []suiProtocolObject
 	Emodes, AssetValues                                               []suiProtocolValue
 	VaultPrices                                                       map[string]suiProtocolObject
+	Suilend                                                           *suilendState
 }
 
-// ReadLatest reports head observations explicitly; they need not be ordered
-// when requests reach different backends. It cannot read history.
+// ReadLatest returns a completed indexed hour. The reader parameter is retained
+// for source compatibility and is never invoked for protocol positions.
 func (r *SuiProtocolReader) ReadLatest(ctx context.Context, protocolID string, owner SuiAddress, reader SuiReader) (SuiProtocolPositions, error) {
-	if protocolID == "cetus" || protocolID == "bluefin" {
-		return readSuiCLMMLatest(ctx, protocolID, owner, reader)
-	}
-	if protocolID == "suilend" {
-		return readSuilendLatest(ctx, owner, reader)
-	}
-	name := map[string]string{"navi": "NAVI", "volo-vaults": "Volo Vaults"}[protocolID]
-	result := SuiProtocolPositions{ProtocolID: protocolID, ProtocolName: name}
-	if name == "" {
-		return result, fmt.Errorf("unsupported Sui protocol")
-	}
-	objects, ok := reader.(SuiObjectReader)
-	if !ok {
-		return result, fmt.Errorf("Sui object reads are unavailable")
-	}
-	before, err := reader.LatestCheckpoint(ctx)
-	if err != nil {
-		return result, err
-	}
-	state, lendingErr, vaultErr := r.loadLatest(ctx, protocolID, owner, objects)
-	after, err := reader.LatestCheckpoint(ctx)
-	if err != nil {
-		return result, err
-	}
-	result.Checkpoint, result.HeadBeforeRead = after, before.Sequence
-	if protocolID == "navi" {
-		if lendingErr == nil {
-			var groups []SuiProtocolGroup
-			groups, lendingErr = naviLending(ctx, owner, after, reader, state)
-			if lendingErr == nil {
-				result.Groups = append(result.Groups, groups...)
-			}
+	switch protocolID {
+	case "cetus":
+		if r.cetus != nil {
+			return r.cetus.ReadLatest(ctx, owner)
 		}
-		if lendingErr != nil {
-			result.Errors = append(result.Errors, fmt.Errorf("lending: %w", lendingErr))
+	case "bluefin":
+		if r.bluefin != nil {
+			return r.bluefin.ReadLatest(ctx, owner)
 		}
-	}
-	if vaultErr == nil {
-		var groups []SuiProtocolGroup
-		groups, vaultErr = suiVaults(ctx, protocolID, reader, state)
-		if vaultErr == nil {
-			result.Groups = append(result.Groups, groups...)
+	case "suilend":
+		if r.suilend != nil {
+			return r.suilend.ReadLatest(ctx, owner)
 		}
-	}
-	if vaultErr != nil {
-		result.Errors = append(result.Errors, fmt.Errorf("vaults: %w", vaultErr))
-	}
-	for i := range result.Groups {
-		group := &result.Groups[i]
-		if group.Metadata == nil {
-			group.Metadata = map[string]any{}
+	case "navi":
+		if r.navi != nil {
+			return r.navi.ReadLatest(ctx, owner)
 		}
-		group.Metadata["stateMode"] = "latest"
-		group.Metadata["headBeforeRead"] = fmt.Sprint(before.Sequence)
-		group.Metadata["headAfterRead"] = fmt.Sprint(after.Sequence)
+	case "volo-vaults":
+		if r.volo != nil {
+			return r.volo.ReadLatest(ctx, owner)
+		}
+	default:
+		return SuiProtocolPositions{ProtocolID: protocolID}, fmt.Errorf("unsupported Sui protocol")
 	}
-	sort.Slice(result.Groups, func(i, j int) bool { return result.Groups[i].ID < result.Groups[j].ID })
-	return result, nil
+	return SuiProtocolPositions{ProtocolID: protocolID}, fmt.Errorf("%s requires a configured processor index", protocolID)
+}
+
+// WithNaviHistory and WithVoloHistory return independent configured readers.
+// Missing or incomplete indexes never fall back to node history.
+func (r *SuiProtocolReader) WithNaviHistory(index *NaviHistoryReader) *SuiProtocolReader {
+	copy := *r
+	copy.navi = index
+	return &copy
+}
+
+// WithVoloHistory configures the dedicated Volo index without changing r.
+func (r *SuiProtocolReader) WithVoloHistory(index *VoloHistoryReader) *SuiProtocolReader {
+	copy := *r
+	copy.volo = index
+	return &copy
+}
+
+// WithSuilendHistory configures Suilend without changing r. No node fallback is used.
+func (r *SuiProtocolReader) WithSuilendHistory(index *SuilendHistoryReader) *SuiProtocolReader {
+	copy := *r
+	copy.suilend = index
+	return &copy
+}
+
+func (r *SuiProtocolReader) WithCetusHistory(index *CetusHistoryReader) *SuiProtocolReader {
+	copy := *r
+	copy.cetus = index
+	return &copy
+}
+func (r *SuiProtocolReader) WithBluefinHistory(index *BluefinHistoryReader) *SuiProtocolReader {
+	copy := *r
+	copy.bluefin = index
+	return &copy
 }

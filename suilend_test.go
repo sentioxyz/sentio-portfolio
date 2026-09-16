@@ -24,7 +24,10 @@ func suilendFixture() (*latestSuiFixture, SuiAddress) {
 		"deposits":          []any{map[string]any{"coin_type": "2::sui::SUI", "reserve_array_index": "0", "deposited_ctoken_amount": "100000000000"}},
 		"borrows":           []any{map[string]any{"coin_type": "2::sui::SUI", "reserve_array_index": "0", "borrowed_amount": suilendTestDecimal(suilendTestWad("50000000000")), "cumulative_borrow_rate": suilendTestDecimal(suilendTestWad("2"))}},
 	})
-	f.objects[naviAddress("0x40")] = latestObject("0x40", suiFieldType("0x2::dynamic_object_field::Wrapper<0x2::object::ID>", "0x2::object::ID"), "OBJECT", "0x50", map[string]any{"name": map[string]any{"name": naviAddress("0x20")}, "value": naviAddress("0x20")})
+	parent, _ := suilendObligationParent(naviAddress("0x50"), naviAddress("0x20"))
+	obligation := f.objects[naviAddress("0x20")]
+	obligation.Owner = parent
+	f.objects[obligation.ID] = obligation
 	f.objects[naviAddress("0x30")] = latestObject("0x30", suilendPackage+"::lending_market::LendingMarket<"+typ+">", "SHARED", "", map[string]any{
 		"obligations": map[string]any{"id": naviAddress("0x50"), "size": "1"},
 		"reserves": []any{map[string]any{
@@ -62,7 +65,7 @@ func TestSuilendLatestSupplyDebtAndOwnership(t *testing.T) {
 	if !slices.Contains(reader.ProtocolIDs(), "suilend") {
 		t.Fatal("Suilend is not registered")
 	}
-	got, err := reader.ReadLatest(context.Background(), "suilend", owner, f)
+	got, err := readSuilendFixture(t, f, owner)
 	if err != nil || len(got.Errors) > 0 || len(got.Groups) != 1 {
 		t.Fatalf("read: %+v %v", got, err)
 	}
@@ -73,7 +76,7 @@ func TestSuilendLatestSupplyDebtAndOwnership(t *testing.T) {
 	if g.Components[0].Kind != "asset" || g.Components[0].AmountRaw != "110000000000" || g.Components[1].Kind != "debt" || g.Components[1].AmountRaw != "75000000000" {
 		t.Fatalf("amounts %+v", g.Components)
 	}
-	if g.Metadata["stateMode"] != "latest" || g.Metadata["headBeforeRead"] != "100" || g.Metadata["headAfterRead"] != "100" {
+	if g.Metadata["stateMode"] != "indexed" || g.Metadata["materializedAtCheckpoint"] == nil {
 		t.Fatalf("window %+v", g.Metadata)
 	}
 	// Moving both capabilities removes this owner's position, regardless of who
@@ -83,12 +86,12 @@ func TestSuilendLatestSupplyDebtAndOwnership(t *testing.T) {
 		o.Owner = naviAddress("0x99")
 		f.objects[o.ID] = o
 	}
-	got, err = reader.ReadLatest(context.Background(), "suilend", owner, f)
+	got, err = readSuilendFixture(t, f, owner)
 	if err != nil || len(got.Errors) > 0 || len(got.Groups) > 0 {
 		t.Fatalf("transferred %+v %v", got, err)
 	}
 	next, _ := ParseSuiAddress("0x99")
-	got, err = reader.ReadLatest(context.Background(), "suilend", next, f)
+	got, err = readSuilendFixture(t, f, next)
 	if err != nil || len(got.Errors) > 0 || len(got.Groups) != 1 {
 		t.Fatalf("new owner %+v %v", got, err)
 	}
@@ -98,14 +101,15 @@ func TestSuilendEmptyObligationsAndWallet(t *testing.T) {
 	f, owner := suilendFixture()
 	editSuilendObject(f, "0x20", func(o suiFields) { o["deposits"] = []any{}; o["borrows"] = []any{} })
 	f.metadata = nil
-	got, err := NewSuiProtocolReader().ReadLatest(context.Background(), "suilend", owner, f)
+	got, err := readSuilendFixture(t, f, owner)
 	if err != nil || len(got.Errors) > 0 || len(got.Groups) > 0 {
 		t.Fatalf("empty %+v %v", got, err)
 	}
-	// An empty wallet must not need a market, metadata or global table read.
-	f.objects = map[string]SuiObject{}
+	// A valid market inventory certifies empty ownership without coin metadata.
+	delete(f.objects, naviAddress("0x10"))
+	delete(f.objects, naviAddress("0x20"))
 	f.failObjects = true
-	got, err = NewSuiProtocolReader().ReadLatest(context.Background(), "suilend", owner, f)
+	got, err = readSuilendFixture(t, f, owner)
 	if err != nil || len(got.Errors) > 0 || len(got.Groups) > 0 {
 		t.Fatalf("empty wallet %+v %v", got, err)
 	}
@@ -115,17 +119,13 @@ func TestSuilendRejectsIncompleteOrInconsistentState(t *testing.T) {
 	tests := map[string]func(*latestSuiFixture){
 		"missing obligation": func(f *latestSuiFixture) { delete(f.objects, naviAddress("0x20")) },
 		"missing market":     func(f *latestSuiFixture) { delete(f.objects, naviAddress("0x30")) },
-		"missing table link": func(f *latestSuiFixture) { delete(f.objects, naviAddress("0x40")) },
-		"wrong table": func(f *latestSuiFixture) {
-			o := f.objects[naviAddress("0x40")]
+		"wrong derived parent": func(f *latestSuiFixture) {
+			o := f.objects[naviAddress("0x20")]
 			o.Owner = naviAddress("0x99")
 			f.objects[o.ID] = o
 		},
-		"wrong key": func(f *latestSuiFixture) {
-			editSuilendObject(f, "0x40", func(o suiFields) { o["name"] = map[string]any{"name": naviAddress("0x99")} })
-		},
-		"wrong linked value": func(f *latestSuiFixture) {
-			editSuilendObject(f, "0x40", func(o suiFields) { o["value"] = naviAddress("0x99") })
+		"wrong table": func(f *latestSuiFixture) {
+			editSuilendObject(f, "0x30", func(o suiFields) { o["obligations"] = map[string]any{"id": naviAddress("0x99"), "size": "1"} })
 		},
 		"wrong obligation type": func(f *latestSuiFixture) {
 			o := f.objects[naviAddress("0x20")]
@@ -150,13 +150,12 @@ func TestSuilendRejectsIncompleteOrInconsistentState(t *testing.T) {
 			})
 		},
 		"missing metadata": func(f *latestSuiFixture) { f.metadata = nil },
-		"RPC failure":      func(f *latestSuiFixture) { f.failObjects = true },
 	}
 	for name, edit := range tests {
 		t.Run(name, func(t *testing.T) {
 			f, owner := suilendFixture()
 			edit(f)
-			got, err := NewSuiProtocolReader().ReadLatest(context.Background(), "suilend", owner, f)
+			got, err := readSuilendFixture(t, f, owner)
 			if err == nil && len(got.Errors) == 0 {
 				t.Fatal("accepted invalid state")
 			}
@@ -232,7 +231,10 @@ func TestSuilendDiscoversIsolatedMarketAndKeepsObligationsSeparate(t *testing.T)
 		}
 		f.objects[copy.ID] = copy
 	}
-	got, err := NewSuiProtocolReader().ReadLatest(context.Background(), "suilend", owner, f)
+	child := f.objects[naviAddress("0x120")]
+	child.Owner, _ = suilendObligationParent(naviAddress("0x150"), child.ID)
+	f.objects[child.ID] = child
+	got, err := readSuilendFixture(t, f, owner)
 	if err != nil || len(got.Errors) > 0 || len(got.Groups) != 2 {
 		t.Fatalf("isolated markets %+v %v", got, err)
 	}

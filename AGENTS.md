@@ -99,27 +99,19 @@ the `sui.rpc.v2` services a fullnode, or a proxy in front of one, serves. The ru
   head under the pin's name. Present that result as not read, never as nothing held. Reading
   specific retained object versions through gRPC does not establish complete wallet holdings
   at a historical checkpoint; there is no wallet-history fallback.
-- NAVI and Volo protocol reads use `SuiProtocolReader.ReadLatest` with direct object state.
-  Root objects are discovered through `SuiObjectLineageReader` over the same gRPC connection:
-  NAVI market-counter versions and their producing transactions, and Volo package publication.
-  Cache root IDs, refresh NAVI discovery when the counter version changes, and never scan
-  checkpoint ranges. Missing retained lineage is a coverage error. No dedicated protocol
-  processor is required. Check market inventory completeness against chain state,
-  attribute capabilities/receipts to their current owners, and report the latest read window.
-  Historical protocol requests are unsupported and must not read latest state under a past pin.
-- Suilend lending uses current directly owned obligation capabilities and point reads of
-  obligations, their parent links and lending markets. Never enumerate the global obligation
-  table or use explorer quantities as position state. Match Move WAD rounding and compound
-  reserve interest forward to the observed checkpoint timestamp; preserve the head observations.
-  For NAVI and Suilend, use stored interest when a reserve is newer than the observed head.
-  Volo NAV and oracle timestamps are object metadata, not assertions against that head.
-- Volo's stored USD NAV must use the base-coin oracle version from the same valuation
-  transaction, never a newer global quote. Follow the nonzero NAV timestamp fields to that
-  transaction and read its quote version over gRPC. Keep a separate quote per vault, including
-  vaults with the same base coin. Missing retained versions or mixed nonzero NAV periods are
-  coverage errors. Report `valuation=settled_nav` and the NAV/quote timestamps: current receipt
-  ownership does not make a stored valuation a live strategy valuation. Zero asset rows do not
-  determine the valuation period. Ordinary portfolio history remains unsupported.
+- NAVI, Volo, Suilend, Cetus and Bluefin use separate version-pinned SQL processor indexes for both latest and historical positions. Each address/protocol read executes one SQL statement once, with no automatic HTTP retry; it never invokes a Sui node or a status/GraphQL follow-up. Hosts supply `SentioIndexerConfig.SQLURL` and an explicit processor version.
+- The common schema is `PortfolioSnapshot`, `PortfolioObjectState`, `PortfolioTokenMetadata` and `PortfolioValue`. The SQL selects a sample P with materialization H and bounds all state by source P and visibility H. Its snapshot output returns expected and observed changed-object/value counts; compute these counts only in that output branch, never in the snapshot CTE used by dependency bounds. Go compares the counts before accepting P, without another request. Return P, not H, as the quantity timestamp. A requested checkpoint/time belongs to the interval `[P,next)`, which may exceed an hour during a chain halt.
+- Read immutable object-version rows through `PortfolioObjectState_raw`, with explicit latest lifecycle selection and quote ID deduplication to absorb deterministic replay writes. Keep snapshot/value/metadata entity aliases on their latest views.
+- Discover object IDs using historical owner/parent/key predicates, select the latest lifecycle for those IDs, and only then filter the current owner/live relation. Immutable version IDs sort a terminal row after a live row of the same version. Never resurrect an earlier position, tick or accounting row by filtering terminals out before latest selection.
+- One SQL returns the address's root positions, dependency objects, coin metadata and any NAVI e-mode or Volo settlement quote rows. Empty wallets still require the completed snapshot sentinel. Missing/truncated responses fail explicitly. Go performs local integer quantity math only and validates only dependencies needed by that address, without a global Suilend shared-market gate.
+- Suilend interest accrues to P's timestamp; future reserve timestamps fail closed. Cetus uses its separate accounting object, including fees/rewards and zero-liquidity positions. Index absence never falls back to a node.
+- Volo's stored USD NAV uses the base-coin oracle version from the same
+  settlement transaction, selected from indexed immutable quote versions. Verify
+  every nonzero NAV timestamp's transaction/version and the quote's owner/type,
+  output version and timestamp. Keep one quote per vault, even for vaults sharing
+  a base coin. Missing or mixed provenance fails closed. Report
+  `valuation=settled_nav` and the NAV/quote timestamps; zero asset rows do not set
+  the settlement period. Do not restore historical node or transaction RPCs.
 - A checkpoint is the pin: sequence number, 32-byte digest and timestamp fill `BlockRef` as a
   block does. `GetCheckpoint` is asked with a read mask for those three fields only. The dialer
   verifies the endpoint's chain identifier (`GetServiceInfo.chain_id`, the base58 genesis digest

@@ -61,19 +61,59 @@ spelled out rather than inferred from a zero value. Adapters continue to gate
 later markets, vaults, rewards, and replacement contracts with their narrower
 component deployment windows.
 
-Sui uses a separate `SuiReader` for direct wallet holdings and
-`NewSuiProtocolReader()` for latest NAVI lending, NAVI Multiply,
-native NAVI vaults, Volo strategy vaults (including Single Loop and Astros),
-Suilend lending, and Cetus/Bluefin concentrated liquidity. The protocol IDs are
-`navi`, `volo-vaults`, `suilend`, `cetus`, and `bluefin`.
-`ReadLatest` takes a `SuiObjectReader`; NAVI and Volo discovery also requires
-`SuiObjectLineageReader` (`SuiGRPCClient` implements both). All discovery and
-state reads use that gRPC connection; these protocols require no dedicated
-processor or separate object-directory service.
+Sui uses a separate `SuiReader` for direct wallet coin holdings. Protocol
+positions for `navi`, `volo-vaults`, `suilend`, `cetus` and `bluefin` come entirely
+from five dedicated, version-pinned processor indexes. Go never calls a Sui node
+for these protocols, including latest requests.
+
+Construct `NewNaviHistoryReader`, `NewVoloHistoryReader`, `NewSuilendHistoryReader`,
+`NewCetusHistoryReader` or `NewBluefinHistoryReader` with a
+`SentioIndexerConfig{SQLURL: ..., ProcessorVersion: ...}`. Each exposes:
+
+- `ReadLatest(ctx, owner)`: the newest completed hourly sample.
+- `ReadAtCheckpoint(ctx, owner, sequence)` and `ReadAtTime(ctx, owner, at)`:
+  completed hourly history, with the actual selected checkpoint in the result.
+
+Every address/protocol request executes one SQL statement. The statement returns
+its completed snapshot, address-owned positions, dependency objects, coin metadata
+and optional protocol values. Go then performs local integer arithmetic. The SQL
+uses the common `PortfolioSnapshot`, `PortfolioObjectState`,
+`PortfolioTokenMetadata` and `PortfolioValue` schema, version 1. Processor
+publication coverage starts at NAVI 7,877,880, Volo 172,857,371, Suilend 28,510,257,
+Cetus 1,579,561 and Bluefin 71,783,891.
+
+At hourly callback H, the processor materializes the final changed objects for
+sample P. The snapshot carries a certificate of the object and value row counts
+for that interval. One SQL returns the expected counts and the observed counts,
+computed once in the snapshot output. Go compares them before accepting P, without
+any additional request.
+Object sources are bounded by P and materialization by H. The raw object history
+view avoids a global entity aggregation; the query selects each object’s latest
+lifecycle and deduplicates replayed quote IDs itself. Ownership and dynamic
+field candidates are resolved to their latest lifecycle before filtering the
+current relation, so transfers, wrapping and deletions cannot resurrect old state.
+The requested time/checkpoint must belong to `[P,next)`. A chain halt can make this
+interval longer than an hour; it does not invalidate complete history.
+
+The matching `SuiProtocolReader.With*History` methods configure indexed latest
+routing. Missing or incomplete indexes, missing required contents and truncated
+SQL responses fail explicitly, without any node fallback or automatic SQL retry.
+Empty wallets still require the completed snapshot sentinel. Hosts enforce latest freshness; hourly
+materialization can leave the newest completed sample nearly two hours old.
+
+Volo reads each nonzero NAV asset's settlement timestamp and transaction from
+the index, then selects the base-coin quote written in that transaction. Vaults
+with the same base coin retain independent settlement quotes. A newer global
+quote is never substituted. Zero NAV entries do not determine the settlement
+period. Pending deposits and claimable principal retain their own amounts.
+
+Use `WithEngine(engine)` to share the host's indexer concurrency lane. Historical
+valuation must quote the returned sample timestamp and report missing prices;
+current prices are not a fallback. Direct wallet coin history remains unsupported.
 
 Cetus and Bluefin discover directly owned `position::Position` NFTs from their
 defining packages. Each position names its pool; only those pools, the two active
-boundary ticks, and Cetus position accounting fields are fetched. Discovery never
+boundary ticks, and Cetus position accounting fields are selected by the SQL. Discovery never
 enumerates a global position or tick table. Pool types, coin types, ownership,
 field keys, and NFT/accounting identities must agree. Cetus calculations use the
 pool's `PositionInfo` liquidity; the NFT's display liquidity can remain stale after
@@ -86,7 +126,7 @@ Principal uses the pool and boundary square-root prices with Q64 integer withdra
 rounding. Fees include stored amounts plus uncollected inside growth, with wrapping
 u128 counters. Rewards advance from stored growth to the observed checkpoint time
 using pool liquidity and emission rates; Bluefin emissions stop at their configured
-end time. When pool state is newer than the observed head, stored growth is retained.
+end time. Stored growth is never extrapolated backwards.
 Coin metadata and USD valuation follow the same path as the other Sui protocols.
 Each NFT remains a separate group, with principal, fees and rewards identified in
 component metadata. This surface covers directly held CLMM positions; farm/strategy
@@ -94,66 +134,48 @@ wrappers, Cetus vault shares and Bluefin perpetual accounts are not enumerated.
 The accounting layouts follow the [Cetus SDK](https://github.com/CetusProtocol/cetus-clmm-sui-sdk)
 and [Bluefin contract interfaces](https://github.com/fireflyprotocol/bluefin-spot-contract-interface).
 
-Suilend discovers every directly owned `ObligationOwnerCap` from its defining
-package, deduplicates capabilities pointing to the same obligation, and follows
-the obligation to its lending market. Market type, reserve index/coin identity,
-and the dynamic object-field link back to the market's obligation table are
-validated. This includes isolated lending markets without a market allowlist;
-it does not enumerate the global obligation table. Strategies with nested
+Suilend discovers directly owned `ObligationOwnerCap` objects from the index,
+deduplicates capabilities pointing to the same obligation, and follows each
+obligation to its indexed lending market. Market type and reserve index/coin
+identity must agree. The obligation owner must equal the dynamic-object-field
+ID derived from the market's obligation table, the obligation ID, and the exact
+`Wrapper<object::ID>` type tag. This verifies the parent link without a node read.
+Only markets referenced by the address's held capabilities are needed.
+This includes isolated lending markets without a market allowlist; it does not
+enumerate the global obligation table. Strategies with nested
 capabilities, liquid staking, standalone wallet cTokens and incentive rewards
 are outside this lending surface.
 
 Deposits convert cTokens through net reserve supply (available + borrowed -
 unclaimed spread fees). Borrows apply the cumulative borrow index. Reserves
-accrue to the observed checkpoint timestamp using the on-chain piecewise APR
+accrue to the selected hourly sample timestamp using the on-chain piecewise APR
 curve, per-second compounding and spread fee. All operations use integer WAD
 arithmetic and the Move operation order; raw token amounts are floored only
-after conversion. Metadata comes from the chain and must agree with reserve
-precision. USD prices remain the host's responsibility. The formulas follow
+after conversion. Reserve timestamps newer than the sample fail closed. Metadata
+comes from the index at H and must agree with reserve precision. USD prices
+remain the host's responsibility. The formulas follow
 [Suilend's Move contracts](https://github.com/suilend/suilend/tree/devel/contracts/suilend/sources).
 
-NAVI discovery follows the main Storage's market-counter object through its
-producing transactions and previous object versions. Created Storage objects
-are checked against current chain state and the counter's change. This visits
-market-creation transactions, without scanning checkpoint ranges. Root IDs are
-cached by counter version; new versions extend the inventory. The endpoint must
-retain those specific transactions and object versions; missing lineage is an
-explicit coverage error. MarketInfo and reserve tables establish relationships,
-and `last_market_id` checks inventory completeness. New markets and
-reserves need no address-list update. Capability ownership identifies Multiply
-accounts, including child capabilities that share one logical account. User
-principals and e-mode entries are batched point reads of derived dynamic field
-IDs, without enumerating the protocol's user tables.
+NAVI's indexed main Storage, MarketInfo and reserve objects establish the market
+inventory. The processor validates market and reserve inventory completeness. New markets
+and reserves need no address-list update. Capability ownership identifies
+Multiply accounts, including capabilities sharing one logical account.
+Principals use derived dynamic field IDs; readers do not enumerate user tables.
 
-Wallet-owned receipts discover every native and Volo vault the wallet uses,
-including strategy variants. NAVI receipts use `vault_address`; Volo receipts
-use `vault_id`. The Volo oracle is discovered once from its defining package's
-publication transaction. Vault shares, NAV tables and oracle prices come from current
-chain state. Fresh or emptied receipts with no state entry contribute no
-position; RPC failures remain coverage errors.
+Receipt ownership discovers native NAVI and Volo vaults. NAVI receipts use
+`vault_address`; Volo receipts use `vault_id`. Fresh or emptied receipts may have
+no state field. Required vault/NAV/quote contents and lifecycle records remain
+mandatory. Volo's oracle root is discovered from its processor catalog.
 
-Latest reads report the heads observed before and after reading
-(`headBeforeRead`/`headAfterRead`). A load-balanced endpoint can route these calls
-to nodes at different heights. Regressing heads do not discard positions or
-trigger synchronization retries; the original observations are preserved. They
-do not bound the object versions read or describe an atomic portfolio at one
-checkpoint. History is not supported. Hosts must reject historical requests
-before reading current state and preserve this metadata when combining snapshots.
+NAVI lending accrues indexed reserve interest to the selected sample timestamp
+using integer RAY arithmetic and fixed nine-decimal principal precision. Native
+vaults report stored NAV; Volo reports `valuation: settled_nav` and the NAV/quote
+timestamps. These calculations do not simulate a harvest or rebalance. Incentive
+rewards and withdrawal fees are excluded; amounts describe positions, not an
+immediate redemption quote. Coin precision comes from indexed metadata, and the
+host supplies prices for the requested valuation time.
 
-Lending projects reserve interest indices forward to the observed timestamp using
-integer RAY arithmetic and NAVI's fixed nine-decimal principal precision.
-If a NAVI or Suilend reserve is newer than the observed head, its stored interest
-is used without projecting backwards. Volo NAV and oracle timestamps describe
-the objects read and need not precede the independently observed head.
-Multiply retains collateral and debt. Vault amounts use stored NAV
-(`valuation: stored_nav`), without simulating a rebalance or harvest. Volo
-includes pending deposits and claimable principal once, and reports the oldest
-contributing NAV/oracle timestamp. Incentive rewards and withdrawal fees are
-excluded; amounts describe positions, not an immediate redemption quote. Coin
-precision comes from on-chain metadata, and the host supplies current prices.
-
-The accounting follows the official [NAVI contracts](https://github.com/naviprotocol/navi-smart-contracts)
-and [NAVI SDK](https://github.com/naviprotocol/naviprotocol-monorepo), with Volo
+Formulas follow the [NAVI SDK](https://github.com/naviprotocol/naviprotocol-monorepo), with Volo
 integer redemption operations checked against its published Move bytecode.
 
 Run the local test suites with:

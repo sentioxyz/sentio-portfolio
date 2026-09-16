@@ -9,7 +9,12 @@ import (
 	"strings"
 )
 
-func naviLending(ctx context.Context, owner SuiAddress, pin SuiCheckpoint, reader SuiReader, state suiProtocolState) ([]SuiProtocolGroup, error) {
+// Calculations need metadata only; a history reader supplies it from its index.
+type suiCoinMetadataReader interface {
+	CoinMetadata(context.Context, []string) (map[string]SuiCoinMetadata, map[string]error, error)
+}
+
+func naviLending(ctx context.Context, owner SuiAddress, pin SuiCheckpoint, reader suiCoinMetadataReader, state suiProtocolState) ([]SuiProtocolGroup, error) {
 	accounts := map[string]bool{owner.Hex(): true}
 	for _, object := range state.Owned {
 		if object.Kind != "account" {
@@ -141,7 +146,7 @@ func naviLending(ctx context.Context, owner SuiAddress, pin SuiCheckpoint, reade
 	return result, nil
 }
 
-func suiProtocolMetadata(ctx context.Context, reader SuiReader, wanted map[string]bool) (map[string]SuiCoinMetadata, error) {
+func suiProtocolMetadata(ctx context.Context, reader suiCoinMetadataReader, wanted map[string]bool) (map[string]SuiCoinMetadata, error) {
 	coins := make([]string, 0, len(wanted))
 	for coin := range wanted {
 		coins = append(coins, coin)
@@ -162,7 +167,7 @@ func suiProtocolMetadata(ctx context.Context, reader SuiReader, wanted map[strin
 	return metadata, nil
 }
 
-func suiVaults(ctx context.Context, protocolID string, reader SuiReader, state suiProtocolState) ([]SuiProtocolGroup, error) {
+func suiVaults(ctx context.Context, protocolID string, reader suiCoinMetadataReader, state suiProtocolState) ([]SuiProtocolGroup, error) {
 	receipts := make(map[string]suiProtocolObject)
 	vaultSet := make(map[string]bool)
 	ids := []string{}

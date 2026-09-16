@@ -2,7 +2,6 @@ package portfolio
 
 import (
 	"context"
-	"errors"
 	"os"
 	"testing"
 	"time"
@@ -36,17 +35,6 @@ func TestSuiLiveGRPCReader(t *testing.T) {
 		t.Fatalf("latest checkpoint is %s old", age)
 	}
 	t.Logf("latest checkpoint %d at %s", latest.Sequence, latest.Timestamp)
-
-	again, err := client.CheckpointBySequence(ctx, latest.Sequence)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if again != latest {
-		t.Fatalf("checkpoint %d re-read as %+v, want %+v", latest.Sequence, again, latest)
-	}
-	if _, err := client.CheckpointBySequence(ctx, latest.Sequence+1_000_000_000); !errors.Is(err, errSuiCheckpointUnavailable) {
-		t.Fatalf("future checkpoint: %v, want errSuiCheckpointUnavailable", err)
-	}
 
 	// The framework package address is a popular airdrop target, so it holds spam coins; whatever
 	// it holds must decode with every coin type normalized and report both head observations.

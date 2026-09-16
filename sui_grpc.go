@@ -233,8 +233,8 @@ func (c *SuiGRPCClient) latestSequence(ctx context.Context) (uint64, error) {
 	return info.GetCheckpointHeight(), nil
 }
 
-func (c *SuiGRPCClient) getCheckpoint(ctx context.Context, request *rpcv2.GetCheckpointRequest) (SuiCheckpoint, error) {
-	request.ReadMask = &fieldmaskpb.FieldMask{Paths: suiCheckpointReadMask}
+func (c *SuiGRPCClient) getCheckpoint(ctx context.Context) (SuiCheckpoint, error) {
+	request := &rpcv2.GetCheckpointRequest{ReadMask: &fieldmaskpb.FieldMask{Paths: suiCheckpointReadMask}}
 	var response *rpcv2.GetCheckpointResponse
 	err := c.invoke(ctx, "GetCheckpoint", func(ctx context.Context) error {
 		var callErr error
@@ -264,26 +264,9 @@ func (c *SuiGRPCClient) getCheckpoint(ctx context.Context, request *rpcv2.GetChe
 // LatestCheckpoint reads the head: GetCheckpoint with no selector answers with the newest
 // checkpoint the endpoint has.
 func (c *SuiGRPCClient) LatestCheckpoint(ctx context.Context) (SuiCheckpoint, error) {
-	checkpoint, err := c.getCheckpoint(ctx, &rpcv2.GetCheckpointRequest{})
+	checkpoint, err := c.getCheckpoint(ctx)
 	if err != nil {
 		return SuiCheckpoint{}, fmt.Errorf("latest checkpoint: %w", err)
-	}
-	return checkpoint, nil
-}
-
-// CheckpointBySequence resolves a checkpoint. The service answers an unknown sequence with
-// NotFound, which is errSuiCheckpointUnavailable and never retried.
-func (c *SuiGRPCClient) CheckpointBySequence(ctx context.Context, sequence uint64) (SuiCheckpoint, error) {
-	checkpoint, err := c.getCheckpoint(ctx, &rpcv2.GetCheckpointRequest{
-		CheckpointId: &rpcv2.GetCheckpointRequest_SequenceNumber{SequenceNumber: sequence},
-	})
-	if err != nil {
-		return SuiCheckpoint{}, fmt.Errorf("checkpoint %d: %w", sequence, err)
-	}
-	if checkpoint.Sequence != sequence {
-		return SuiCheckpoint{}, fmt.Errorf(
-			"Sui gRPC returned checkpoint %d for sequence %d", checkpoint.Sequence, sequence,
-		)
 	}
 	return checkpoint, nil
 }
