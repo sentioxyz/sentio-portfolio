@@ -78,9 +78,14 @@ Every address/protocol request executes one SQL statement. The statement returns
 its completed snapshot, address-owned positions, dependency objects, coin metadata
 and optional protocol values. Go then performs local integer arithmetic. The SQL
 uses the common `PortfolioSnapshot`, `PortfolioObjectState`,
-`PortfolioTokenMetadata` and `PortfolioValue` schema, version 1. Processor
+`PortfolioTokenMetadata` and `PortfolioValue` schema, version 2. Processor
 publication coverage starts at NAVI 7,877,880, Volo 172,857,371, Suilend 28,510,257,
 Cetus 1,579,561 and Bluefin 71,783,891.
+
+Version 2 uses native signed 64-bit timeline/count fields and immutable IDs
+prefixed by kind and the 20-digit source checkpoint. Deploy and backfill a new
+processor version before switching the host's version pin; version-1 rows are
+not compatible. Financial quantities remain arbitrary-precision decimal strings.
 
 At hourly callback H, the processor materializes the final changed objects for
 sample P. The snapshot carries a certificate of the object and value row counts

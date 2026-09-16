@@ -25,6 +25,7 @@ type suiSQLSnapshot struct {
 	ObjectCount, ValueCount, ObservedObjectCount, ObservedValueCount    string
 	ID, Checkpoint, TimestampMs, Digest, StartCheckpoint, SchemaVersion string
 	MaterializedAtCheckpoint, NextCheckpoint, NextTimestampMs           string
+	PreviousCheckpoint                                                  string
 }
 type suiSQLObject struct {
 	ID, ObjectID, Kind, Version, Digest, State, OwnerKind, Owner    string
@@ -32,6 +33,10 @@ type suiSQLObject struct {
 	MaterializedAtCheckpoint, ParentID, Key, RelatedID, Links       string
 }
 type suiSQLMetadata struct{ Status, CoinType, Decimals, Symbol, Name, Checkpoint, MaterializedAtCheckpoint string }
+type suiSQLValue struct {
+	suiProtocolValue
+	Checkpoint, MaterializedAtCheckpoint string
+}
 type suiSQLData struct {
 	pin      SuiCheckpoint
 	snapshot suiSQLSnapshot
@@ -145,6 +150,7 @@ func (r *suiHistoryIndex) readSQL(ctx context.Context, owner SuiAddress, selecti
 	}
 	data := &suiSQLData{owner: owner, objects: map[string]suiSQLObject{}, metadata: map[string]SuiCoinMetadata{}}
 	snapshots := 0
+	var values []suiSQLValue
 	for _, row := range response.Result.Rows {
 		switch row.RowType {
 		case "snapshot":
@@ -186,11 +192,11 @@ func (r *suiHistoryIndex) readSQL(ctx context.Context, owner SuiAddress, selecti
 			}
 			data.metadata[meta.CoinType] = coin
 		case "value":
-			var value suiProtocolValue
+			var value suiSQLValue
 			if err := json.Unmarshal([]byte(row.Payload), &value); err != nil {
 				return nil, fmt.Errorf("invalid Sui SQL value")
 			}
-			data.values = append(data.values, value)
+			values = append(values, value)
 		default:
 			return nil, fmt.Errorf("unknown Sui SQL row type")
 		}
@@ -214,7 +220,8 @@ func (r *suiHistoryIndex) readSQL(ctx context.Context, owner SuiAddress, selecti
 	materialized, e1 := historyUint(snap.MaterializedAtCheckpoint)
 	next, e2 := historyUint(snap.NextCheckpoint)
 	nextTime, e3 := historyUint(snap.NextTimestampMs)
-	if e1 != nil || e2 != nil || e3 != nil || snap.SchemaVersion != "1" || snap.StartCheckpoint != strconv.FormatUint(r.start, 10) || snap.ID != fmt.Sprintf("%020d", data.pin.Sequence) || materialized <= data.pin.Sequence || next != materialized || nextTime <= uint64(data.pin.Timestamp.UnixMilli()) {
+	previous, e4 := historyUint(snap.PreviousCheckpoint)
+	if e1 != nil || e2 != nil || e3 != nil || e4 != nil || previous < r.start-1 || previous >= data.pin.Sequence || snap.SchemaVersion != suiPortfolioSchemaVersion || snap.StartCheckpoint != strconv.FormatUint(r.start, 10) || snap.ID != fmt.Sprintf("%020d", data.pin.Sequence) || materialized <= data.pin.Sequence || next != materialized || nextTime <= uint64(data.pin.Timestamp.UnixMilli()) || nextTime > 253402300799999 {
 		return nil, fmt.Errorf("invalid Sui SQL completion certificate")
 	}
 	if selection.checkpoint != nil && (*selection.checkpoint < data.pin.Sequence || *selection.checkpoint >= next) {
@@ -223,10 +230,26 @@ func (r *suiHistoryIndex) readSQL(ctx context.Context, owner SuiAddress, selecti
 	if selection.at != nil && (selection.at.Before(data.pin.Timestamp) || selection.at.UnixMilli() >= int64(nextTime)) {
 		return nil, fmt.Errorf("Sui index has not completed the requested hour")
 	}
+	seenValues := map[string]bool{}
+	for _, value := range values {
+		cp, e1 := historyUint(value.Checkpoint)
+		at, e2 := historyUint(value.MaterializedAtCheckpoint)
+		_, e3 := historyUint(value.Market)
+		account, e4 := ParseSuiAddress(value.Account)
+		identity := "emode:" + value.Market + ":" + value.Account
+		if r.protocolID != "navi" || value.Kind != "emode" || e1 != nil || e2 != nil || e3 != nil || e4 != nil || account.Hex() != value.Account || cp < r.start || cp > data.pin.Sequence || at < cp || at > materialized || value.ID != fmt.Sprintf("emode:%020d:%s", cp, identity) || seenValues[identity] {
+			return nil, fmt.Errorf("invalid Sui indexed e-mode value")
+		}
+		seenValues[identity] = true
+		// Storage IDs include source time; the calculator uses the stable
+		// account/market identity after the historical row has been validated.
+		value.ID = identity
+		data.values = append(data.values, value.suiProtocolValue)
+	}
 	for _, obj := range append(mapSuiSQLObjects(data.objects), data.quotes...) {
 		cp, e1 := historyUint(obj.Checkpoint)
 		at, e2 := historyUint(obj.MaterializedAtCheckpoint)
-		if e1 != nil || e2 != nil || cp > data.pin.Sequence || at > materialized || obj.ObjectID == "" || obj.Kind == "" {
+		if e1 != nil || e2 != nil || cp > data.pin.Sequence || at < cp || at > materialized || obj.ObjectID == "" || obj.Kind == "" {
 			return nil, fmt.Errorf("Sui SQL object exceeds completed snapshot")
 		}
 		if obj.State == "live" {

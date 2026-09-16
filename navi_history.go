@@ -22,7 +22,8 @@ type suiHistoryIndex struct {
 }
 
 func newSuiHistoryIndex(config SentioIndexerConfig, protocolID, name string, start uint64) (*suiHistoryIndex, error) {
-	if _, err := strconv.ParseUint(config.ProcessorVersion, 10, 64); err != nil || config.ProcessorVersion == "0" {
+	version, err := strconv.ParseUint(config.ProcessorVersion, 10, 64)
+	if err != nil || version == 0 || strconv.FormatUint(version, 10) != config.ProcessorVersion {
 		return nil, fmt.Errorf("Sui history requires an explicit processor version")
 	}
 	endpoint, err := url.Parse(config.SQLURL)

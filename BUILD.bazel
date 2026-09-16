@@ -172,6 +172,7 @@ go_test(
         "suilend_test.go",
         "sui_test.go",
         "sui_sql_test.go",
+        "sui_sql_execution_test.go",
         "sui_clmm_test.go",
         "types_test.go",
         "uniswap_enumeration_test.go",

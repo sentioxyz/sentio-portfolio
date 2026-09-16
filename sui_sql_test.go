@@ -32,7 +32,7 @@ func newSQLPortfolioFixture(t *testing.T, protocol string, base *latestSuiFixtur
 	pin := base.pin
 	pin.Sequence = starts[protocol] + 100
 	fixture := &sqlPortfolioFixture{pin: pin}
-	fixture.rows = append(fixture.rows, sqlFixtureRow("snapshot", suiSQLSnapshot{ID: fmt.Sprintf("%020d", pin.Sequence), Checkpoint: fmt.Sprint(pin.Sequence), TimestampMs: fmt.Sprint(pin.Timestamp.UnixMilli()), Digest: suiTestDigest, SchemaVersion: "1", ObjectCount: "0", ValueCount: "0", ObservedObjectCount: "0", ObservedValueCount: "0", StartCheckpoint: fmt.Sprint(starts[protocol]), MaterializedAtCheckpoint: fmt.Sprint(pin.Sequence + 100), NextCheckpoint: fmt.Sprint(pin.Sequence + 100), NextTimestampMs: fmt.Sprint(pin.Timestamp.Add(time.Hour).UnixMilli())}))
+	fixture.rows = append(fixture.rows, sqlFixtureRow("snapshot", suiSQLSnapshot{ID: fmt.Sprintf("%020d", pin.Sequence), Checkpoint: fmt.Sprint(pin.Sequence), TimestampMs: fmt.Sprint(pin.Timestamp.UnixMilli()), Digest: suiTestDigest, SchemaVersion: "2", ObjectCount: "0", ValueCount: "0", ObservedObjectCount: "0", ObservedValueCount: "0", StartCheckpoint: fmt.Sprint(starts[protocol]), PreviousCheckpoint: fmt.Sprint(starts[protocol] - 1), MaterializedAtCheckpoint: fmt.Sprint(pin.Sequence + 100), NextCheckpoint: fmt.Sprint(pin.Sequence + 100), NextTimestampMs: fmt.Sprint(pin.Timestamp.Add(time.Hour).UnixMilli())}))
 	normalize := func(object SuiObject) (suiSQLObject, bool) {
 		kind := ""
 		switch protocol {
@@ -105,7 +105,7 @@ func newSQLPortfolioFixture(t *testing.T, protocol string, base *latestSuiFixtur
 		if object.Digest == "" {
 			object.Digest = suiTestDigest
 		}
-		return suiSQLObject{ID: naviVersionID(object.ID, object.Version, false), ObjectID: object.ID, Kind: kind, Version: fmt.Sprint(object.Version), Digest: object.Digest, State: "live", OwnerKind: object.OwnerKind, Owner: object.Owner, ObjectType: object.ObjectType, Content: object.Content, Checkpoint: fmt.Sprint(pin.Sequence), TimestampMs: fmt.Sprint(pin.Timestamp.UnixMilli()), TransactionDigest: object.PreviousTransaction, MaterializedAtCheckpoint: fmt.Sprint(pin.Sequence + 100), ParentID: object.Owner, Key: key, RelatedID: related, Links: "{}"}, true
+		return suiSQLObject{ID: fmt.Sprintf("%s:%020d:%s", kind, pin.Sequence, naviVersionID(object.ID, object.Version, false)), ObjectID: object.ID, Kind: kind, Version: fmt.Sprint(object.Version), Digest: object.Digest, State: "live", OwnerKind: object.OwnerKind, Owner: object.Owner, ObjectType: object.ObjectType, Content: object.Content, Checkpoint: fmt.Sprint(pin.Sequence), TimestampMs: fmt.Sprint(pin.Timestamp.UnixMilli()), TransactionDigest: object.PreviousTransaction, MaterializedAtCheckpoint: fmt.Sprint(pin.Sequence + 100), ParentID: object.Owner, Key: key, RelatedID: related, Links: "{}"}, true
 	}
 	objects := map[string]suiSQLObject{}
 	for _, object := range base.objects {
@@ -230,7 +230,7 @@ func TestSuiSQLFiveProtocolsSingleRequestNoNode(t *testing.T) {
 	}
 }
 func TestSuiSQLRejectsIncompleteEnvelopes(t *testing.T) {
-	for _, scenario := range []string{"error", "cursor", "no sentinel", "duplicate sentinel", "truncated", "wrong schema", "unmaterialized", "missing object count", "missing value count", "extra object count", "absent count"} {
+	for _, scenario := range []string{"error", "cursor", "no sentinel", "duplicate sentinel", "truncated", "wrong schema", "unmaterialized", "missing object count", "missing value count", "extra object count", "absent count", "missing previous checkpoint", "reversed interval", "before publication", "timestamp overflow"} {
 		t.Run(scenario, func(t *testing.T) {
 			base, owner := suilendFixture()
 			fixture, index := newSQLPortfolioFixture(t, "suilend", base)
@@ -252,7 +252,7 @@ func TestSuiSQLRejectsIncompleteEnvelopes(t *testing.T) {
 					_ = json.Unmarshal([]byte(fixture.rows[0].Payload), &s)
 					switch scenario {
 					case "wrong schema":
-						s.SchemaVersion = "0"
+						s.SchemaVersion = "1"
 					case "missing object count":
 						s.ObjectCount = "1"
 					case "missing value count":
@@ -261,6 +261,14 @@ func TestSuiSQLRejectsIncompleteEnvelopes(t *testing.T) {
 						s.ObservedObjectCount = "1"
 					case "absent count":
 						s.ObservedValueCount = ""
+					case "missing previous checkpoint":
+						s.PreviousCheckpoint = ""
+					case "reversed interval":
+						s.PreviousCheckpoint = s.Checkpoint
+					case "before publication":
+						s.PreviousCheckpoint = "0"
+					case "timestamp overflow":
+						s.NextTimestampMs = "18446744073709551615"
 					default:
 						s.MaterializedAtCheckpoint = s.Checkpoint
 					}
@@ -381,5 +389,98 @@ func TestSuiSQLNeverRetriesHTTPExecution(t *testing.T) {
 				t.Fatalf("%s executed SQL %d times, error %v", scenario, calls.Load(), err)
 			}
 		})
+	}
+}
+
+func TestSuiSQLNaviVersionedEmode(t *testing.T) {
+	for _, entered := range []bool{true, false} {
+		t.Run(strconv.FormatBool(entered), func(t *testing.T) {
+			base := latestFixture()
+			owner, _ := ParseSuiAddress("0x11")
+			account := naviAddress("0x22")
+			base.addMarket(0, 0, account, "2000000000", false)
+			cap := latestObject("0x23", naviAccountType, "ADDRESS", owner.Hex(), map[string]any{"owner": account})
+			base.objects[cap.ID] = cap
+			fixture, index := newSQLPortfolioFixture(t, "navi", base)
+			fixture.rows = append(fixture.rows, sqlFixtureRow("value", map[string]string{
+				"id":   fmt.Sprintf("emode:%020d:emode:0:%s", fixture.pin.Sequence, account),
+				"kind": "emode", "account": account, "market": "0", "content": fmt.Sprintf(`{"entered":%t}`, entered),
+				"checkpoint": fmt.Sprint(fixture.pin.Sequence), "materializedAtCheckpoint": fmt.Sprint(fixture.pin.Sequence),
+			}))
+			got, err := index.ReadAtCheckpoint(context.Background(), owner, fixture.pin.Sequence)
+			if err != nil || len(got.Groups) != 1 {
+				t.Fatalf("versioned e-mode: %+v %v", got, err)
+			}
+			label := "Lending"
+			if entered {
+				label = "Multiply"
+			}
+			if got.Groups[0].Label != label || got.Groups[0].Components[0].AmountRaw != "2000000000" {
+				t.Fatalf("incorrect e-mode calculation: %+v", got.Groups[0])
+			}
+		})
+	}
+}
+
+func TestSuiSQLRejectsInvalidEmodeHistory(t *testing.T) {
+	for _, scenario := range []string{"identity", "future source", "future materialization", "materialization before source", "duplicate", "market"} {
+		t.Run(scenario, func(t *testing.T) {
+			base := latestFixture()
+			owner, _ := ParseSuiAddress("0x11")
+			base.addMarket(0, 0, owner.Hex(), "1000000000", false)
+			fixture, index := newSQLPortfolioFixture(t, "navi", base)
+			value := map[string]string{
+				"id":   fmt.Sprintf("emode:%020d:emode:0:%s", fixture.pin.Sequence, owner.Hex()),
+				"kind": "emode", "account": owner.Hex(), "market": "0", "content": `{"entered":true}`,
+				"checkpoint": fmt.Sprint(fixture.pin.Sequence), "materializedAtCheckpoint": fmt.Sprint(fixture.pin.Sequence),
+			}
+			switch scenario {
+			case "identity":
+				value["id"] += ":wrong"
+			case "future source":
+				value["checkpoint"] = fmt.Sprint(fixture.pin.Sequence + 1)
+			case "future materialization":
+				value["materializedAtCheckpoint"] = fmt.Sprint(fixture.pin.Sequence + 101)
+			case "materialization before source":
+				value["materializedAtCheckpoint"] = fmt.Sprint(fixture.pin.Sequence - 1)
+			case "market":
+				value["market"] = "00"
+			case "duplicate":
+				fixture.rows = append(fixture.rows, sqlFixtureRow("value", value))
+			}
+			fixture.rows = append(fixture.rows, sqlFixtureRow("value", value))
+			result, err := index.ReadLatest(context.Background(), owner)
+			if err == nil || len(result.Groups) != 0 {
+				t.Fatalf("accepted invalid e-mode: %+v %v", result, err)
+			}
+		})
+	}
+}
+
+func TestSuiSQLNaviRejectsFutureReserve(t *testing.T) {
+	base := latestFixture()
+	owner, _ := ParseSuiAddress("0x11")
+	base.addMarket(0, 0, owner.Hex(), "1000000000", false)
+	fixture, index := newSQLPortfolioFixture(t, "navi", base)
+	for i, row := range fixture.rows {
+		if row.RowType != "object" {
+			continue
+		}
+		var object suiSQLObject
+		_ = json.Unmarshal([]byte(row.Payload), &object)
+		if object.Kind != "reserve" {
+			continue
+		}
+		fields, _ := suiObjectFields(object.Content)
+		value, _ := fields.object("value")
+		value["last_update_timestamp"] = fmt.Sprint(fixture.pin.Timestamp.UnixMilli() + 1)
+		fields["value"] = value
+		content, _ := json.Marshal(fields)
+		object.Content = string(content)
+		fixture.rows[i] = sqlFixtureRow("object", object)
+	}
+	result, err := index.ReadAtCheckpoint(context.Background(), owner, fixture.pin.Sequence)
+	if err == nil || !strings.Contains(err.Error(), "reserve timestamp") || len(result.Groups) != 0 {
+		t.Fatalf("accepted future reserve: %+v %v", result, err)
 	}
 }

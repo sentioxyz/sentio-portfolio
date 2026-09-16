@@ -6,7 +6,6 @@ import (
 	"math/big"
 	"sort"
 	"strconv"
-	"strings"
 )
 
 // Calculations need metadata only; a history reader supplies it from its index.
@@ -112,9 +111,12 @@ func naviLending(ctx context.Context, owner SuiAddress, pin SuiCheckpoint, reade
 		if err != nil {
 			return nil, err
 		}
-		// Latest objects and head observations may come from different backends.
-		// Keep the stored index if the reserve is ahead of the observed head.
-		target := max(last.Uint64(), uint64(pin.Timestamp.UnixMilli()))
+		// Indexed reserves must belong to the certified sample. A future index
+		// cannot be relabelled as a historical amount.
+		if pin.Timestamp.UnixMilli() < 0 || last.Uint64() > uint64(pin.Timestamp.UnixMilli()) {
+			return nil, fmt.Errorf("NAVI reserve timestamp exceeds indexed sample")
+		}
+		target := uint64(pin.Timestamp.UnixMilli())
 		index, err = naviIndexAt(index, rate, last.Uint64(), target, side == "borrow")
 		if err != nil {
 			return nil, err
@@ -389,7 +391,6 @@ func voloValuations(vaultIDs []string, vaults map[string]suiFields, coins map[st
 			values[row.Account] = make(map[string]*big.Int)
 			timestamps[row.Account] = make(map[string]uint64)
 		}
-		asset = strings.TrimPrefix(asset, "0x")
 		if values[row.Account][asset] != nil {
 			return nil, fmt.Errorf("duplicate Volo asset valuation")
 		}
@@ -419,7 +420,6 @@ func voloValuations(vaultIDs []string, vaults map[string]suiFields, coins map[st
 			if !ok {
 				return nil, fmt.Errorf("invalid vault asset type")
 			}
-			name = strings.TrimPrefix(name, "0x")
 			value, ok := values[id][name]
 			if !ok || seen[name] {
 				return nil, fmt.Errorf("Volo vault asset valuation is unavailable")

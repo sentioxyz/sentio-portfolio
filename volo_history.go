@@ -257,10 +257,9 @@ func (r *suiHistoryIndex) loadVoloNAV(ctx context.Context, pin SuiCheckpoint, or
 			if !ok || wanted[name] {
 				return fmt.Errorf("invalid Volo asset inventory")
 			}
-			if _, err := suiCoinType(name); err != nil {
-				return err
-			}
 			wanted[name] = true
+			// NAV inventory entries are exact ASCII table keys, including
+			// position identifiers that are not valid Move coin types.
 			for kind, parent := range map[string]string{"navValue": valuesParent, "navTimestamp": timesParent} {
 				id, err := suiASCIIFieldID(parent, name)
 				if err != nil {
