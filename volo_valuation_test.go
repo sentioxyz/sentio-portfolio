@@ -1,7 +1,6 @@
 package portfolio
 
 import (
-	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -52,7 +51,7 @@ func voloValuationFixture() (*latestSuiFixture, SuiAddress) {
 
 func TestVoloLatestUsesSettlementQuote(t *testing.T) {
 	f, owner := voloValuationFixture()
-	got, err := NewSuiProtocolReader().ReadLatest(context.Background(), "volo-vaults", owner, f)
+	got, err := readVoloFixture(t, f, owner)
 	if err != nil || len(got.Errors) != 0 || len(got.Groups) != 1 {
 		t.Fatalf("positions %+v, %v", got, err)
 	}
@@ -68,7 +67,7 @@ func TestVoloLatestUsesSettlementQuote(t *testing.T) {
 func TestVoloLatestDoesNotFallbackFromMissingSettlementQuote(t *testing.T) {
 	f, owner := voloValuationFixture()
 	delete(f.versions, 7)
-	got, err := NewSuiProtocolReader().ReadLatest(context.Background(), "volo-vaults", owner, f)
+	got, err := readVoloFixture(t, f, owner)
 	if err == nil && len(got.Errors) == 0 {
 		t.Fatalf("missing settlement quote silently used latest price: %+v", got)
 	}
@@ -92,12 +91,14 @@ func TestVoloSettlementRejectsInconsistentProvenance(t *testing.T) {
 			case "wrong version":
 				quote.Version = 8
 			case "missing quote change":
-				f.transactions[suiTestDigest] = append(f.transactions[suiTestDigest][:1], f.transactions[suiTestDigest][2])
+				delete(f.versions, 7)
 			case "missing NAV change":
-				f.transactions[suiTestDigest] = f.transactions[suiTestDigest][:2]
+				f.tables[naviAddress("0x88")] = nil
 			}
-			f.versions[7] = quote
-			got, err := NewSuiProtocolReader().ReadLatest(context.Background(), "volo-vaults", owner, f)
+			if scenario != "missing quote change" {
+				f.versions[7] = quote
+			}
+			got, err := readVoloFixture(t, f, owner)
 			if err == nil && len(got.Errors) == 0 || len(got.Groups) != 0 {
 				t.Fatalf("unverified settlement emitted a claim: %+v, %v", got, err)
 			}
@@ -122,7 +123,7 @@ func TestVoloVaultsWithSameCoinUseTheirOwnSettlementQuotes(t *testing.T) {
 	stamp := latestObject("0x1bb", suiFieldType("0x1::ascii::String", "u64"), "OBJECT", times, map[string]any{"name": "2::sui::SUI", "value": "2000000"})
 	stamp.Version, stamp.PreviousTransaction = 9, strings.Repeat("1", 32)
 	f.tables[times] = []SuiObject{stamp}
-	got, err := NewSuiProtocolReader().ReadLatest(context.Background(), "volo-vaults", owner, f)
+	got, err := readVoloFixture(t, f, owner)
 	if err != nil || len(got.Errors) != 0 || len(got.Groups) != 2 {
 		t.Fatalf("positions %+v, %v", got, err)
 	}
@@ -145,14 +146,14 @@ func TestVoloZeroAssetDoesNotRequireAnUnrelatedOldQuote(t *testing.T) {
 	values, times := naviAddress("0x77"), naviAddress("0x88")
 	f.tables[values] = append(f.tables[values], latestObject("0xcc", suiFieldType("0x1::ascii::String", "u256"), "OBJECT", values, map[string]any{"name": "2::other::OTHER", "value": "0"}))
 	f.tables[times] = append(f.tables[times], latestObject("0xdd", suiFieldType("0x1::ascii::String", "u64"), "OBJECT", times, map[string]any{"name": "2::other::OTHER", "value": "1"}))
-	got, err := NewSuiProtocolReader().ReadLatest(context.Background(), "volo-vaults", owner, f)
+	got, err := readVoloFixture(t, f, owner)
 	if err != nil || len(got.Errors) != 0 || len(got.Groups) != 1 || got.Groups[0].Components[0].AmountRaw != "1000000000" {
 		t.Fatalf("zero asset changed valuation: %+v, %v", got, err)
 	}
 	// A nonzero value from that other period must not be combined into this NAV.
 	other := &f.tables[values][1]
 	other.Content = strings.ReplaceAll(other.Content, `"value":"0"`, `"value":"1"`)
-	got, err = NewSuiProtocolReader().ReadLatest(context.Background(), "volo-vaults", owner, f)
+	got, err = readVoloFixture(t, f, owner)
 	if err == nil && len(got.Errors) == 0 || len(got.Groups) != 0 {
 		t.Fatalf("mixed NAV periods accepted: %+v, %v", got, err)
 	}

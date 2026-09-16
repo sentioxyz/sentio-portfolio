@@ -6,10 +6,14 @@ import (
 	"math/big"
 	"sort"
 	"strconv"
-	"strings"
 )
 
-func naviLending(ctx context.Context, owner SuiAddress, pin SuiCheckpoint, reader SuiReader, state suiProtocolState) ([]SuiProtocolGroup, error) {
+// Calculations need metadata only; a history reader supplies it from its index.
+type suiCoinMetadataReader interface {
+	CoinMetadata(context.Context, []string) (map[string]SuiCoinMetadata, map[string]error, error)
+}
+
+func naviLending(ctx context.Context, owner SuiAddress, pin SuiCheckpoint, reader suiCoinMetadataReader, state suiProtocolState) ([]SuiProtocolGroup, error) {
 	accounts := map[string]bool{owner.Hex(): true}
 	for _, object := range state.Owned {
 		if object.Kind != "account" {
@@ -107,9 +111,12 @@ func naviLending(ctx context.Context, owner SuiAddress, pin SuiCheckpoint, reade
 		if err != nil {
 			return nil, err
 		}
-		// Latest objects and head observations may come from different backends.
-		// Keep the stored index if the reserve is ahead of the observed head.
-		target := max(last.Uint64(), uint64(pin.Timestamp.UnixMilli()))
+		// Indexed reserves must belong to the certified sample. A future index
+		// cannot be relabelled as a historical amount.
+		if pin.Timestamp.UnixMilli() < 0 || last.Uint64() > uint64(pin.Timestamp.UnixMilli()) {
+			return nil, fmt.Errorf("NAVI reserve timestamp exceeds indexed sample")
+		}
+		target := uint64(pin.Timestamp.UnixMilli())
 		index, err = naviIndexAt(index, rate, last.Uint64(), target, side == "borrow")
 		if err != nil {
 			return nil, err
@@ -141,7 +148,7 @@ func naviLending(ctx context.Context, owner SuiAddress, pin SuiCheckpoint, reade
 	return result, nil
 }
 
-func suiProtocolMetadata(ctx context.Context, reader SuiReader, wanted map[string]bool) (map[string]SuiCoinMetadata, error) {
+func suiProtocolMetadata(ctx context.Context, reader suiCoinMetadataReader, wanted map[string]bool) (map[string]SuiCoinMetadata, error) {
 	coins := make([]string, 0, len(wanted))
 	for coin := range wanted {
 		coins = append(coins, coin)
@@ -162,7 +169,7 @@ func suiProtocolMetadata(ctx context.Context, reader SuiReader, wanted map[strin
 	return metadata, nil
 }
 
-func suiVaults(ctx context.Context, protocolID string, reader SuiReader, state suiProtocolState) ([]SuiProtocolGroup, error) {
+func suiVaults(ctx context.Context, protocolID string, reader suiCoinMetadataReader, state suiProtocolState) ([]SuiProtocolGroup, error) {
 	receipts := make(map[string]suiProtocolObject)
 	vaultSet := make(map[string]bool)
 	ids := []string{}
@@ -384,7 +391,6 @@ func voloValuations(vaultIDs []string, vaults map[string]suiFields, coins map[st
 			values[row.Account] = make(map[string]*big.Int)
 			timestamps[row.Account] = make(map[string]uint64)
 		}
-		asset = strings.TrimPrefix(asset, "0x")
 		if values[row.Account][asset] != nil {
 			return nil, fmt.Errorf("duplicate Volo asset valuation")
 		}
@@ -414,7 +420,6 @@ func voloValuations(vaultIDs []string, vaults map[string]suiFields, coins map[st
 			if !ok {
 				return nil, fmt.Errorf("invalid vault asset type")
 			}
-			name = strings.TrimPrefix(name, "0x")
 			value, ok := values[id][name]
 			if !ok || seen[name] {
 				return nil, fmt.Errorf("Volo vault asset valuation is unavailable")

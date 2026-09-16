@@ -47,42 +47,6 @@ type suiCLMMTick struct {
 	rewards []*big.Int
 }
 
-func readSuiCLMMLatest(ctx context.Context, protocol string, owner SuiAddress, reader SuiReader) (SuiProtocolPositions, error) {
-	name, pkg := "Cetus", cetusCLMMPackage
-	if protocol == "bluefin" {
-		name, pkg = "Bluefin", bluefinCLMMPackage
-	}
-	result := SuiProtocolPositions{ProtocolID: protocol, ProtocolName: name}
-	objects, ok := reader.(SuiObjectReader)
-	if !ok {
-		return result, fmt.Errorf("Sui object reads are unavailable")
-	}
-	before, err := reader.LatestCheckpoint(ctx)
-	if err != nil {
-		return result, err
-	}
-	positions, pools, readErr := loadSuiCLMM(ctx, owner, objects, pkg)
-	after, err := reader.LatestCheckpoint(ctx)
-	if err != nil {
-		return result, err
-	}
-	result.Checkpoint, result.HeadBeforeRead = after, before.Sequence
-	if readErr == nil {
-		result.Groups, readErr = suiCLMMGroups(ctx, reader, protocol, positions, pools, after)
-	}
-	if readErr != nil {
-		result.Errors = append(result.Errors, fmt.Errorf("liquidity: %w", readErr))
-		return result, nil
-	}
-	for i := range result.Groups {
-		m := result.Groups[i].Metadata
-		m["stateMode"] = "latest"
-		m["headBeforeRead"] = fmt.Sprint(before.Sequence)
-		m["headAfterRead"] = fmt.Sprint(after.Sequence)
-	}
-	return result, nil
-}
-
 func loadSuiCLMM(ctx context.Context, owner SuiAddress, reader SuiObjectReader, pkg string) ([]suiCLMMPosition, map[string]suiCLMMPool, error) {
 	owned, err := reader.OwnedObjects(ctx, owner, pkg+"::position::Position")
 	if err != nil {

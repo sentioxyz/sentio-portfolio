@@ -35,9 +35,6 @@ const SuiMainnetChainIdentifier = "35834a8a"
 type SuiReader interface {
 	// LatestCheckpoint is the newest checkpoint the endpoint serves.
 	LatestCheckpoint(ctx context.Context) (SuiCheckpoint, error)
-	// CheckpointBySequence resolves a checkpoint by sequence number; an unknown one is
-	// errSuiCheckpointUnavailable.
-	CheckpointBySequence(ctx context.Context, sequence uint64) (SuiCheckpoint, error)
 	// Holdings enumerates every coin type owner holds at the head when pin is nil. A non-nil pin
 	// asks for the state at a fixed checkpoint, which no Sui transport this kernel speaks can
 	// answer, so the reader returns no balances at all, marked HistoryUnsupported, rather than
