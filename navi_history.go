@@ -22,6 +22,9 @@ type suiHistoryIndex struct {
 }
 
 func newSuiHistoryIndex(config SentioIndexerConfig, protocolID, name string, start uint64) (*suiHistoryIndex, error) {
+	if config.SuiPortfolioSchemaVersion != 0 && config.SuiPortfolioSchemaVersion != 2 && config.SuiPortfolioSchemaVersion != 3 {
+		return nil, fmt.Errorf("unsupported Sui portfolio schema version")
+	}
 	version, err := strconv.ParseUint(config.ProcessorVersion, 10, 64)
 	if err != nil || version == 0 || strconv.FormatUint(version, 10) != config.ProcessorVersion {
 		return nil, fmt.Errorf("Sui history requires an explicit processor version")

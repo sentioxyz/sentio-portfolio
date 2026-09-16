@@ -29,6 +29,9 @@ const (
 // SentioIndexerConfig is supplied by the host at runtime. Endpoint values may
 // contain private project paths and must never be included in public errors.
 type SentioIndexerConfig struct {
+	// SuiPortfolioSchemaVersion selects the versioned processor contract. Zero
+	// retains schema 2 for existing deployments; 3 reads daily Portfolio events.
+	SuiPortfolioSchemaVersion int
 	// SQLURL is the version-pinned SQL execute endpoint used by Sui protocols.
 	SQLURL           string
 	GraphQLURL       string

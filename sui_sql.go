@@ -50,11 +50,44 @@ type suiSQLData struct {
 // Each read is a single version-pinned SQL statement. The snapshot row survives
 // an empty address selection, so an empty wallet cannot hide missing history.
 func (r *suiHistoryIndex) readSQLPortfolio(ctx context.Context, owner SuiAddress, selection suiSQLSelection) (SuiProtocolPositions, error) {
+	if r.config.SuiPortfolioSchemaVersion == 3 {
+		return r.readDailyPortfolio(ctx, owner, selection)
+	}
 	data, err := r.readSQL(ctx, owner, selection)
 	if err != nil {
 		return r.result(SuiCheckpoint{}), err
 	}
+	result, err := r.calculatePortfolio(ctx, owner, data)
+	if err != nil {
+		return result, err
+	}
+	for i := range result.Groups {
+		m := result.Groups[i].Metadata
+		if m == nil {
+			m = map[string]any{}
+			result.Groups[i].Metadata = m
+		}
+		m["stateMode"] = "indexed"
+		if selection.at != nil || selection.checkpoint != nil {
+			m["stateMode"] = "historical"
+		}
+		m["sampleIntervalSeconds"] = 3600
+		m["materializedAtCheckpoint"] = data.snapshot.MaterializedAtCheckpoint
+		if selection.at != nil {
+			m["requestedTimestamp"] = selection.at.UTC().Format(time.RFC3339Nano)
+		}
+		if selection.checkpoint != nil {
+			m["requestedCheckpoint"] = strconv.FormatUint(*selection.checkpoint, 10)
+		}
+	}
+	sort.Slice(result.Groups, func(i, j int) bool { return result.Groups[i].ID < result.Groups[j].ID })
+	return result, nil
+}
+
+// calculatePortfolio is shared by SQL readers and processor-side daily snapshots.
+func (r *suiHistoryIndex) calculatePortfolio(ctx context.Context, owner SuiAddress, data *suiSQLData) (SuiProtocolPositions, error) {
 	result := r.result(data.pin)
+	var err error
 	switch r.protocolID {
 	case "suilend":
 		state, e := loadSuilend(ctx, owner, data)
@@ -94,25 +127,6 @@ func (r *suiHistoryIndex) readSQLPortfolio(ctx context.Context, owner SuiAddress
 	}
 	if err != nil {
 		return result, err
-	}
-	for i := range result.Groups {
-		m := result.Groups[i].Metadata
-		if m == nil {
-			m = map[string]any{}
-			result.Groups[i].Metadata = m
-		}
-		m["stateMode"] = "indexed"
-		if selection.at != nil || selection.checkpoint != nil {
-			m["stateMode"] = "historical"
-		}
-		m["sampleIntervalSeconds"] = 3600
-		m["materializedAtCheckpoint"] = data.snapshot.MaterializedAtCheckpoint
-		if selection.at != nil {
-			m["requestedTimestamp"] = selection.at.UTC().Format(time.RFC3339Nano)
-		}
-		if selection.checkpoint != nil {
-			m["requestedCheckpoint"] = strconv.FormatUint(*selection.checkpoint, 10)
-		}
 	}
 	sort.Slice(result.Groups, func(i, j int) bool { return result.Groups[i].ID < result.Groups[j].ID })
 	return result, nil
