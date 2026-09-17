@@ -45,6 +45,12 @@ type suiSQLData struct {
 	quotes   []suiSQLObject
 	metadata map[string]SuiCoinMetadata
 	values   []suiProtocolValue
+	// Shared by every account of one snapshot calculator; nil parses per read.
+	markets *suilendMarketMemo
+}
+
+func (d *suiSQLData) suilendMarket(market SuiObject) (suilendParsedMarket, error) {
+	return d.markets.market(market)
 }
 
 // Each read is a single version-pinned SQL statement. The snapshot row survives

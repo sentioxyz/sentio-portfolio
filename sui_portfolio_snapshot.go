@@ -89,7 +89,7 @@ func NewSuiPortfolioCalculator(input SuiPortfolioInput) (*SuiPortfolioCalculator
 	names := map[string]string{"navi": "NAVI", "volo-vaults": "Volo Vaults", "suilend": "Suilend", "cetus": "Cetus", "bluefin": "Bluefin"}
 	c := &SuiPortfolioCalculator{input: input, kinds: kinds,
 		reader: &suiHistoryIndex{protocolID: input.ProtocolID, name: names[input.ProtocolID]},
-		data:   &suiSQLData{pin: pin, objects: map[string]suiSQLObject{}, metadata: map[string]SuiCoinMetadata{}, quotes: input.Quotes},
+		data:   &suiSQLData{pin: pin, objects: map[string]suiSQLObject{}, metadata: map[string]SuiCoinMetadata{}, quotes: input.Quotes, markets: newSuilendMarketMemo()},
 		byKind: map[string][]suiSQLObject{}, byOwner: map[string][]suiSQLObject{}, byParent: map[string][]suiSQLObject{},
 		byKey: map[string][]suiSQLObject{}, byParentKey: map[string][]suiSQLObject{}, links: map[string]map[string]json.RawMessage{}}
 	for _, row := range input.Objects {
@@ -196,7 +196,7 @@ func (c *SuiPortfolioCalculator) link(row suiSQLObject, key string) string {
 func (c *SuiPortfolioCalculator) Accounts() []string { return append([]string{}, c.accounts...) }
 
 func (c *SuiPortfolioCalculator) accountData(owner SuiAddress) *suiSQLData {
-	d := &suiSQLData{pin: c.data.pin, owner: owner, objects: map[string]suiSQLObject{}, metadata: c.data.metadata}
+	d := &suiSQLData{pin: c.data.pin, owner: owner, objects: map[string]suiSQLObject{}, metadata: c.data.metadata, markets: c.data.markets}
 	add := func(row suiSQLObject) {
 		if row.ObjectID != "" {
 			d.objects[row.ObjectID] = row
