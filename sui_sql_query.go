@@ -10,12 +10,15 @@ const suiPortfolioSchemaVersion = "2"
 
 type suiSQLKinds struct {
 	roots, direct, second, topology, children, oracle, prices []string
+	// indexed protocols also publish PortfolioOwnerIndex and PortfolioObjectIndex:
+	// narrow rows ordered by owner and by object that point at state rows.
+	indexed bool
 }
 
 func suiSQLProtocolKinds(protocol string) (suiSQLKinds, error) {
 	switch protocol {
 	case "suilend":
-		return suiSQLKinds{roots: []string{"cap"}, direct: []string{"obligation"}, second: []string{"market"}}, nil
+		return suiSQLKinds{roots: []string{"cap"}, direct: []string{"obligation"}, second: []string{"market"}, indexed: true}, nil
 	case "navi":
 		return suiSQLKinds{roots: []string{"account", "receipt"}, direct: []string{"vault"}, topology: []string{"storage", "market", "reserve"}, children: []string{"principal", "receiptState"}}, nil
 	case "cetus":
@@ -45,6 +48,26 @@ func suiSQLIDRange(kinds []string, lower, upper string) string {
 		ranges = append(ranges, `(`+start+` AND id <= `+end(upper)+`)`)
 	}
 	return `(` + strings.Join(ranges, ` OR `) + `)`
+}
+
+// suiSQLKindPrefixRange selects every row of the given kinds in an index table,
+// whose IDs start with the kind and then the object or owner.
+func suiSQLKindPrefixRange(kinds []string) string {
+	ranges := make([]string, 0, len(kinds))
+	for _, kind := range kinds {
+		ranges = append(ranges, `(id >= `+sqlString(kind+":")+` AND id <= `+sqlString(kind+":~")+`)`)
+	}
+	return `(` + strings.Join(ranges, ` OR `) + `)`
+}
+
+// suiSQLSet turns a stage's candidate expression into a set: a subquery is one
+// already, an array alias is expanded with arrayJoin. Only a set reaches the
+// primary key and the skip indexes; a constant array is evaluated row by row.
+func suiSQLSet(ids string) string {
+	if strings.HasPrefix(ids, "(") {
+		return ids
+	}
+	return `(SELECT arrayJoin(` + ids + `))`
 }
 
 // portfolioSQL resolves candidate identities before selecting latest lifecycle.
@@ -87,18 +110,34 @@ func (r *suiHistoryIndex) portfolioSQL(owner SuiAddress, selection suiSQLSelecti
 	// again at every reference, so a chain of CTEs rescanned the table once per
 	// dependency level and per output branch. An empty stage yields an empty array.
 	latest := func(name, ids string, objectKinds []string) {
-		predicate := suiSQLIDRange(objectKinds, "", upper)
-		if ids != "" {
-			predicate += ` AND objectId IN ` + ids
-		}
 		// Compare only the immutable IDs before fetching JSON content. For one
 		// object, max(id) has exactly the checkpoint/version/terminal ordering.
-		ctes = append(ctes, `(SELECT groupArray(selectedId) FROM (SELECT max(id) AS selectedId FROM "PortfolioObjectState_raw" WHERE `+predicate+` GROUP BY objectId)) AS `+name+`_ids`)
+		selection := `SELECT max(id) AS selectedId FROM "PortfolioObjectState_raw" WHERE ` + suiSQLIDRange(objectKinds, "", upper)
+		if kinds.indexed {
+			// The object index orders one object's versions contiguously and its
+			// skip index on objectId keeps a lookup to the granules of that object,
+			// instead of a scan over every version of the kind.
+			selection = `SELECT max(stateId) AS selectedId FROM "PortfolioObjectIndex_raw" WHERE ` + suiSQLKindPrefixRange(objectKinds) + ` AND checkpoint <= ` + upper
+		}
+		if ids != "" {
+			selection += ` AND objectId IN ` + suiSQLSet(ids)
+		}
+		ctes = append(ctes, `(SELECT groupArray(selectedId) FROM (`+selection+` GROUP BY objectId)) AS `+name+`_ids`)
 		// arrayJoin turns the cached array back into a set: only a set reaches the
 		// primary key, a constant array is evaluated row by row over the table.
 		ctes = append(ctes, name+` AS (SELECT * FROM "PortfolioObjectState_raw" WHERE id IN (SELECT arrayJoin(`+name+`_ids)) AND `+visible+` ORDER BY id DESC,materializedAtCheckpoint DESC LIMIT 1 BY objectId)`)
 	}
-	ctes = append(ctes, `(SELECT groupUniqArray(objectId) FROM "PortfolioObjectState_raw" WHERE `+suiSQLIDRange(kinds.roots, "", upper)+` AND ownerKind IN ('ADDRESS','CONSENSUS_ADDRESS') AND owner=`+sqlString(owner.Hex())+`) AS root_candidates`)
+	candidates := `SELECT groupUniqArray(objectId) FROM "PortfolioObjectState_raw" WHERE ` + suiSQLIDRange(kinds.roots, "", upper) + ` AND ownerKind IN ('ADDRESS','CONSENSUS_ADDRESS') AND owner=` + sqlString(owner.Hex())
+	if kinds.indexed {
+		// The owner index orders an account's capabilities contiguously, so the
+		// candidates are one primary-key prefix range per root kind.
+		ranges := make([]string, 0, len(kinds.roots))
+		for _, kind := range kinds.roots {
+			ranges = append(ranges, `(id > `+sqlString(kind+":"+owner.Hex()+":")+` AND id <= `+sqlString(kind+":"+owner.Hex()+":~")+`)`)
+		}
+		candidates = `SELECT groupUniqArray(objectId) FROM "PortfolioOwnerIndex_raw" WHERE (` + strings.Join(ranges, ` OR `) + `) AND checkpoint <= ` + upper
+	}
+	ctes = append(ctes, `(`+candidates+`) AS root_candidates`)
 	latest("root_states", "root_candidates", kinds.roots)
 	ctes = append(ctes, `roots AS (SELECT * FROM root_states WHERE state='live' AND owner=`+sqlString(owner.Hex())+` AND ownerKind IN ('ADDRESS','CONSENSUS_ADDRESS'))`)
 	latest("direct_states", `(SELECT relatedId FROM roots WHERE relatedId != '')`, kinds.direct)

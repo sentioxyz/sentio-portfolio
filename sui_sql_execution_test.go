@@ -94,7 +94,34 @@ func TestSuiSQLExecution(t *testing.T) {
 				}
 				snapshots = append(snapshots, map[string]string{"id": fmt.Sprintf("%020d", cp), "checkpoint": strconv.Itoa(cp), "timestampMs": strconv.Itoa(cp * 1000), "digest": suiTestDigest, "schemaVersion": "2", "startCheckpoint": "1", "materializedAtCheckpoint": strconv.Itoa(cp + 10), "nextCheckpoint": strconv.Itoa(cp + 10), "nextTimestampMs": strconv.Itoa((cp + 10) * 1000), "previousCheckpoint": strconv.Itoa(cp - 10), "objectCount": strconv.Itoa(len(ids)), "valueCount": strconv.Itoa(count)})
 			}
+			// Indexed protocols also publish the narrow read indexes derived from
+			// every state row; the owner index only lists account-owned roots.
+			objectIndex, ownerIndex := []map[string]string{}, []map[string]string{}
+			for _, row := range objects {
+				terminal := "0"
+				if row["state"] != "live" {
+					terminal = "1"
+				}
+				cp, _ := strconv.Atoi(row["checkpoint"])
+				version, _ := strconv.Atoi(row["version"])
+				tail := fmt.Sprintf("%020d:%020d:%s", cp, version, terminal)
+				common := map[string]string{"objectId": row["objectId"], "stateId": row["id"], "checkpoint": row["checkpoint"], "materializedAtCheckpoint": row["materializedAtCheckpoint"]}
+				object := map[string]string{"id": row["kind"] + ":" + row["objectId"] + ":" + tail, "kind": row["kind"]}
+				for k, v := range common {
+					object[k] = v
+				}
+				objectIndex = append(objectIndex, object)
+				if row["kind"] == rootKind && row["ownerKind"] == "ADDRESS" && row["owner"] != "" {
+					index := map[string]string{"id": row["kind"] + ":" + row["owner"] + ":" + row["objectId"] + ":" + tail, "owner": row["owner"]}
+					for k, v := range common {
+						index[k] = v
+					}
+					ownerIndex = append(ownerIndex, index)
+				}
+			}
 			setup := sqlTestTable("PortfolioObjectState_raw", "id objectId kind digest state ownerKind owner objectType content transactionDigest parentId key relatedId links", "version checkpoint timestampMs materializedAtCheckpoint", objects)
+			setup += sqlTestTable("PortfolioObjectIndex_raw", "id objectId kind stateId", "checkpoint materializedAtCheckpoint", objectIndex)
+			setup += sqlTestTable("PortfolioOwnerIndex_raw", "id owner objectId stateId", "checkpoint materializedAtCheckpoint", ownerIndex)
 			setup += sqlTestTable("PortfolioSnapshot", "id digest", "checkpoint timestampMs schemaVersion startCheckpoint materializedAtCheckpoint nextCheckpoint nextTimestampMs previousCheckpoint objectCount valueCount", snapshots)
 			setup += sqlTestTable("PortfolioValue", "id kind account market content", "checkpoint materializedAtCheckpoint", values)
 			setup += sqlTestTable("PortfolioTokenMetadata", "id status coinType symbol name", "decimals checkpoint timestampMs materializedAtCheckpoint", nil)
