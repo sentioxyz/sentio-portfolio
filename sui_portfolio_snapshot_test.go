@@ -201,3 +201,65 @@ func TestSuiDailyMetadataFailureIsAccountScoped(t *testing.T) {
 		t.Fatal("invalid precision was emitted")
 	}
 }
+
+// One snapshot parses each lending market version once. A second account and a
+// repeated calculation reuse the parsed reserves; a different version misses.
+func TestSuiDailySuilendMarketParsedOncePerVersion(t *testing.T) {
+	input, owner, expected := dailyFixture(t, "suilend")
+	other, _ := ParseSuiAddress("0x123")
+	var cap SuiPortfolioObject
+	for _, row := range input.Objects {
+		if row.Kind == "cap" {
+			cap = row
+		}
+	}
+	cap.ID, cap.ObjectID, cap.Owner = "0x0000000000000000000000000000000000000000000000000000000000000011", "0x0000000000000000000000000000000000000000000000000000000000000011", other.Hex()
+	fields, _ := suiObjectFields(cap.Content)
+	fields["id"] = cap.ObjectID
+	raw, _ := json.Marshal(fields)
+	cap.Content = string(raw)
+	input.Objects = append(input.Objects, cap)
+	c, err := NewSuiPortfolioCalculator(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(c.Accounts(), []string{owner.Hex(), other.Hex()}) {
+		t.Fatal(c.Accounts())
+	}
+	for _, account := range []string{owner.Hex(), other.Hex(), owner.Hex()} {
+		event, err := c.Calculate(account)
+		if err != nil || len(event.Errors) != 0 || len(event.Positions) != len(expected.Groups) {
+			t.Fatalf("%s: %+v %v", account, event, err)
+		}
+		for i, g := range event.Positions {
+			if len(g.Components) != len(expected.Groups[i].Components) {
+				t.Fatalf("%s: components %+v", account, g)
+			}
+			for j, component := range g.Components {
+				if component.AmountRaw != expected.Groups[i].Components[j].AmountRaw {
+					t.Fatalf("%s: %s != %s", account, component.AmountRaw, expected.Groups[i].Components[j].AmountRaw)
+				}
+			}
+		}
+	}
+	if len(c.data.markets.markets) != 1 {
+		t.Fatalf("expected one parsed market version, got %d", len(c.data.markets.markets))
+	}
+	var market SuiObject
+	for _, row := range input.Objects {
+		if row.Kind == "market" {
+			market, _ = row.object()
+		}
+	}
+	market.Version++
+	if _, err := c.data.markets.market(market); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.data.markets.markets) != 2 {
+		t.Fatalf("a different market version must be parsed again, got %d entries", len(c.data.markets.markets))
+	}
+	// Sources without a memo still parse per read.
+	if parsed, err := (*suilendMarketMemo)(nil).market(market); err != nil || len(parsed.reserves) != 1 || parsed.table == "" {
+		t.Fatal(parsed, err)
+	}
+}

@@ -45,6 +45,12 @@ type suiSQLData struct {
 	quotes   []suiSQLObject
 	metadata map[string]SuiCoinMetadata
 	values   []suiProtocolValue
+	// Shared by every account of one snapshot calculator; nil parses per read.
+	markets *suilendMarketMemo
+}
+
+func (d *suiSQLData) suilendMarket(market SuiObject) (suilendParsedMarket, error) {
+	return d.markets.market(market)
 }
 
 // Each read is a single version-pinned SQL statement. The snapshot row survives
@@ -71,7 +77,7 @@ func (r *suiHistoryIndex) readSQLPortfolio(ctx context.Context, owner SuiAddress
 		if selection.at != nil || selection.checkpoint != nil {
 			m["stateMode"] = "historical"
 		}
-		m["sampleIntervalSeconds"] = 3600
+		m["sampleIntervalSeconds"] = suiSampleIntervalSeconds(data)
 		m["materializedAtCheckpoint"] = data.snapshot.MaterializedAtCheckpoint
 		if selection.at != nil {
 			m["requestedTimestamp"] = selection.at.UTC().Format(time.RFC3339Nano)
@@ -82,6 +88,25 @@ func (r *suiHistoryIndex) readSQLPortfolio(ctx context.Context, owner SuiAddress
 	}
 	sort.Slice(result.Groups, func(i, j int) bool { return result.Groups[i].ID < result.Groups[j].ID })
 	return result, nil
+}
+
+// A completed sample owns [timestampMs, nextTimestampMs). Samples land on the
+// first checkpoint at or after an interval boundary, so the bound is the
+// interval plus a sub-second offset; round to the minute both sides use.
+func suiSampleIntervalSeconds(data *suiSQLData) int64 {
+	next, err := historyUint(data.snapshot.NextTimestampMs)
+	start := uint64(data.pin.Timestamp.UnixMilli())
+	if err != nil || next <= start {
+		return 3600
+	}
+	minutes := (next - start + 30_000) / 60_000
+	if minutes == 0 {
+		return 60
+	}
+	if minutes > uint64(1<<40) {
+		return 3600
+	}
+	return int64(minutes) * 60
 }
 
 // calculatePortfolio is shared by SQL readers and processor-side daily snapshots.

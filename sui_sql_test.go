@@ -484,3 +484,16 @@ func TestSuiSQLNaviRejectsFutureReserve(t *testing.T) {
 		t.Fatalf("accepted future reserve: %+v %v", result, err)
 	}
 }
+
+func TestSuiSampleIntervalSecondsRoundsToTheMinute(t *testing.T) {
+	pin := SuiCheckpoint{Timestamp: time.UnixMilli(1_700_000_000_000)}
+	for _, tc := range []struct {
+		next string
+		want int64
+	}{{"1700003600000", 3600}, {"1700003600123", 3600}, {"1700086400480", 86400}, {"1700086399700", 86400}, {"1700000060000", 60}, {"1700000000500", 60}, {"1700000000000", 3600}, {"18446744073709551615", 3600}, {"x", 3600}} {
+		data := &suiSQLData{pin: pin, snapshot: suiSQLSnapshot{NextTimestampMs: tc.next}}
+		if got := suiSampleIntervalSeconds(data); got != tc.want {
+			t.Fatalf("%s: got %d, want %d", tc.next, got, tc.want)
+		}
+	}
+}
