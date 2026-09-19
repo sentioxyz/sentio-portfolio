@@ -248,7 +248,13 @@ func (r *suiHistoryIndex) readSQL(ctx context.Context, owner SuiAddress, selecti
 	observedObjects, aObjects := historyUint(snap.ObservedObjectCount)
 	expectedValues, eValues := historyUint(snap.ValueCount)
 	observedValues, aValues := historyUint(snap.ObservedValueCount)
-	if eObjects != nil || aObjects != nil || eValues != nil || aValues != nil || expectedObjects != observedObjects || expectedValues != observedValues {
+	// The certificate's counts guard against reading a sample before every row
+	// the processor wrote has become visible, so fewer visible rows than
+	// certified is incomplete. More visible rows than certified is not: the
+	// processor counts its rows with a store list at the closing sample, and
+	// that list can miss rows a concurrent commit is flushing, while every row
+	// it wrote is deterministic and visible here.
+	if eObjects != nil || aObjects != nil || eValues != nil || aValues != nil || observedObjects < expectedObjects || observedValues < expectedValues {
 		return nil, fmt.Errorf("Sui SQL snapshot materialization is incomplete")
 	}
 

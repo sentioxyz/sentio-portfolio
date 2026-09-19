@@ -230,7 +230,7 @@ func TestSuiSQLFiveProtocolsSingleRequestNoNode(t *testing.T) {
 	}
 }
 func TestSuiSQLRejectsIncompleteEnvelopes(t *testing.T) {
-	for _, scenario := range []string{"error", "cursor", "no sentinel", "duplicate sentinel", "truncated", "wrong schema", "unmaterialized", "missing object count", "missing value count", "extra object count", "absent count", "missing previous checkpoint", "reversed interval", "before publication", "timestamp overflow"} {
+	for _, scenario := range []string{"error", "cursor", "no sentinel", "duplicate sentinel", "truncated", "wrong schema", "unmaterialized", "missing object count", "missing value count", "absent count", "missing previous checkpoint", "reversed interval", "before publication", "timestamp overflow"} {
 		t.Run(scenario, func(t *testing.T) {
 			base, owner := suilendFixture()
 			fixture, index := newSQLPortfolioFixture(t, "suilend", base)
@@ -257,8 +257,6 @@ func TestSuiSQLRejectsIncompleteEnvelopes(t *testing.T) {
 						s.ObjectCount = "1"
 					case "missing value count":
 						s.ValueCount = "1"
-					case "extra object count":
-						s.ObservedObjectCount = "1"
 					case "absent count":
 						s.ObservedValueCount = ""
 					case "missing previous checkpoint":
@@ -280,6 +278,21 @@ func TestSuiSQLRejectsIncompleteEnvelopes(t *testing.T) {
 				t.Fatalf("accepted incomplete result: %+v %v", got, err)
 			}
 		})
+	}
+}
+func TestSuiSQLAcceptsUndercountedCertificate(t *testing.T) {
+	// The processor counts its rows with a store list at the closing sample; that
+	// list can miss rows a concurrent commit is flushing, so a certificate may
+	// undercount. Every row is visible to the reader, which must accept it.
+	base, owner := suilendFixture()
+	fixture, index := newSQLPortfolioFixture(t, "suilend", base)
+	var s suiSQLSnapshot
+	_ = json.Unmarshal([]byte(fixture.rows[0].Payload), &s)
+	s.ObservedObjectCount = "1"
+	fixture.rows[0] = sqlFixtureRow("snapshot", s)
+	got, err := index.ReadLatest(context.Background(), owner)
+	if err != nil || len(got.Groups) != 1 || fixture.calls != 1 {
+		t.Fatalf("rejected an undercounted certificate: %+v %v", got, err)
 	}
 }
 func TestSuiSQLHaltAndEmptyWallet(t *testing.T) {
