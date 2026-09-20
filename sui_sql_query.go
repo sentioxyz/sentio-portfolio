@@ -20,7 +20,7 @@ func suiSQLProtocolKinds(protocol string) (suiSQLKinds, error) {
 	case "suilend":
 		return suiSQLKinds{roots: []string{"cap"}, direct: []string{"obligation"}, second: []string{"market"}, indexed: true}, nil
 	case "navi":
-		return suiSQLKinds{roots: []string{"account", "receipt"}, direct: []string{"vault"}, topology: []string{"storage", "market", "reserve"}, children: []string{"principal", "receiptState"}}, nil
+		return suiSQLKinds{roots: []string{"account", "receipt"}, direct: []string{"vault"}, topology: []string{"storage", "market", "reserve"}, children: []string{"principal", "receiptState"}, indexed: true}, nil
 	case "cetus":
 		return suiSQLKinds{roots: []string{"position"}, direct: []string{"pool"}, children: []string{"accounting", "tick"}}, nil
 	case "bluefin":
@@ -164,10 +164,13 @@ func (r *suiHistoryIndex) portfolioSQL(owner SuiAddress, selection suiSQLSelecti
 	switch r.protocolID {
 	case "suilend":
 	case "navi":
-		// Protocol topology is small; only address-matched principal rows are read.
+		// Protocol topology is small. Principal ownership is indexed separately
+		// because a dynamic-field object itself is object-owned; key and parent
+		// checks below remain authoritative for account and reserve membership.
 		latest("topology", "", kinds.topology)
 		ctes = append(ctes, `accounts AS (SELECT `+sqlString(owner.Hex())+` AS account UNION DISTINCT SELECT JSONExtractString(links,'accountAddress') FROM roots WHERE kind='account')`)
-		childCandidates = `SELECT objectId FROM "PortfolioObjectState_raw" WHERE ((kind='principal' AND key IN (SELECT account FROM accounts) AND parentId IN (SELECT JSONExtractString(links,'supplyTableId') FROM topology WHERE kind='reserve' AND state='live' UNION DISTINCT SELECT JSONExtractString(links,'borrowTableId') FROM topology WHERE kind='reserve' AND state='live')) OR (kind='receiptState' AND key IN (SELECT objectId FROM roots WHERE kind='receipt') AND parentId IN (SELECT JSONExtractString(links,'usersTableId') FROM direct_states WHERE state='live' AND kind='vault')))`
+		ctes = append(ctes, `(SELECT groupUniqArray(objectId) FROM "PortfolioOwnerIndex_raw" WHERE `+suiSQLKindPrefixRange([]string{"principal"})+` AND owner IN (SELECT account FROM accounts) AND checkpoint <= `+upperCheckpoint+`) AS principal_candidates`)
+		childCandidates = `SELECT objectId FROM "PortfolioObjectState_raw" WHERE ((kind='principal' AND objectId IN ` + suiSQLSet("principal_candidates") + ` AND key IN (SELECT account FROM accounts) AND parentId IN (SELECT JSONExtractString(links,'supplyTableId') FROM topology WHERE kind='reserve' AND state='live' UNION DISTINCT SELECT JSONExtractString(links,'borrowTableId') FROM topology WHERE kind='reserve' AND state='live')) OR (kind='receiptState' AND key IN (SELECT objectId FROM roots WHERE kind='receipt') AND parentId IN (SELECT JSONExtractString(links,'usersTableId') FROM direct_states WHERE state='live' AND kind='vault')))`
 		valueSelect = `SELECT 'value' AS rowType,` + sqlPayload("id", "kind", "account", "market", "content", "checkpoint", "materializedAtCheckpoint") + ` AS payload FROM (SELECT * FROM "PortfolioValue" WHERE ` + suiSQLIDRange([]string{"emode"}, nil, upper) + ` AND ` + visible + ` AND account IN (SELECT account FROM accounts) ORDER BY checkpoint DESC LIMIT 1 BY kind,account,market)`
 	case "cetus", "bluefin":
 		ctes = append(ctes, `position_ticks AS (SELECT JSONExtractString(links,'lowerTick') AS tick FROM roots UNION DISTINCT SELECT JSONExtractString(links,'upperTick') FROM roots)`)

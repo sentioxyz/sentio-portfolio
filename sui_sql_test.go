@@ -229,6 +229,31 @@ func TestSuiSQLFiveProtocolsSingleRequestNoNode(t *testing.T) {
 		})
 	}
 }
+
+func TestSuiSQLNaviUsesReadIndexes(t *testing.T) {
+	owner, _ := ParseSuiAddress("0x11")
+	index := &suiHistoryIndex{protocolID: "navi", start: naviHistoryStart}
+	query, err := index.portfolioSQL(owner, suiSQLSelection{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`FROM "PortfolioOwnerIndex_raw"`,
+		`FROM "PortfolioObjectIndex_raw"`,
+		`) AS principal_candidates`,
+		`objectId IN (SELECT arrayJoin(principal_candidates))`,
+		`key IN (SELECT account FROM accounts)`,
+		`JSONExtractString(links,'supplyTableId')`,
+		`JSONExtractString(links,'borrowTableId')`,
+		`kind='receiptState'`,
+		`JSONExtractString(links,'usersTableId')`,
+	} {
+		if !strings.Contains(query, want) {
+			t.Fatalf("NAVI indexed query is missing %q", want)
+		}
+	}
+}
+
 func TestSuiSQLRejectsIncompleteEnvelopes(t *testing.T) {
 	for _, scenario := range []string{"error", "cursor", "no sentinel", "duplicate sentinel", "truncated", "wrong schema", "unmaterialized", "missing object count", "missing value count", "absent count", "missing previous checkpoint", "reversed interval", "before publication", "timestamp overflow"} {
 		t.Run(scenario, func(t *testing.T) {

@@ -53,6 +53,11 @@ func TestSuiSQLExecution(t *testing.T) {
 			if protocol == "suilend" {
 				add("0x44", "market", 5, 1, "live", "", "", "", "", "", "{}")
 			}
+			if protocol == "navi" {
+				reserveLinks := fmt.Sprintf(`{"supplyTableId":%q,"borrowTableId":%q}`, naviAddress("0x60"), naviAddress("0x61"))
+				add("0x59", "reserve", 5, 1, "live", "", "", "", "0", "", reserveLinks)
+				add("0x5a", "principal", 5, 1, "live", "", "", naviAddress("0x60"), owner.Hex(), "", "{}")
+			}
 			if protocol == "cetus" || protocol == "bluefin" {
 				add("0x51", "tick", 5, 1, "live", "", "", naviAddress("0x33"), "-1", "", "{}")
 				add("0x52", "tick", 5, 1, "live", "", "", naviAddress("0x33"), "1", "", "{}")
@@ -111,8 +116,14 @@ func TestSuiSQLExecution(t *testing.T) {
 					object[k] = v
 				}
 				objectIndex = append(objectIndex, object)
-				if row["kind"] == rootKind && row["ownerKind"] == "ADDRESS" && row["owner"] != "" {
-					index := map[string]string{"id": row["kind"] + ":" + row["owner"] + ":" + row["objectId"] + ":" + tail, "owner": row["owner"]}
+				indexOwner := ""
+				if row["kind"] == rootKind && row["ownerKind"] == "ADDRESS" {
+					indexOwner = row["owner"]
+				} else if protocol == "navi" && row["kind"] == "principal" {
+					indexOwner = row["key"]
+				}
+				if indexOwner != "" {
+					index := map[string]string{"id": row["kind"] + ":" + indexOwner + ":" + row["objectId"] + ":" + tail, "owner": indexOwner}
 					for k, v := range common {
 						index[k] = v
 					}
