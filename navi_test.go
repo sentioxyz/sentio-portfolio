@@ -77,11 +77,6 @@ type naviReaderFixture struct {
 func (f naviReaderFixture) LatestCheckpoint(context.Context) (SuiCheckpoint, error) {
 	return f.pin, nil
 }
-func (f naviReaderFixture) CheckpointBySequence(_ context.Context, n uint64) (SuiCheckpoint, error) {
-	p := f.pin
-	p.Sequence = n
-	return p, nil
-}
 func (f naviReaderFixture) Holdings(context.Context, SuiAddress, *SuiCheckpoint) (SuiHoldings, error) {
 	panic("protocol calculations must not read wallet holdings")
 }

@@ -20,6 +20,7 @@ func TestSuiProtocolLiveLatest(t *testing.T) {
 	var sample struct {
 		Protocol string
 		Owner    string
+		Indexer  SentioIndexerConfig
 		Expected map[string]string // component kind + ':' + normalized coin type
 	}
 	if err := json.Unmarshal([]byte(raw), &sample); err != nil {
@@ -30,16 +31,32 @@ func TestSuiProtocolLiveLatest(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	rpc, err := DialSuiGRPC(ctx, 0, os.Getenv("PORTFOLIO_SUI_GRPC_URL"), SuiMainnetChainIdentifier)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rpc.Close()
 	owner, err := ParseSuiAddress(sample.Owner)
 	if err != nil {
 		t.Fatal(err)
 	}
 	reader := NewSuiProtocolReader()
+	var rpc SuiReader
+	switch sample.Protocol {
+	case "navi":
+		index, e := NewNaviHistoryReader(sample.Indexer)
+		if e != nil {
+			t.Fatal(e)
+		}
+		reader = reader.WithNaviHistory(index)
+	case "volo-vaults":
+		index, e := NewVoloHistoryReader(sample.Indexer)
+		if e != nil {
+			t.Fatal(e)
+		}
+		reader = reader.WithVoloHistory(index)
+	default:
+		rpc, err = DialSuiGRPC(ctx, 0, os.Getenv("PORTFOLIO_SUI_GRPC_URL"), SuiMainnetChainIdentifier)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rpc.Close()
+	}
 	result, err := reader.ReadLatest(ctx, sample.Protocol, owner, rpc)
 	if err != nil {
 		t.Fatal(err)

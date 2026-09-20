@@ -389,7 +389,7 @@ func TestSuiGRPCHoldingsRejectABalanceWithoutAnAmount(t *testing.T) {
 	}
 }
 
-func TestSuiGRPCCheckpointsResolveAndReportUnknownSequences(t *testing.T) {
+func TestSuiGRPCLatestCheckpointAndUnavailableHead(t *testing.T) {
 	server := newSuiGRPCTestServer(t)
 	client := newSuiGRPCTestClient(t, context.Background(), 0, server)
 	dialCalls := server.methodCalls("GetCheckpoint")
@@ -403,17 +403,15 @@ func TestSuiGRPCCheckpointsResolveAndReportUnknownSequences(t *testing.T) {
 	if latest.Sequence != 320_000_003 || string(latest.Digest[:]) != string(wantDigest) {
 		t.Fatalf("latest = %+v", latest)
 	}
-	pinned, err := client.CheckpointBySequence(context.Background(), 320_000_000)
-	if err != nil || pinned.Sequence != 320_000_000 || !pinned.Timestamp.Equal(suiTestCheckpointTime) {
-		t.Fatalf("pinned = %+v, %v", pinned, err)
-	}
-	_, err = client.CheckpointBySequence(context.Background(), 999_999_999_999)
+	server.fail("GetCheckpoint", codes.NotFound)
+	_, err = client.LatestCheckpoint(context.Background())
 	if !errors.Is(err, errSuiCheckpointUnavailable) {
-		t.Fatalf("unknown checkpoint error = %v, want errSuiCheckpointUnavailable", err)
+		t.Fatalf("unavailable head: %v", err)
 	}
-	if got := server.methodCalls("GetCheckpoint") - dialCalls; got != 3 {
-		t.Fatalf("GetCheckpoint calls = %d, want 3: NotFound must not be retried", got)
+	if got := server.methodCalls("GetCheckpoint") - dialCalls; got != 2 {
+		t.Fatalf("GetCheckpoint calls = %d, want 2: NotFound must not retry", got)
 	}
+
 }
 
 func TestSuiGRPCRetriesTransientStatusesButNotVerdictsAndRedactsTheAddress(t *testing.T) {

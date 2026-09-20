@@ -78,7 +78,7 @@ func TestSuiCLMMLatestPrincipalFeesAndRewards(t *testing.T) {
 			if !slices.Contains(r.ProtocolIDs(), protocol) {
 				t.Fatal("not registered")
 			}
-			got, err := r.ReadLatest(context.Background(), protocol, owner, f)
+			got, err := readCLMMFixture(t, protocol, f, owner)
 			if err != nil || len(got.Errors) != 0 || len(got.Groups) != 1 {
 				t.Fatalf("read %+v %v", got, err)
 			}
@@ -93,7 +93,7 @@ func TestSuiCLMMLatestPrincipalFeesAndRewards(t *testing.T) {
 					t.Fatalf("component %d: %+v", i, c)
 				}
 			}
-			if g.MarketID != naviAddress("0x21") || g.ID != protocol+":"+naviAddress("0x22") || g.Metadata["stateMode"] != "latest" || g.Metadata["headBeforeRead"] != "100" || g.Metadata["headAfterRead"] != "100" {
+			if g.MarketID != naviAddress("0x21") || g.ID != protocol+":"+naviAddress("0x22") || g.Metadata["stateMode"] != "indexed" {
 				t.Fatalf("identity %+v", g)
 			}
 		})
@@ -108,7 +108,7 @@ func TestSuiCLMMEmptyAndTransferredPositions(t *testing.T) {
 			o.Owner = naviAddress("0x12")
 			f.objects[o.ID] = o
 			f.failObjects = true // Empty owners need neither pools nor dynamic fields.
-			got, err := NewSuiProtocolReader().ReadLatest(context.Background(), protocol, owner, f)
+			got, err := readCLMMFixture(t, protocol, f, owner)
 			if err != nil || len(got.Errors) != 0 || len(got.Groups) != 0 {
 				t.Fatalf("transferred position %+v %v", got, err)
 			}
@@ -132,7 +132,7 @@ func TestSuiCLMMZeroLiquidityRetainsOwedWithoutTicks(t *testing.T) {
 				id, _, _, _ := suiCLMMTickKey(naviAddress("0x23"), tick, pkg)
 				delete(f.objects, id)
 			}
-			got, err := NewSuiProtocolReader().ReadLatest(context.Background(), protocol, owner, f)
+			got, err := readCLMMFixture(t, protocol, f, owner)
 			if err != nil || len(got.Errors) != 0 || len(got.Groups) != 1 {
 				t.Fatalf("zero liquidity %+v %v", got, err)
 			}
@@ -186,7 +186,7 @@ func TestSuiCetusUsesAccountingLiquidity(t *testing.T) {
 					delete(f.objects, id)
 				}
 			}
-			got, err := NewSuiProtocolReader().ReadLatest(context.Background(), "cetus", owner, clmmStrictObjects{f})
+			got, err := readCLMMFixture(t, "cetus", f, owner)
 			if err != nil || len(got.Errors) != 0 || len(got.Groups) != 1 {
 				t.Fatalf("accounting liquidity: %+v %v", got, err)
 			}
@@ -245,8 +245,8 @@ func TestSuiCetusRejectsInvalidAccounting(t *testing.T) {
 					}
 				})
 			}
-			got, err := NewSuiProtocolReader().ReadLatest(context.Background(), "cetus", owner, f)
-			if err != nil || len(got.Errors) == 0 || len(got.Groups) != 0 {
+			got, err := readCLMMFixture(t, "cetus", f, owner)
+			if (err == nil && len(got.Errors) == 0) || len(got.Groups) != 0 {
 				t.Fatalf("accepted invalid accounting: %+v %v", got, err)
 			}
 		})
@@ -291,8 +291,8 @@ func TestSuiCLMMRejectsIncompleteState(t *testing.T) {
 				case "bad NFT identity":
 					editSuilendObject(f, pos, func(fields suiFields) { fields["id"] = naviAddress("0x33") })
 				}
-				got, err := NewSuiProtocolReader().ReadLatest(context.Background(), protocol, owner, f)
-				if err != nil || len(got.Errors) == 0 || len(got.Groups) != 0 {
+				got, err := readCLMMFixture(t, protocol, f, owner)
+				if (err == nil && len(got.Errors) == 0) || len(got.Groups) != 0 {
 					t.Fatalf("accepted %s: %+v %v", failure, got, err)
 				}
 			})
@@ -300,16 +300,16 @@ func TestSuiCLMMRejectsIncompleteState(t *testing.T) {
 	}
 }
 
-func TestSuiCLMMRewardEndAndHeadSkew(t *testing.T) {
+func TestSuiCLMMRewardEndAndSampleTime(t *testing.T) {
 	for _, protocol := range []string{"cetus", "bluefin"} {
 		t.Run(protocol, func(t *testing.T) {
 			f, owner := clmmFixture(protocol)
-			before, after := f.pin, f.pin
+			after := f.pin
 			after.Sequence--
 			after.Timestamp = time.Unix(980, 0)
-			r := &latestHeadFixture{latestSuiFixture: f, heads: []SuiCheckpoint{before, after}}
-			got, err := NewSuiProtocolReader().ReadLatest(context.Background(), protocol, owner, r)
-			if err != nil || len(got.Errors) != 0 || got.Groups[0].Components[4].AmountRaw != "1307" || got.Checkpoint != after || got.HeadBeforeRead != before.Sequence || r.headReads != 2 {
+			f.pin = after
+			got, err := readCLMMFixture(t, protocol, f, owner)
+			if err != nil || len(got.Errors) != 0 || got.Groups[0].Components[4].AmountRaw != "1307" || !got.Checkpoint.Timestamp.Equal(after.Timestamp) {
 				t.Fatalf("skew %+v %v", got, err)
 			}
 		})
@@ -319,7 +319,7 @@ func TestSuiCLMMRewardEndAndHeadSkew(t *testing.T) {
 		rs := fields["reward_infos"].([]any)
 		rs[0].(map[string]any)["ended_at_seconds"] = "995"
 	})
-	got, err := NewSuiProtocolReader().ReadLatest(context.Background(), "bluefin", owner, f)
+	got, err := readCLMMFixture(t, "bluefin", f, owner)
 	if err != nil || len(got.Errors) != 0 || got.Groups[0].Components[4].AmountRaw != "1807" {
 		t.Fatalf("expired rewards %+v %v", got, err)
 	}
@@ -413,7 +413,7 @@ func TestSuiCLMMKeepsSeparateNFTsInOnePool(t *testing.T) {
 				value["position_id"] = newID
 				f.objects[newField] = latestObject(newField, o.ObjectType, "OBJECT", o.Owner, fields)
 			}
-			got, err := NewSuiProtocolReader().ReadLatest(context.Background(), protocol, owner, f)
+			got, err := readCLMMFixture(t, protocol, f, owner)
 			if err != nil || len(got.Errors) != 0 || len(got.Groups) != 2 {
 				t.Fatalf("separate positions %+v %v", got, err)
 			}
