@@ -10,10 +10,21 @@ import (
 // wallet holdings. Object lineage discovers and caches protocol root IDs only.
 type SuiProtocolReader struct {
 	markets, oracle suiRootCache
+	// suilend is read from its processor index for both latest and historical
+	// positions. Index absence is an error: there is no node fallback, because
+	// a node cannot answer for a past checkpoint at all.
+	suilend *SuilendHistoryReader
 }
 
 func NewSuiProtocolReader() *SuiProtocolReader {
 	return &SuiProtocolReader{markets: suiRootCache{gate: make(chan struct{}, 1)}, oracle: suiRootCache{gate: make(chan struct{}, 1)}}
+}
+
+// WithSuilendHistory configures the Suilend index without changing r.
+func (r *SuiProtocolReader) WithSuilendHistory(index *SuilendHistoryReader) *SuiProtocolReader {
+	copy := *r
+	copy.suilend = index
+	return &copy
 }
 
 func (r *SuiProtocolReader) ProtocolIDs() []string {
@@ -77,7 +88,10 @@ func (r *SuiProtocolReader) ReadLatest(ctx context.Context, protocolID string, o
 		return readSuiCLMMLatest(ctx, protocolID, owner, reader)
 	}
 	if protocolID == "suilend" {
-		return readSuilendLatest(ctx, owner, reader)
+		if r.suilend == nil {
+			return SuiProtocolPositions{ProtocolID: protocolID, ProtocolName: "Suilend"}, fmt.Errorf("suilend requires a configured processor index")
+		}
+		return r.suilend.ReadLatest(ctx, owner)
 	}
 	name := map[string]string{"navi": "NAVI", "volo-vaults": "Volo Vaults"}[protocolID]
 	result := SuiProtocolPositions{ProtocolID: protocolID, ProtocolName: name}

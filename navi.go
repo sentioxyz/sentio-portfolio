@@ -141,7 +141,7 @@ func naviLending(ctx context.Context, owner SuiAddress, pin SuiCheckpoint, reade
 	return result, nil
 }
 
-func suiProtocolMetadata(ctx context.Context, reader SuiReader, wanted map[string]bool) (map[string]SuiCoinMetadata, error) {
+func suiProtocolMetadata(ctx context.Context, reader suiCoinMetadataReader, wanted map[string]bool) (map[string]SuiCoinMetadata, error) {
 	coins := make([]string, 0, len(wanted))
 	for coin := range wanted {
 		coins = append(coins, coin)

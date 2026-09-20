@@ -32,6 +32,13 @@ const SuiMainnetChainIdentifier = "35834a8a"
 
 // SuiReader reads one Sui network. A transport verifies the network at dial time, normalizes
 // every coin type it returns, and never invents coin metadata.
+// suiCoinMetadataReader is the only part of a reader a position calculation
+// needs: quantities come from state the caller already holds, and an indexed
+// read supplies metadata from its own index rather than from a node.
+type suiCoinMetadataReader interface {
+	CoinMetadata(context.Context, []string) (map[string]SuiCoinMetadata, map[string]error, error)
+}
+
 type SuiReader interface {
 	// LatestCheckpoint is the newest checkpoint the endpoint serves.
 	LatestCheckpoint(ctx context.Context) (SuiCheckpoint, error)

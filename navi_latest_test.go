@@ -95,7 +95,9 @@ func (f *latestHeadFixture) LatestCheckpoint(context.Context) (SuiCheckpoint, er
 }
 
 func TestSuiLatestKeepsPositionsWhenBackendHeadsDiffer(t *testing.T) {
-	for _, protocol := range []string{"navi", "volo-vaults", "suilend"} {
+	// Suilend is not here: it is read from its index, which answers for a
+	// completed sample rather than for whichever head a backend reports.
+	for _, protocol := range []string{"navi", "volo-vaults"} {
 		for _, skew := range []string{"head regresses", "objects ahead of both heads"} {
 			t.Run(protocol+"/"+skew, func(t *testing.T) {
 				f := latestFixture()
@@ -110,9 +112,6 @@ func TestSuiLatestKeepsPositionsWhenBackendHeadsDiffer(t *testing.T) {
 					f.objects[vault] = latestObject(vault, voloVaultPackage+"::vault::Vault<0x2::sui::SUI>", "SHARED", "", map[string]any{"total_shares": "0", "receipts": map[string]any{"id": parent}})
 					id, _ := suiAddressFieldID(parent, receipt)
 					f.objects[id] = latestObject(id, suiFieldType("address", voloVaultPackage+"::vault_receipt_info::VaultReceiptInfo"), "OBJECT", parent, map[string]any{"name": receipt, "value": map[string]any{"shares": "0", "pending_withdraw_shares": "0", "pending_deposit_balance": want, "claimable_principal": "0"}})
-				case "suilend":
-					f, owner = suilendFixture()
-					want = "110000000000"
 				}
 				before, after := f.pin, f.pin
 				after.Sequence--
@@ -129,9 +128,6 @@ func TestSuiLatestKeepsPositionsWhenBackendHeadsDiffer(t *testing.T) {
 				group := got.Groups[0]
 				if group.Components[0].AmountRaw != want {
 					t.Fatalf("amount = %s, want %s", group.Components[0].AmountRaw, want)
-				}
-				if protocol == "suilend" && (len(group.Components) != 2 || group.Components[1].Kind != "debt" || group.Components[1].AmountRaw != "75000000000") {
-					t.Fatalf("head skew changed debt: %+v", group.Components)
 				}
 				if got.Checkpoint != after || got.HeadBeforeRead != before.Sequence || group.Metadata["headBeforeRead"] != fmt.Sprint(before.Sequence) || group.Metadata["headAfterRead"] != fmt.Sprint(after.Sequence) {
 					t.Fatalf("head observations were rewritten: %+v", got)

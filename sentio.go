@@ -29,6 +29,9 @@ const (
 // SentioIndexerConfig is supplied by the host at runtime. Endpoint values may
 // contain private project paths and must never be included in public errors.
 type SentioIndexerConfig struct {
+	// SQLURL is the version-pinned SQL execute endpoint a Sui protocol index
+	// is read through. Empty derives it from GraphQLURL.
+	SQLURL           string
 	GraphQLURL       string
 	StatusURL        string
 	ProcessorVersion string
@@ -111,11 +114,21 @@ func (c *sentioAPIClient) doJSON(
 	body any,
 	result any,
 ) error {
+	return c.doJSONAttempts(ctx, method, endpoint, body, result, 3)
+}
+
+// SQL portfolio reads are one statement and one HTTP execution. A timeout or
+// retryable status must surface to the caller instead of executing it again.
+func (c *sentioAPIClient) doJSONOnce(ctx context.Context, method, endpoint string, body, result any) error {
+	return c.doJSONAttempts(ctx, method, endpoint, body, result, 1)
+}
+
+func (c *sentioAPIClient) doJSONAttempts(ctx context.Context, method, endpoint string, body, result any, attempts int) error {
 	if c.apiKey == "" {
 		return fmt.Errorf("Sentio API key is not configured")
 	}
 	var last error
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := 0; attempt < attempts; attempt++ {
 		var reader io.Reader
 		if body != nil {
 			payload, err := json.Marshal(body)
@@ -161,7 +174,7 @@ func (c *sentioAPIClient) doJSON(
 		}
 		observeIndexerRequest(ctx, method, attempt, startedAt, err)
 		last = err
-		if attempt < 2 {
+		if attempt+1 < attempts {
 			timer := time.NewTimer(sentioRetryInitial << attempt)
 			select {
 			case <-ctx.Done():
@@ -171,7 +184,7 @@ func (c *sentioAPIClient) doJSON(
 			}
 		}
 	}
-	return fmt.Errorf("request failed after 3 attempts: %w", redactEndpoints(last))
+	return fmt.Errorf("request failed after %d attempts: %w", attempts, redactEndpoints(last))
 }
 
 // observeIndexerRequest reports one indexer round trip. The two request shapes the client makes

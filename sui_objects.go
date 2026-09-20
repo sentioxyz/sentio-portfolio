@@ -6,8 +6,11 @@ import "context"
 // a wallet-owned capability from a child object with the same owner address.
 type SuiObject struct {
 	ID, ObjectType, Owner, OwnerKind, Content string
-	Version                                   uint64
-	PreviousTransaction                       string
+	// Digest identifies this exact version's contents, so a parsed version can
+	// be memoized across the accounts of one read without comparing content.
+	Digest              string
+	Version             uint64
+	PreviousTransaction string
 }
 
 // SuiObjectReader reads current object state, without substituting it for a
