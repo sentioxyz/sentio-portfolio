@@ -67,9 +67,27 @@ native NAVI vaults, Volo strategy vaults (including Single Loop and Astros),
 Suilend lending, and Cetus/Bluefin concentrated liquidity. The protocol IDs are
 `navi`, `volo-vaults`, `suilend`, `cetus`, and `bluefin`.
 `ReadLatest` takes a `SuiObjectReader`; NAVI and Volo discovery also requires
-`SuiObjectLineageReader` (`SuiGRPCClient` implements both). All discovery and
-state reads use that gRPC connection; these protocols require no dedicated
-processor or separate object-directory service.
+`SuiObjectLineageReader` (`SuiGRPCClient` implements both). Those reads use that
+gRPC connection and answer for the head only.
+
+Suilend is the exception: it is read from a version-pinned SQL processor index
+rather than from a node, which is what lets it answer for a past checkpoint at
+all. A host configures it with `NewSuilendHistoryReader(SentioIndexerConfig{…})`
+and `SuiProtocolReader.WithSuilendHistory(reader)`; `ReadLatest`,
+`ReadAtTime` and `ReadAtCheckpoint` then each execute one SQL statement, once,
+against the pinned processor version. Without that configuration a Suilend read
+is an error — it never falls back to a node, because a node cannot answer for a
+historical checkpoint and a head answer under a past pin would be a wrong number
+nobody can see is wrong. The other four Sui protocols have no history.
+
+The index publishes immutable object-version rows (`PortfolioObjectState`), a
+per-sample completion certificate (`PortfolioSnapshot`), coin metadata, and two
+narrow read indexes ordered by object and by owner. A read selects the newest
+completed sample at or before the request, resolves capabilities, obligations and
+markets through those indexes, and compares the certificate's expected row count
+with what is visible before accepting the sample. The returned checkpoint is the
+sample's, not the current head, and group metadata reports the sample interval
+the certificate itself bounds.
 
 Cetus and Bluefin discover directly owned `position::Position` NFTs from their
 defining packages. Each position names its pool; only those pools, the two active
@@ -94,9 +112,9 @@ wrappers, Cetus vault shares and Bluefin perpetual accounts are not enumerated.
 The accounting layouts follow the [Cetus SDK](https://github.com/CetusProtocol/cetus-clmm-sui-sdk)
 and [Bluefin contract interfaces](https://github.com/fireflyprotocol/bluefin-spot-contract-interface).
 
-Suilend discovers every directly owned `ObligationOwnerCap` from its defining
-package, deduplicates capabilities pointing to the same obligation, and follows
-the obligation to its lending market. Market type, reserve index/coin identity,
+Suilend takes every `ObligationOwnerCap` the address held at the sample from the
+index's owner index, deduplicates capabilities pointing to the same obligation,
+and follows the obligation to its lending market. Market type, reserve index/coin identity,
 and the dynamic object-field link back to the market's obligation table are
 validated. This includes isolated lending markets without a market allowlist;
 it does not enumerate the global obligation table. Strategies with nested
@@ -105,8 +123,9 @@ are outside this lending surface.
 
 Deposits convert cTokens through net reserve supply (available + borrowed -
 unclaimed spread fees). Borrows apply the cumulative borrow index. Reserves
-accrue to the observed checkpoint timestamp using the on-chain piecewise APR
-curve, per-second compounding and spread fee. All operations use integer WAD
+accrue to the sample's checkpoint timestamp using the on-chain piecewise APR
+curve, per-second compounding and spread fee; a reserve stamped later than the
+sample is a contradiction the read rejects rather than projecting backwards. All operations use integer WAD
 arithmetic and the Move operation order; raw token amounts are floored only
 after conversion. Metadata comes from the chain and must agree with reserve
 precision. USD prices remain the host's responsibility. The formulas follow
@@ -142,7 +161,7 @@ before reading current state and preserve this metadata when combining snapshots
 
 Lending projects reserve interest indices forward to the observed timestamp using
 integer RAY arithmetic and NAVI's fixed nine-decimal principal precision.
-If a NAVI or Suilend reserve is newer than the observed head, its stored interest
+If a NAVI reserve is newer than the observed head, its stored interest
 is used without projecting backwards. Volo NAV and oracle timestamps describe
 the objects read and need not precede the independently observed head.
 Multiply retains collateral and debt. Vault amounts use stored NAV
@@ -161,4 +180,12 @@ Run the local test suites with:
 ```sh
 go test ./...
 bazel test //...
+```
+
+The Suilend index statement is also exercised against a real ClickHouse rather
+than only against response fixtures, so that lifecycle ordering, dependency
+selection and replay deduplication are tested by the engine that will run them:
+
+```sh
+PORTFOLIO_CLICKHOUSE_BINARY=$(command -v clickhouse) go test -run TestSuiSQLExecution .
 ```

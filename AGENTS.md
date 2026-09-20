@@ -99,7 +99,7 @@ the `sui.rpc.v2` services a fullnode, or a proxy in front of one, serves. The ru
   head under the pin's name. Present that result as not read, never as nothing held. Reading
   specific retained object versions through gRPC does not establish complete wallet holdings
   at a historical checkpoint; there is no wallet-history fallback.
-- NAVI and Volo protocol reads use `SuiProtocolReader.ReadLatest` with direct object state.
+- NAVI, Volo, Cetus and Bluefin protocol reads use `SuiProtocolReader.ReadLatest` with direct object state.
   Root objects are discovered through `SuiObjectLineageReader` over the same gRPC connection:
   NAVI market-counter versions and their producing transactions, and Volo package publication.
   Cache root IDs, refresh NAVI discovery when the counter version changes, and never scan
@@ -107,12 +107,46 @@ the `sui.rpc.v2` services a fullnode, or a proxy in front of one, serves. The ru
   processor is required. Check market inventory completeness against chain state,
   attribute capabilities/receipts to their current owners, and report the latest read window.
   Historical protocol requests are unsupported and must not read latest state under a past pin.
-- Suilend lending uses current directly owned obligation capabilities and point reads of
-  obligations, their parent links and lending markets. Never enumerate the global obligation
-  table or use explorer quantities as position state. Match Move WAD rounding and compound
-  reserve interest forward to the observed checkpoint timestamp; preserve the head observations.
-  For NAVI and Suilend, use stored interest when a reserve is newer than the observed head.
-  Volo NAV and oracle timestamps are object metadata, not assertions against that head.
+- Suilend is read from a version-pinned SQL processor index (`sui_history.go`, `sui_sql.go`,
+  `sui_sql_query.go`), for latest and historical positions alike. Each address read is one SQL
+  statement executed once, with no automatic HTTP retry, no Sui node call and no status or
+  GraphQL follow-up; an unconfigured index is an error, never a node read. Hosts supply
+  `SentioIndexerConfig.SQLURL` and an explicit processor version. NAVI, Volo, Cetus and Bluefin
+  still read head state from a node and still have no history.
+- The Suilend schema is version 2: `PortfolioSnapshot`, `PortfolioObjectState` and
+  `PortfolioTokenMetadata`, plus the narrow `PortfolioObjectIndex` and `PortfolioOwnerIndex`
+  read indexes. Shared checkpoint, version, timestamp and count fields are native signed 64-bit
+  integers. Object-state IDs are `<kind>:<20-digit source checkpoint>:<immutable object-version
+  ID>`; the source checkpoint, never the later materialization checkpoint, decides replay
+  identity. A certified `valueCount` is a contract this reader does not implement, so it fails
+  closed rather than being ignored.
+- The statement selects a sample P with materialization H and bounds all state by source P and
+  visibility H. Its snapshot branch returns the expected and observed changed-object counts;
+  compute those counts only in that branch, never in the snapshot CTE the dependency bounds
+  reuse. Go compares them before accepting P, without another request. Fewer visible rows than
+  certified is incomplete; more is not, because the processor counts its rows with a store list
+  that a concurrent commit can outrun. Return P, not H, as the quantity timestamp. A requested
+  checkpoint or time belongs to `[P,next)`, which may exceed the sampling interval during a
+  chain halt, and `sampleIntervalSeconds` is derived from the certificate's own bound rather
+  than assumed.
+- Resolve every dependency level through the narrow read indexes: root candidates from one
+  `PortfolioOwnerIndex` prefix range per root kind, each stage's latest state IDs from
+  `PortfolioObjectIndex`, then the state rows by exact ID. Scanning a kind's ID range instead
+  cost seconds per stage at six million rows. Keep each stage's IDs in a scalar array alias: a
+  CTE is expanded again at every reference, so a chain of them rescans the table once per
+  dependency level and per output branch. Build a dynamic ID bound entirely inside one scalar
+  subquery — key analysis takes a scalar as a constant but will not evaluate `concat` over one,
+  and the range degrades to a scan to the end of the table.
+- Discover object IDs using historical owner/parent/key predicates, select the latest lifecycle
+  for those IDs, and only then filter the current owner and live relation. Immutable version IDs
+  sort a terminal row after a live row of the same version, so filtering terminals out before
+  latest selection resurrects a closed position. Deduplicate by object identity to absorb
+  deterministic replay writes. An obligation's membership in a market is checked by deriving its
+  dynamic-object-field parent, not by trusting the row's owner.
+- Suilend interest accrues to P's timestamp; a reserve newer than P fails closed. Match Move WAD
+  rounding. Parse each lending market once per read — the main pool's JSON is hundreds of
+  kilobytes and every account of a snapshot would otherwise re-parse it.
+- NAVI and Volo NAV/oracle timestamps are object metadata, not assertions against a head.
 - Volo's stored USD NAV must use the base-coin oracle version from the same valuation
   transaction, never a newer global quote. Follow the nonzero NAV timestamp fields to that
   transaction and read its quote version over gRPC. Keep a separate quote per vault, including
