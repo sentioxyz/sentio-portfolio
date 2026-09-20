@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 )
 
 // The defining package anchors capability, obligation and market types.
@@ -166,29 +168,20 @@ func loadSuilend(ctx context.Context, owner SuiAddress, reader suilendObjectSour
 		if !exists || market.ID != p.market || market.OwnerKind != "SHARED" || market.ObjectType != suiType(suilendPackage+"::lending_market::LendingMarket<"+p.marketType+">") {
 			return state, fmt.Errorf("invalid or missing Suilend lending market")
 		}
-		fields, err := suiObjectFields(market.Content)
+		var parsed suilendParsedMarket
+		if source, ok := reader.(suilendMarketSource); ok {
+			parsed, err = source.suilendMarket(market)
+		} else {
+			parsed, err = parseSuilendMarket(market)
+		}
 		if err != nil {
 			return state, err
 		}
-		fieldID, err := fields.address("id")
-		if err != nil || fieldID != market.ID {
-			return state, fmt.Errorf("Suilend lending market ID mismatch")
-		}
-		table, err := suiTableID(fields, "obligations")
-		if err != nil {
-			return state, err
-		}
-		parentID, err := suilendObligationParent(table, p.object.ID)
+		parentID, err := suilendObligationParent(parsed.table, p.object.ID)
 		if err != nil || p.object.Owner != parentID {
 			return state, fmt.Errorf("Suilend obligation belongs to another market table")
 		}
-		if _, exists := state.markets[market.ID]; exists {
-			continue
-		}
-		state.markets[market.ID], err = suilendMarketReserves(market)
-		if err != nil {
-			return state, err
-		}
+		state.markets[market.ID] = parsed.reserves
 	}
 	return state, nil
 }
@@ -196,35 +189,93 @@ func loadSuilend(ctx context.Context, owner SuiAddress, reader suilendObjectSour
 // Every catalog root must contain a coherent reserve inventory, even when the
 // queried wallet holds no capabilities in that market.
 func suilendMarketReserves(market SuiObject) ([]suilendReserve, error) {
-	fields, err := suiObjectFields(market.Content)
+	parsed, err := parseSuilendMarket(market)
 	if err != nil {
 		return nil, err
+	}
+	return parsed.reserves, nil
+}
+
+// suilendParsedMarket is one decoded LendingMarket: its obligation table and its
+// reserve vector. Both are read-only after parsing; interest accrual copies a
+// reserve and allocates new integers, so one parse may serve every account.
+type suilendParsedMarket struct {
+	table    string
+	reserves []suilendReserve
+}
+
+func parseSuilendMarket(market SuiObject) (suilendParsedMarket, error) {
+	fields, err := suiObjectFields(market.Content)
+	if err != nil {
+		return suilendParsedMarket{}, err
 	}
 	id, err := fields.address("id")
 	if err != nil || id != market.ID {
-		return nil, fmt.Errorf("Suilend lending market ID mismatch")
+		return suilendParsedMarket{}, fmt.Errorf("Suilend lending market ID mismatch")
 	}
-	if _, err := suiTableID(fields, "obligations"); err != nil {
-		return nil, err
+	table, err := suiTableID(fields, "obligations")
+	if err != nil {
+		return suilendParsedMarket{}, err
 	}
 	reserves, err := suilendStructVector(fields, "reserves")
 	if err != nil {
-		return nil, err
+		return suilendParsedMarket{}, err
 	}
 	result := make([]suilendReserve, 0, len(reserves))
 	seenCoins, seenIDs := map[string]bool{}, map[string]bool{}
 	for index, fields := range reserves {
 		reserve, err := parseSuilendReserve(fields, market.ID, index)
 		if err != nil {
-			return nil, err
+			return suilendParsedMarket{}, err
 		}
 		if seenCoins[reserve.coinType] || seenIDs[reserve.id] {
-			return nil, fmt.Errorf("duplicate Suilend reserve")
+			return suilendParsedMarket{}, fmt.Errorf("duplicate Suilend reserve")
 		}
 		seenCoins[reserve.coinType], seenIDs[reserve.id] = true, true
 		result = append(result, reserve)
 	}
-	return result, nil
+	return suilendParsedMarket{table: table, reserves: result}, nil
+}
+
+// A source may hand back a market it already decoded for the exact same object
+// version. Snapshot calculators decode each lending market once per snapshot
+// instead of parsing its full reserve vector again for every account.
+type suilendMarketSource interface {
+	suilendMarket(SuiObject) (suilendParsedMarket, error)
+}
+
+// suilendMarketMemo keys decoded markets by object ID, version and digest, so a
+// different market state can never be served from the cache.
+type suilendMarketMemo struct {
+	mu      sync.Mutex
+	markets map[string]suilendParsedMarket
+}
+
+func newSuilendMarketMemo() *suilendMarketMemo {
+	return &suilendMarketMemo{markets: map[string]suilendParsedMarket{}}
+}
+
+func (m *suilendMarketMemo) market(market SuiObject) (suilendParsedMarket, error) {
+	cacheable := m != nil && market.Version != 0 && market.Digest != ""
+	key := market.ID + ":" + strconv.FormatUint(market.Version, 10) + ":" + market.Digest
+	if cacheable {
+		m.mu.Lock()
+		parsed, ok := m.markets[key]
+		m.mu.Unlock()
+		if ok {
+			return parsed, nil
+		}
+	}
+	parsed, err := parseSuilendMarket(market)
+	if err != nil {
+		return suilendParsedMarket{}, err
+	}
+	if cacheable {
+		m.mu.Lock()
+		m.markets[key] = parsed
+		m.mu.Unlock()
+	}
+	return parsed, nil
 }
 
 func suilendLending(ctx context.Context, owner SuiAddress, pin SuiCheckpoint, reader suiCoinMetadataReader, state suilendState) ([]SuiProtocolGroup, error) {
