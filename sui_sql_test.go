@@ -42,7 +42,7 @@ func newSQLPortfolioFixture(t *testing.T, protocol string, base *latestSuiFixtur
 	pin := base.pin
 	pin.Sequence = start + 100
 	fixture := &sqlPortfolioFixture{pin: pin}
-	fixture.rows = append(fixture.rows, sqlFixtureRow("snapshot", suiSQLSnapshot{ID: fmt.Sprintf("%020d", pin.Sequence), Checkpoint: fmt.Sprint(pin.Sequence), TimestampMs: fmt.Sprint(pin.Timestamp.UnixMilli()), Digest: suiTestDigest, SchemaVersion: "2", ObjectCount: "0", ValueCount: "0", ObservedObjectCount: "0", StartCheckpoint: fmt.Sprint(start), PreviousCheckpoint: fmt.Sprint(start - 1), MaterializedAtCheckpoint: fmt.Sprint(pin.Sequence + 100), NextCheckpoint: fmt.Sprint(pin.Sequence + 100), NextTimestampMs: fmt.Sprint(pin.Timestamp.Add(time.Hour).UnixMilli())}))
+	fixture.rows = append(fixture.rows, sqlFixtureRow("snapshot", suiSQLSnapshot{ID: fmt.Sprintf("%020d", pin.Sequence), Checkpoint: fmt.Sprint(pin.Sequence), TimestampMs: fmt.Sprint(pin.Timestamp.UnixMilli()), Digest: suiTestDigest, SchemaVersion: "2", ObjectCount: "0", ValueCount: "0", ObservedObjectCount: "0", ObservedValueCount: "0", StartCheckpoint: fmt.Sprint(start), PreviousCheckpoint: fmt.Sprint(start - 1), MaterializedAtCheckpoint: fmt.Sprint(pin.Sequence + 100), NextCheckpoint: fmt.Sprint(pin.Sequence + 100), NextTimestampMs: fmt.Sprint(pin.Timestamp.Add(time.Hour).UnixMilli())}))
 	normalize := func(object SuiObject) (suiSQLObject, bool) {
 		kind := ""
 		for _, k := range []string{"cap", "market", "obligation"} {

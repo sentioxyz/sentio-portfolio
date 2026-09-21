@@ -99,21 +99,50 @@ the `sui.rpc.v2` services a fullnode, or a proxy in front of one, serves. The ru
   head under the pin's name. Present that result as not read, never as nothing held. Reading
   specific retained object versions through gRPC does not establish complete wallet holdings
   at a historical checkpoint; there is no wallet-history fallback.
-- NAVI, Volo, Cetus and Bluefin protocol reads use `SuiProtocolReader.ReadLatest` with direct object state.
+- NAVI, Volo, Cetus and Bluefin *latest* reads use `SuiProtocolReader.ReadLatest` with direct object state.
   Root objects are discovered through `SuiObjectLineageReader` over the same gRPC connection:
   NAVI market-counter versions and their producing transactions, and Volo package publication.
   Cache root IDs, refresh NAVI discovery when the counter version changes, and never scan
   checkpoint ranges. Missing retained lineage is a coverage error. No dedicated protocol
   processor is required. Check market inventory completeness against chain state,
   attribute capabilities/receipts to their current owners, and report the latest read window.
-  Historical protocol requests are unsupported and must not read latest state under a past pin.
+  Historical protocol requests are unsupported on this path and must not read latest state under
+  a past pin; NAVI's history is served by its index instead, see below.
 - Suilend is read from a version-pinned SQL processor index (`sui_history.go`, `sui_sql.go`,
   `sui_sql_query.go`), for latest and historical positions alike. Each address read is one SQL
   statement executed once, with no automatic HTTP retry, no Sui node call and no status or
   GraphQL follow-up; an unconfigured index is an error, never a node read. Hosts supply
-  `SentioIndexerConfig.SQLURL` and an explicit processor version. NAVI, Volo, Cetus and Bluefin
+  `SentioIndexerConfig.SQLURL` and an explicit processor version. Volo, Cetus and Bluefin
   still read head state from a node and still have no history.
-- The Suilend schema is version 2: `PortfolioSnapshot`, `PortfolioObjectState` and
+- NAVI is read from the same index machinery, but only for history. Its
+  `ReadLatest` stays on the node, which answers for the head rather than for the
+  newest completed sample; `NaviHistoryReader.ReadAtTime` / `ReadAtCheckpoint`
+  answer what a node cannot. Both paths run the same `naviLending` and
+  `suiVaults` over a `suiProtocolState`, so only where that state is read
+  differs — the test that matters builds one holding both ways and compares the
+  groups. Do not make the indexed path a fallback for a failed node read: the
+  two answer for different checkpoints.
+- NAVI's dependency levels are not a chain. Account capabilities and vault
+  receipts are owned outright, a receipt names its vault, and reserves, markets
+  and storage are one protocol-wide topology every account shares and every read
+  fetches whole — the topology is what names the reserve tables a principal must
+  sit under, so it cannot be derived from the account's own rows. Principals and
+  receipt states are dynamic fields underneath, so they are object-owned by
+  their table rather than by the account: reach principals through the owner
+  index row the processor writes for the account the field's name names, never
+  by scanning the kind. The principal kind is an order of magnitude larger than
+  any other in the index, so that scan is the shape that cost Suilend seconds a
+  read. The key and parent predicates stay on the state rows and the calculator
+  repeats them: the index says which objects an account has ever had a position
+  in, those checks decide whether a row is a live position in a reserve of the
+  observed topology.
+- NAVI also certifies `PortfolioValue` rows, which Suilend does not: e-mode is a
+  running per-account setting only its events report, so the latest row at or
+  before P is the one in force and the range has no lower bound. `valueCount` is
+  compared against an observed count the same way `objectCount` is — a protocol
+  that declares no value kinds still fails closed on a nonzero `valueCount`, and
+  the observed count is only read where the schema has that table.
+- The Suilend and NAVI schema is version 2: `PortfolioSnapshot`, `PortfolioObjectState` and
   `PortfolioTokenMetadata`, plus the narrow `PortfolioObjectIndex` and `PortfolioOwnerIndex`
   read indexes. Shared checkpoint, version, timestamp and count fields are native signed 64-bit
   integers. Object-state IDs are `<kind>:<20-digit source checkpoint>:<immutable object-version

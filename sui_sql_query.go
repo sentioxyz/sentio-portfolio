@@ -13,14 +13,35 @@ const suiPortfolioSchemaVersion = "2"
 // PortfolioOwnerIndex orders an account's roots, PortfolioObjectIndex orders
 // one object's versions. Scanning a kind's whole ID range instead costs seconds
 // per stage once the state table reaches millions of rows.
-type suiSQLKinds struct{ roots, direct, second []string }
+type suiSQLKinds struct{ roots, direct, second, topology, children, values []string }
+
+func (k suiSQLKinds) all() []string {
+	all := []string{}
+	for _, group := range [][]string{k.roots, k.direct, k.second, k.topology, k.children} {
+		all = append(all, group...)
+	}
+	return all
+}
 
 func suiSQLProtocolKinds(protocol string) (suiSQLKinds, error) {
-	if protocol != "suilend" {
-		return suiSQLKinds{}, fmt.Errorf("unsupported Sui processor protocol")
+	switch protocol {
+	case "suilend":
+		// A capability names an obligation, and an obligation names its market.
+		return suiSQLKinds{roots: []string{"cap"}, direct: []string{"obligation"}, second: []string{"market"}}, nil
+	case "navi":
+		// An account capability and a vault receipt are owned outright, and a
+		// receipt names its vault. Reserves, markets and storage are one
+		// protocol-wide topology every account shares, and principals and
+		// receipt states are dynamic fields reached through it.
+		return suiSQLKinds{
+			roots:    []string{"account", "receipt"},
+			direct:   []string{"vault"},
+			topology: []string{"storage", "market", "reserve"},
+			children: []string{"principal", "receiptState"},
+			values:   []string{"emode"},
+		}, nil
 	}
-	// A capability names an obligation, and an obligation names its market.
-	return suiSQLKinds{roots: []string{"cap"}, direct: []string{"obligation"}, second: []string{"market"}}, nil
+	return suiSQLKinds{}, fmt.Errorf("unsupported Sui processor protocol")
 }
 
 // suiSQLBound names the snapshot column an ID range is bounded by. The whole
@@ -138,8 +159,42 @@ func (r *suiHistoryIndex) portfolioSQL(owner SuiAddress, selection suiSQLSelecti
 	latest("root_states", "root_candidates", kinds.roots)
 	ctes = append(ctes, `roots AS (SELECT * FROM root_states WHERE state='live' AND owner=`+sqlString(owner.Hex())+` AND ownerKind IN ('ADDRESS','CONSENSUS_ADDRESS'))`)
 	latest("direct_states", `(SELECT relatedId FROM roots WHERE relatedId != '')`, kinds.direct)
-	// A Suilend capability points through its obligation to the market.
-	latest("second_states", `(SELECT relatedId FROM direct_states WHERE state='live' AND relatedId != '')`, kinds.second)
+	if len(kinds.second) > 0 {
+		// A Suilend capability points through its obligation to the market.
+		latest("second_states", `(SELECT relatedId FROM direct_states WHERE state='live' AND relatedId != '')`, kinds.second)
+	}
+	valueBranch := ""
+	if r.protocolID == "navi" {
+		// The topology is protocol-wide and small enough to read whole: reading
+		// it is what names the reserve tables a principal must sit under, so it
+		// cannot be derived from the account's own rows.
+		latest("topology", "", kinds.topology)
+		// A wallet's lending positions are attributed to the wallet itself and
+		// to every account capability it owns.
+		ctes = append(ctes, `accounts AS (SELECT `+sqlString(owner.Hex())+` AS account UNION DISTINCT SELECT JSONExtractString(links,'accountAddress') FROM roots WHERE kind='account')`)
+		// A principal is a dynamic field, so it is object-owned by its reserve
+		// table rather than by the account: the owner index carries the account
+		// the field's name names, which is the only skip-indexed way in. The
+		// kind is the largest in the index by an order of magnitude, so scanning
+		// its ID range here is the shape that cost Suilend seconds per read.
+		ctes = append(ctes, `(SELECT groupUniqArray(objectId) FROM "PortfolioOwnerIndex_raw" WHERE `+suiSQLKindPrefixRange([]string{"principal"})+` AND owner IN (SELECT account FROM accounts) AND checkpoint <= `+upperCheckpoint+`) AS principal_candidates`)
+		// The index says which objects an account has ever had a position in.
+		// These key and parent checks are what decide whether a row is a live
+		// position in a reserve of the observed topology, and they are repeated
+		// by the calculator over the rows this finally selects.
+		reserveTables := `SELECT JSONExtractString(links,'supplyTableId') FROM topology WHERE kind='reserve' AND state='live'` +
+			` UNION DISTINCT SELECT JSONExtractString(links,'borrowTableId') FROM topology WHERE kind='reserve' AND state='live'`
+		children := `(SELECT objectId FROM "PortfolioObjectState_raw" WHERE checkpoint <= ` + upperCheckpoint + ` AND (` +
+			`(kind='principal' AND objectId IN ` + suiSQLSet("principal_candidates") + ` AND key IN (SELECT account FROM accounts) AND parentId IN (` + reserveTables + `))` +
+			` OR (kind='receiptState' AND key IN (SELECT objectId FROM roots WHERE kind='receipt') AND parentId IN (SELECT JSONExtractString(links,'usersTableId') FROM direct_states WHERE state='live' AND kind='vault'))))`
+		latest("child_states", children, kinds.children)
+		// E-mode is a running per-account setting an event carries, not an
+		// object, so the latest row at or before P is the one in force. It has
+		// no lower bound for the same reason.
+		valueBranch = `SELECT 'value' AS rowType,` + sqlPayload("id", "kind", "account", "market", "content", "checkpoint", "materializedAtCheckpoint") +
+			` AS payload FROM (SELECT * FROM "PortfolioValue" WHERE ` + suiSQLIDRange([]string{"emode"}, nil, upper) + ` AND ` + visible +
+			` AND account IN (SELECT account FROM accounts) ORDER BY checkpoint DESC LIMIT 1 BY kind,account,market)`
+	}
 	// The object output is one primary-key fetch over every stage's array. The
 	// stage CTEs stay for the protocols' set logic, but a union of them here was
 	// expanded again by each output branch, fetching every stage several times
@@ -148,21 +203,28 @@ func (r *suiHistoryIndex) portfolioSQL(owner SuiAddress, selection suiSQLSelecti
 	// Token metadata is a few dozen rows per protocol. Reading all of it costs
 	// less than deriving the referenced coin types from another pass over objects.
 	ctes = append(ctes, `metadata AS (SELECT * FROM "PortfolioTokenMetadata" WHERE checkpoint <= (SELECT materializedAtCheckpoint FROM snapshot) AND materializedAtCheckpoint <= (SELECT materializedAtCheckpoint FROM snapshot) ORDER BY checkpoint DESC LIMIT 1 BY coinType)`)
-	snapshotFields := []string{"id", "checkpoint", "timestampMs", "digest", "schemaVersion", "startCheckpoint", "materializedAtCheckpoint", "nextCheckpoint", "nextTimestampMs", "previousCheckpoint", "objectCount", "valueCount", "observedObjectCount"}
+	snapshotFields := []string{"id", "checkpoint", "timestampMs", "digest", "schemaVersion", "startCheckpoint", "materializedAtCheckpoint", "nextCheckpoint", "nextTimestampMs", "previousCheckpoint", "objectCount", "valueCount", "observedObjectCount", "observedValueCount"}
 	// Counts are computed only in this output branch. Putting these scans into
 	// snapshot's WHERE makes every dependency reuse expand the global scans again.
-	allKinds := []string{}
-	for _, group := range [][]string{kinds.roots, kinds.direct, kinds.second} {
-		allKinds = append(allKinds, group...)
-	}
+	allKinds := kinds.all()
 	interval := `materializedAtCheckpoint <= (SELECT materializedAtCheckpoint FROM candidate_snapshot)`
 	lower := suiSQLBound{column: "previousCheckpoint", source: "candidate_snapshot"}
-	snapshotOutput := `(SELECT *, (SELECT uniqExact(id) FROM "PortfolioObjectState_raw" WHERE ` + interval + ` AND ` + suiSQLIDRange(allKinds, &lower, upper) + `) AS observedObjectCount FROM snapshot)`
+	// A protocol without value rows certifies valueCount 0, and reading a table
+	// its processor never creates would fail the whole statement, so the count
+	// is only observed where the schema has one.
+	observedValues := "0"
+	if len(kinds.values) > 0 {
+		observedValues = `(SELECT uniqExact(id) FROM "PortfolioValue_raw" WHERE ` + interval + ` AND ` + suiSQLIDRange(kinds.values, &lower, upper) + `)`
+	}
+	snapshotOutput := `(SELECT *, (SELECT uniqExact(id) FROM "PortfolioObjectState_raw" WHERE ` + interval + ` AND ` + suiSQLIDRange(allKinds, &lower, upper) + `) AS observedObjectCount,` + observedValues + ` AS observedValueCount FROM snapshot)`
 
 	branches := []string{
 		`SELECT 'snapshot' AS rowType,` + sqlPayload(snapshotFields...) + ` AS payload FROM ` + snapshotOutput,
 		`SELECT 'object' AS rowType,` + suiSQLObjectPayload() + ` AS payload FROM objects`,
 		`SELECT 'metadata' AS rowType,` + sqlPayload("coinType", "decimals", "symbol", "name", "checkpoint", "materializedAtCheckpoint", "status") + ` AS payload FROM metadata`,
+	}
+	if valueBranch != "" {
+		branches = append(branches, valueBranch)
 	}
 	return "WITH " + strings.Join(ctes, ",\n") + "\n" + strings.Join(branches, "\nUNION ALL\n"), nil
 }
