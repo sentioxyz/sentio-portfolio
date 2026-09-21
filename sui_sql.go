@@ -22,7 +22,7 @@ type suiSQLRow struct {
 	Payload string `json:"payload"`
 }
 type suiSQLSnapshot struct {
-	ObjectCount, ValueCount, ObservedObjectCount                        string
+	ObjectCount, ValueCount, ObservedObjectCount, ObservedValueCount    string
 	ID, Checkpoint, TimestampMs, Digest, StartCheckpoint, SchemaVersion string
 	MaterializedAtCheckpoint, NextCheckpoint, NextTimestampMs           string
 	PreviousCheckpoint                                                  string
@@ -33,12 +33,21 @@ type suiSQLObject struct {
 	MaterializedAtCheckpoint, ParentID, Key, RelatedID, Links       string
 }
 type suiSQLMetadata struct{ Status, CoinType, Decimals, Symbol, Name, Checkpoint, MaterializedAtCheckpoint string }
+
+// suiSQLValue is a PortfolioValue row: a protocol fact that is not an object,
+// such as NAVI's per-account e-mode setting, which only its events report.
+type suiSQLValue struct {
+	suiProtocolValue
+	Checkpoint               string `json:"checkpoint"`
+	MaterializedAtCheckpoint string `json:"materializedAtCheckpoint"`
+}
 type suiSQLData struct {
 	pin      SuiCheckpoint
 	snapshot suiSQLSnapshot
 	owner    SuiAddress
 	objects  map[string]suiSQLObject
 	metadata map[string]SuiCoinMetadata
+	values   []suiProtocolValue
 	// Shared by every account of one snapshot calculator; nil parses per read.
 	markets *suilendMarketMemo
 }
@@ -104,16 +113,35 @@ func suiSampleIntervalSeconds(data *suiSQLData) int64 {
 // Quantities are computed locally from those objects; no further read happens.
 func (r *suiHistoryIndex) calculatePortfolio(ctx context.Context, owner SuiAddress, data *suiSQLData) (SuiProtocolPositions, error) {
 	result := r.result(data.pin)
-	if r.protocolID != "suilend" {
+	switch r.protocolID {
+	case "suilend":
+		state, err := loadSuilend(ctx, owner, data)
+		if err != nil {
+			return result, err
+		}
+		result.Groups, err = suilendLending(ctx, owner, data.pin, data, state)
+		if err != nil {
+			return result, err
+		}
+	case "navi":
+		// One indexed snapshot answers both products, and either failing fails
+		// the read: unlike the node path there is no partial head state to
+		// salvage, and a sample that cannot be read whole is not a portfolio.
+		state, err := data.naviState()
+		if err != nil {
+			return result, err
+		}
+		lending, err := naviLending(ctx, owner, data.pin, data, state)
+		if err != nil {
+			return result, err
+		}
+		vaults, err := suiVaults(ctx, r.protocolID, data, state)
+		if err != nil {
+			return result, err
+		}
+		result.Groups = append(lending, vaults...)
+	default:
 		return result, fmt.Errorf("unsupported Sui processor protocol")
-	}
-	state, err := loadSuilend(ctx, owner, data)
-	if err != nil {
-		return result, err
-	}
-	result.Groups, err = suilendLending(ctx, owner, data.pin, data, state)
-	if err != nil {
-		return result, err
 	}
 	sort.Slice(result.Groups, func(i, j int) bool { return result.Groups[i].ID < result.Groups[j].ID })
 	return result, nil
@@ -148,6 +176,7 @@ func (r *suiHistoryIndex) readSQL(ctx context.Context, owner SuiAddress, selecti
 		return nil, fmt.Errorf("Sui SQL query failed or returned incomplete data")
 	}
 	data := &suiSQLData{owner: owner, objects: map[string]suiSQLObject{}, metadata: map[string]SuiCoinMetadata{}}
+	values := []suiSQLValue{}
 	snapshots := 0
 	for _, row := range response.Result.Rows {
 		switch row.RowType {
@@ -185,6 +214,12 @@ func (r *suiHistoryIndex) readSQL(ctx context.Context, owner SuiAddress, selecti
 				return nil, fmt.Errorf("duplicate Sui SQL token metadata")
 			}
 			data.metadata[meta.CoinType] = coin
+		case "value":
+			var value suiSQLValue
+			if err := json.Unmarshal([]byte(row.Payload), &value); err != nil {
+				return nil, fmt.Errorf("invalid Sui SQL protocol value")
+			}
+			values = append(values, value)
 		default:
 			return nil, fmt.Errorf("unknown Sui SQL row type")
 		}
@@ -195,6 +230,9 @@ func (r *suiHistoryIndex) readSQL(ctx context.Context, owner SuiAddress, selecti
 	snap := data.snapshot
 	expectedObjects, eObjects := historyUint(snap.ObjectCount)
 	observedObjects, aObjects := historyUint(snap.ObservedObjectCount)
+	expectedValues, eValues := historyUint(snap.ValueCount)
+	observedValues, aValues := historyUint(snap.ObservedValueCount)
+	kinds, kindErr := suiSQLProtocolKinds(r.protocolID)
 	// The certificate's counts guard against reading a sample before every row
 	// the processor wrote has become visible, so fewer visible rows than
 	// certified is incomplete. More visible rows than certified is not: the
@@ -202,8 +240,11 @@ func (r *suiHistoryIndex) readSQL(ctx context.Context, owner SuiAddress, selecti
 	// that list can miss rows a concurrent commit is flushing, while every row
 	// it wrote is deterministic and visible here. Suilend's state is entirely
 	// object rows, so a certified value row would be a contract the reader does
-	// not implement rather than something to ignore.
-	if eObjects != nil || aObjects != nil || observedObjects < expectedObjects || snap.ValueCount != "0" {
+	// not implement rather than something to ignore. NAVI does implement them:
+	// its e-mode values are certified and counted the same way as object rows.
+	if eObjects != nil || aObjects != nil || eValues != nil || aValues != nil || kindErr != nil ||
+		observedObjects < expectedObjects || observedValues < expectedValues ||
+		(len(kinds.values) == 0 && snap.ValueCount != "0") {
 		return nil, fmt.Errorf("Sui SQL snapshot materialization is incomplete")
 	}
 
@@ -223,6 +264,24 @@ func (r *suiHistoryIndex) readSQL(ctx context.Context, owner SuiAddress, selecti
 	}
 	if selection.at != nil && (selection.at.Before(data.pin.Timestamp) || selection.at.UnixMilli() >= int64(nextTime)) {
 		return nil, fmt.Errorf("Sui index has not completed the requested hour")
+	}
+	seenValues := map[string]bool{}
+	for _, value := range values {
+		cp, e1 := historyUint(value.Checkpoint)
+		at, e2 := historyUint(value.MaterializedAtCheckpoint)
+		_, e3 := historyUint(value.Market)
+		account, e4 := ParseSuiAddress(value.Account)
+		// The stored ID carries the source checkpoint; the identity the
+		// calculator keys on is the account and market the row is about.
+		identity := value.Kind + ":" + value.Market + ":" + value.Account
+		if len(kinds.values) == 0 || value.Kind != "emode" || e1 != nil || e2 != nil || e3 != nil || e4 != nil ||
+			account.Hex() != value.Account || cp < r.start || cp > data.pin.Sequence || at < cp || at > materialized ||
+			value.ID != fmt.Sprintf("%s:%020d:%s", value.Kind, cp, identity) || seenValues[identity] {
+			return nil, fmt.Errorf("invalid Sui indexed protocol value")
+		}
+		seenValues[identity] = true
+		value.suiProtocolValue.ID = identity
+		data.values = append(data.values, value.suiProtocolValue)
 	}
 	for _, obj := range mapSuiSQLObjects(data.objects) {
 		cp, e1 := historyUint(obj.Checkpoint)
@@ -318,6 +377,53 @@ func (d *suiSQLData) CoinMetadata(_ context.Context, coins []string) (map[string
 		result[coin] = meta
 	}
 	return result, nil, nil
+}
+
+// naviState groups one snapshot's rows into the state both NAVI products read.
+// The row's own key and parent are kept: the calculator re-checks that every
+// principal sits in a reserve of the observed topology and is named by one of
+// the wallet's accounts, so a candidate the SQL over-selected is rejected here
+// rather than silently attributed.
+func (d *suiSQLData) naviState() (suiProtocolState, error) {
+	state := suiProtocolState{Emodes: d.values}
+	for _, row := range d.objects {
+		if row.State != "live" {
+			continue
+		}
+		object, err := row.object()
+		if err != nil {
+			return state, err
+		}
+		key := row.Key
+		switch row.Kind {
+		case "account", "receipt":
+			if row.Owner != d.owner.Hex() || (row.OwnerKind != "ADDRESS" && row.OwnerKind != "CONSENSUS_ADDRESS") {
+				return state, fmt.Errorf("indexed NAVI root is not owned by the account")
+			}
+			// A receipt is keyed by the vault it names, the way the node path
+			// keys it from the receipt's own vault_address field.
+			if row.Kind == "receipt" {
+				key = row.RelatedID
+			}
+			state.Owned = append(state.Owned, protocolObject(object, row.Kind, key))
+		case "storage", "market", "reserve":
+			state.Topology = append(state.Topology, protocolObject(object, row.Kind, key))
+		case "principal":
+			// A principal is object-owned by its reserve table, so the account
+			// it belongs to is the field's name, which the processor stores as
+			// the row's key.
+			principal := protocolObject(object, row.Kind, key)
+			principal.Owner = key
+			state.Principals = append(state.Principals, principal)
+		case "vault":
+			state.Vaults = append(state.Vaults, protocolObject(object, row.Kind, key))
+		case "receiptState":
+			state.ReceiptStates = append(state.ReceiptStates, protocolObject(object, row.Kind, key))
+		default:
+			return state, fmt.Errorf("unknown indexed NAVI object kind")
+		}
+	}
+	return state, nil
 }
 
 // sqlString only sees canonical addresses or compiler-owned literals. Keep SQL
