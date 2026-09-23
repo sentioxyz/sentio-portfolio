@@ -22,7 +22,7 @@ type sqlPortfolioFixture struct {
 
 func sqlFixtureRow(kind string, payload any) suiSQLRow {
 	raw, _ := json.Marshal(payload)
-	return suiSQLRow{kind, string(raw)}
+	return suiSQLRow{RowType: kind, Payload: string(raw)}
 }
 
 // suiTestVersionID spells the immutable version suffix of a state row ID the

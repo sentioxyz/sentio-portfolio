@@ -3,6 +3,7 @@ package portfolio
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -20,6 +21,9 @@ type suiSQLSelection struct {
 type suiSQLRow struct {
 	RowType string `json:"rowType"`
 	Payload string `json:"payload"`
+	// Content carries a range statement's object content outside the payload,
+	// so the largest field is escaped once rather than twice.
+	Content string `json:"objectContent,omitempty"`
 }
 type suiSQLSnapshot struct {
 	ObjectCount, ValueCount, ObservedObjectCount, ObservedValueCount    string
@@ -63,6 +67,12 @@ func (r *suiHistoryIndex) readSQLPortfolio(ctx context.Context, owner SuiAddress
 	if err != nil {
 		return r.result(SuiCheckpoint{}), err
 	}
+	return r.samplePortfolio(ctx, owner, data, selection)
+}
+
+// samplePortfolio calculates one certified sample and labels its groups with the
+// sample they were answered from and the selection that chose it.
+func (r *suiHistoryIndex) samplePortfolio(ctx context.Context, owner SuiAddress, data *suiSQLData, selection suiSQLSelection) (SuiProtocolPositions, error) {
 	result, err := r.calculatePortfolio(ctx, owner, data)
 	if err != nil {
 		return result, err
@@ -152,6 +162,25 @@ func (r *suiHistoryIndex) readSQL(ctx context.Context, owner SuiAddress, selecti
 	if err != nil {
 		return nil, err
 	}
+	rows, err := r.executeSQL(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	decoded, err := decodeSuiSQLRows(rows)
+	if err != nil {
+		return nil, err
+	}
+	return r.sqlData(owner, decoded, selection)
+}
+
+// errSuiSQLPaged is a response that did not carry every row of its statement: a
+// cursor, truncation, or the row limit. A range read answers it by asking for
+// fewer samples; a single-sample read has nothing smaller to ask for.
+var errSuiSQLPaged = errors.New("Sui SQL query failed or returned incomplete data")
+
+// executeSQL runs one version-pinned statement, once, and returns its rows only
+// when the response is the statement's whole result.
+func (r *suiHistoryIndex) executeSQL(ctx context.Context, query string) ([]suiSQLRow, error) {
 	var response struct {
 		Result *struct {
 			Rows       []suiSQLRow     `json:"rows"`
@@ -167,67 +196,101 @@ func (r *suiHistoryIndex) readSQL(ctx context.Context, owner SuiAddress, selecti
 	version, _ := strconv.ParseUint(r.config.ProcessorVersion, 10, 64)
 	body := map[string]any{"version": version, "sqlQuery": map[string]any{"sql": query, "size": suiSQLRowLimit}, "sync_v1": true}
 	if err := r.request(ctx, http.MethodPost, r.config.SQLURL, body, &response); err != nil {
+		if errors.Is(err, errSentioResponseTooLarge) {
+			return nil, errSuiSQLPaged
+		}
 		return nil, err
 	}
 	nonempty := func(v json.RawMessage) bool {
 		return len(v) > 0 && string(v) != "null" && string(v) != "\"\"" && string(v) != "{}"
 	}
-	if nonempty(response.Error) || len(response.Errors) > 0 || response.Result == nil || nonempty(response.Cursor) || nonempty(response.Result.Cursor) || nonempty(response.Result.NextCursor) || response.Result.Truncated || response.Result.HasMore || len(response.Result.Rows) >= suiSQLRowLimit {
+	if nonempty(response.Error) || len(response.Errors) > 0 || response.Result == nil {
 		return nil, fmt.Errorf("Sui SQL query failed or returned incomplete data")
 	}
-	data := &suiSQLData{owner: owner, objects: map[string]suiSQLObject{}, metadata: map[string]SuiCoinMetadata{}}
-	values := []suiSQLValue{}
-	snapshots := 0
-	for _, row := range response.Result.Rows {
+	if nonempty(response.Cursor) || nonempty(response.Result.Cursor) || nonempty(response.Result.NextCursor) || response.Result.Truncated || response.Result.HasMore || len(response.Result.Rows) >= suiSQLRowLimit {
+		return nil, errSuiSQLPaged
+	}
+	return response.Result.Rows, nil
+}
+
+// suiSQLResult is one sample's rows, decoded but not yet checked against each
+// other or against the certificate.
+type suiSQLResult struct {
+	snapshots []suiSQLSnapshot
+	objects   []suiSQLObject
+	metadata  []suiSQLMetadata
+	values    []suiSQLValue
+}
+
+func decodeSuiSQLRows(rows []suiSQLRow) (suiSQLResult, error) {
+	var result suiSQLResult
+	for _, row := range rows {
 		switch row.RowType {
 		case "snapshot":
-			snapshots++
-			if err := json.Unmarshal([]byte(row.Payload), &data.snapshot); err != nil {
-				return nil, fmt.Errorf("invalid Sui SQL snapshot")
+			var snapshot suiSQLSnapshot
+			if err := json.Unmarshal([]byte(row.Payload), &snapshot); err != nil {
+				return result, fmt.Errorf("invalid Sui SQL snapshot")
 			}
+			result.snapshots = append(result.snapshots, snapshot)
 		case "object":
 			var obj suiSQLObject
 			if err := json.Unmarshal([]byte(row.Payload), &obj); err != nil {
-				return nil, fmt.Errorf("invalid Sui SQL object")
+				return result, fmt.Errorf("invalid Sui SQL object")
 			}
-			if _, exists := data.objects[obj.ObjectID]; exists {
-				return nil, fmt.Errorf("duplicate Sui SQL object")
-			}
-			data.objects[obj.ObjectID] = obj
+			result.objects = append(result.objects, obj)
 		case "metadata":
 			var meta suiSQLMetadata
 			if err := json.Unmarshal([]byte(row.Payload), &meta); err != nil {
-				return nil, fmt.Errorf("invalid Sui SQL token metadata")
+				return result, fmt.Errorf("invalid Sui SQL token metadata")
 			}
-			if meta.Status != "found" {
-				continue
-			}
-			decimals, e := strconv.Atoi(meta.Decimals)
-			if e != nil {
-				return nil, fmt.Errorf("invalid Sui SQL token precision")
-			}
-			coin, e := suiCoinMetadataFrom(meta.CoinType, &decimals, &meta.Symbol, meta.Name)
-			if e != nil {
-				return nil, e
-			}
-			if _, exists := data.metadata[meta.CoinType]; exists {
-				return nil, fmt.Errorf("duplicate Sui SQL token metadata")
-			}
-			data.metadata[meta.CoinType] = coin
+			result.metadata = append(result.metadata, meta)
 		case "value":
 			var value suiSQLValue
 			if err := json.Unmarshal([]byte(row.Payload), &value); err != nil {
-				return nil, fmt.Errorf("invalid Sui SQL protocol value")
+				return result, fmt.Errorf("invalid Sui SQL protocol value")
 			}
-			values = append(values, value)
+			result.values = append(result.values, value)
 		default:
-			return nil, fmt.Errorf("unknown Sui SQL row type")
+			return result, fmt.Errorf("unknown Sui SQL row type")
 		}
 	}
-	if snapshots != 1 {
+	return result, nil
+}
+
+// sqlData accepts one sample only when its rows agree with its certificate. A
+// single read and each sample of a range read go through the same checks.
+func (r *suiHistoryIndex) sqlData(owner SuiAddress, rows suiSQLResult, selection suiSQLSelection) (*suiSQLData, error) {
+	data := &suiSQLData{owner: owner, objects: map[string]suiSQLObject{}, metadata: map[string]SuiCoinMetadata{}}
+	for _, obj := range rows.objects {
+		if _, exists := data.objects[obj.ObjectID]; exists {
+			return nil, fmt.Errorf("duplicate Sui SQL object")
+		}
+		data.objects[obj.ObjectID] = obj
+	}
+	for _, meta := range rows.metadata {
+		if meta.Status != "found" {
+			continue
+		}
+		decimals, e := strconv.Atoi(meta.Decimals)
+		if e != nil {
+			return nil, fmt.Errorf("invalid Sui SQL token precision")
+		}
+		coin, e := suiCoinMetadataFrom(meta.CoinType, &decimals, &meta.Symbol, meta.Name)
+		if e != nil {
+			return nil, e
+		}
+		if _, exists := data.metadata[meta.CoinType]; exists {
+			return nil, fmt.Errorf("duplicate Sui SQL token metadata")
+		}
+		data.metadata[meta.CoinType] = coin
+	}
+	values := rows.values
+	if len(rows.snapshots) != 1 {
 		return nil, fmt.Errorf("Sui index has no completed sample for the requested hour")
 	}
+	data.snapshot = rows.snapshots[0]
 	snap := data.snapshot
+	var err error
 	expectedObjects, eObjects := historyUint(snap.ObjectCount)
 	observedObjects, aObjects := historyUint(snap.ObservedObjectCount)
 	expectedValues, eValues := historyUint(snap.ValueCount)
@@ -306,6 +369,11 @@ func mapSuiSQLObjects(m map[string]suiSQLObject) []suiSQLObject {
 	}
 	return out
 }
+func sortedSuiSQLObjects(m map[string]suiSQLObject) []suiSQLObject {
+	out := mapSuiSQLObjects(m)
+	sort.Slice(out, func(i, j int) bool { return out[i].ObjectID < out[j].ObjectID })
+	return out
+}
 func (o suiSQLObject) object() (SuiObject, error) {
 	version, err := historyUint(o.Version)
 	if err != nil || version == 0 || o.Content == "" {
@@ -345,7 +413,7 @@ func (d *suiSQLData) OwnedObjects(_ context.Context, owner SuiAddress, typ strin
 }
 func (d *suiSQLData) DynamicFields(_ context.Context, parent string) ([]SuiObject, error) {
 	result := []SuiObject{}
-	for _, row := range d.objects {
+	for _, row := range sortedSuiSQLObjects(d.objects) {
 		if row.State == "live" && row.ParentID == parent {
 			obj, e := row.object()
 			if e != nil {
@@ -386,7 +454,9 @@ func (d *suiSQLData) CoinMetadata(_ context.Context, coins []string) (map[string
 // rather than silently attributed.
 func (d *suiSQLData) naviState() (suiProtocolState, error) {
 	state := suiProtocolState{Emodes: d.values}
-	for _, row := range d.objects {
+	// Object ID order, not map order: the calculators emit components in the
+	// order they meet principals, and a stored sample must not depend on a hash.
+	for _, row := range sortedSuiSQLObjects(d.objects) {
 		if row.State != "live" {
 			continue
 		}

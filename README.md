@@ -89,6 +89,19 @@ with what is visible before accepting the sample. The returned checkpoint is the
 sample's, not the current head, and group metadata reports the sample interval
 the certificate itself bounds.
 
+`ReadRange(owner, from, to)` answers a backfill: it returns every completed
+sample whose interval meets `[from, to]`, each as a `SuiHistorySample` owning
+`[Start, Until)`, and `At(t)` reports one as `ReadAtTime(t)` would. A statement
+covers several samples: it selects each stage's candidates once for all of
+them, keeps per object only the newest version up to each sample, and counts
+every certificate in one scan of their joint interval. The reader then repeats
+the single-sample selection for each sample over those rows and certifies it
+with the same checks, so a sample whose certificate fails carries its own error
+without affecting its neighbours. Statements are sized from the bytes per sample
+the previous one returned, because the response is most of their cost. A
+statement whose response is paged or past the body limit, or that the client or
+the endpoint gives up on, is asked again for fewer samples.
+
 Cetus and Bluefin discover directly owned `position::Position` NFTs from their
 defining packages. Each position names its pool; only those pools, the two active
 boundary ticks, and Cetus position accounting fields are fetched. Discovery never
