@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,7 +17,9 @@ import (
 )
 
 const (
-	sentioRetryInitial   = 300 * time.Millisecond
+	sentioRetryInitial = 300 * time.Millisecond
+	// sentioResponseLimit bounds the body one request may return.
+	sentioResponseLimit  = 4 << 20
 	sentioStatusCacheTTL = 30 * time.Second
 
 	// sentioIdleConnsPerHost is how many idle connections to the indexer one client keeps warm.
@@ -61,6 +64,17 @@ type sentioStatusCache struct {
 	At     time.Time
 	Chains map[ChainID]sentioChainStatus
 }
+
+// errSentioResponseTooLarge is a body past sentioResponseLimit.
+var errSentioResponseTooLarge = errors.New("Sentio response exceeds the size limit")
+
+// sentioHTTPError is a response with a status other than 200.
+type sentioHTTPError struct {
+	status  int
+	message string
+}
+
+func (e sentioHTTPError) Error() string { return e.message }
 
 type sentioAPIClient struct {
 	apiKey string
@@ -150,21 +164,26 @@ func (c *sentioAPIClient) doJSONAttempts(ctx context.Context, method, endpoint s
 		startedAt := time.Now()
 		response, err := c.httpClient.Do(request)
 		if err == nil {
-			payload, readErr := io.ReadAll(io.LimitReader(response.Body, 4<<20))
+			payload, readErr := io.ReadAll(io.LimitReader(response.Body, sentioResponseLimit+1))
 			response.Body.Close()
 			if readErr != nil {
 				err = readErr
 			} else if response.StatusCode != http.StatusOK {
-				err = fmt.Errorf(
+				err = sentioHTTPError{status: response.StatusCode, message: fmt.Sprintf(
 					"HTTP %d: %s",
 					response.StatusCode,
 					strings.TrimSpace(string(payload[:min(len(payload), 300)])),
-				)
+				)}
 				if response.StatusCode != http.StatusTooManyRequests &&
 					response.StatusCode < http.StatusInternalServerError {
 					observeIndexerRequest(ctx, method, attempt, startedAt, err)
 					return redactEndpoints(err)
 				}
+			} else if len(payload) > sentioResponseLimit {
+				// A cut body would only fail to decode. The same request answers the
+				// same way again, so it is reported rather than retried.
+				observeIndexerRequest(ctx, method, attempt, startedAt, errSentioResponseTooLarge)
+				return errSentioResponseTooLarge
 			} else if decodeErr := json.Unmarshal(payload, result); decodeErr != nil {
 				err = decodeErr
 			} else {
