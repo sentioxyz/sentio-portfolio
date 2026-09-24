@@ -18,7 +18,6 @@ type latestSuiFixture struct {
 	versions         map[uint64]SuiObject
 	transactionReads int
 	failObjects      bool
-	enumerated       []string
 }
 
 func (f *latestSuiFixture) Objects(_ context.Context, ids []string) (map[string]SuiObject, error) {

@@ -146,7 +146,7 @@ func (a *FxProtocolAdapter) Positions(
 		if decodeErr != nil {
 			return nil, fmt.Errorf("pool %s balance: %w", pool.Address, decodeErr)
 		}
-		rewards := make([]common.Address, 0)
+		var rewards []common.Address
 		unlockAt := new(big.Int)
 		if pool.Legacy {
 			baseReward, addressErr := AddressAt(rows[rowIndex+2], 0)

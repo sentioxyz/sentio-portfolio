@@ -323,28 +323,10 @@ func (c *RPCClient) DeployedAt(
 			return nil, fmt.Errorf("code %d-%d: %w", start, end-1, err)
 		}
 		for offset := range batch {
-			if batch[offset].Error != nil {
-				return nil, fmt.Errorf(
-					"code %s: %w",
-					addresses[start+offset],
-					redactEndpoints(batch[offset].Error),
-				)
-			}
 			deployed[start+offset] = len(raw[offset]) > 0
 		}
 	}
 	return deployed, nil
-}
-
-func (c *RPCClient) Call(
-	ctx context.Context,
-	block BlockRef,
-	contract common.Address,
-	contractABI abi.ABI,
-	method string,
-	args ...any,
-) ([]any, error) {
-	return c.callContract(ctx, block, common.Address{}, contract, contractABI, method, args...)
 }
 
 func (c *RPCClient) Logs(
@@ -374,22 +356,9 @@ func (c *RPCClient) Logs(
 	return logs, nil
 }
 
-func (c *RPCClient) CallFrom(
+func (c *RPCClient) Call(
 	ctx context.Context,
 	block BlockRef,
-	from common.Address,
-	contract common.Address,
-	contractABI abi.ABI,
-	method string,
-	args ...any,
-) ([]any, error) {
-	return c.callContract(ctx, block, from, contract, contractABI, method, args...)
-}
-
-func (c *RPCClient) callContract(
-	ctx context.Context,
-	block BlockRef,
-	from common.Address,
 	contract common.Address,
 	contractABI abi.ABI,
 	method string,
@@ -401,9 +370,6 @@ func (c *RPCClient) callContract(
 	}
 	var raw hexutil.Bytes
 	call := map[string]any{"to": contract, "data": hexutil.Bytes(data)}
-	if from != (common.Address{}) {
-		call["from"] = from
-	}
 	if err := c.call(ctx, &raw, "eth_call", call, hexutil.EncodeUint64(block.Number)); err != nil {
 		return nil, fmt.Errorf("%s %s: %w", contract, method, err)
 	}

@@ -131,7 +131,6 @@ func (s *walletTestServer) ServeHTTP(writer http.ResponseWriter, request *http.R
 var (
 	walletTestUSDC = common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
 	walletTestWBTC = common.HexToAddress("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599")
-	walletTestLate = common.HexToAddress("0x1111111111111111111111111111111111111111")
 )
 
 func newWalletTestClient(t *testing.T, server *walletTestServer) *RPCClient {

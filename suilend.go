@@ -186,16 +186,6 @@ func loadSuilend(ctx context.Context, owner SuiAddress, reader suilendObjectSour
 	return state, nil
 }
 
-// Every catalog root must contain a coherent reserve inventory, even when the
-// queried wallet holds no capabilities in that market.
-func suilendMarketReserves(market SuiObject) ([]suilendReserve, error) {
-	parsed, err := parseSuilendMarket(market)
-	if err != nil {
-		return nil, err
-	}
-	return parsed.reserves, nil
-}
-
 // suilendParsedMarket is one decoded LendingMarket: its obligation table and its
 // reserve vector. Both are read-only after parsing; interest accrual copies a
 // reserve and allocates new integers, so one parse may serve every account.

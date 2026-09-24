@@ -184,13 +184,11 @@ func suiVaults(ctx context.Context, protocolID string, reader suiCoinMetadataRea
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	vaultIDs := []string{}
 	for id := range vaultSet {
 		parsed, err := ParseSuiAddress(id)
 		if err != nil || parsed.Hex() != id {
 			return nil, fmt.Errorf("receipt has invalid vault identity")
 		}
-		vaultIDs = append(vaultIDs, id)
 	}
 	vaults, states := state.Vaults, state.ReceiptStates
 	byID := make(map[string]suiFields)
