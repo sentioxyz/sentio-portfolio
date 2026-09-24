@@ -25,14 +25,13 @@ func clmmFixture(protocol string) (*latestSuiFixture, SuiAddress) {
 	pool, pos, ticks, states := naviAddress("0x21"), naviAddress("0x22"), naviAddress("0x23"), naviAddress("0x24")
 	nft := map[string]any{"coin_type_a": suiLongType, "coin_type_b": coinB, "liquidity": "100"}
 	pf := map[string]any{"current_sqrt_price": clmmQ(1), "current_tick_index": clmmTickBits(0), "liquidity": "100"}
-	accrual := map[string]any{}
 	if protocol == "cetus" {
 		nft["pool"], nft["tick_lower_index"], nft["tick_upper_index"] = pool, clmmTickBits(-100), clmmTickBits(100)
 		pf["fee_growth_global_a"], pf["fee_growth_global_b"] = clmmQ(10), clmmQ(12)
 		pf["tick_manager"] = map[string]any{"ticks": map[string]any{"id": ticks}}
 		pf["position_manager"] = map[string]any{"positions": map[string]any{"id": states}}
 		pf["rewarder_manager"] = map[string]any{"last_updated_time": "990", "rewarders": []any{map[string]any{"reward_coin": map[string]any{"name": suiLongType}, "growth_global": clmmQ(20), "emissions_per_second": clmmQ(100)}}}
-		accrual = map[string]any{"position_id": pos, "liquidity": "100", "tick_lower_index": clmmTickBits(-100), "tick_upper_index": clmmTickBits(100), "fee_owned_a": "5", "fee_owned_b": "9", "fee_growth_inside_a": clmmQ(3), "fee_growth_inside_b": clmmQ(2), "rewards": []any{map[string]any{"amount_owned": "7", "growth_inside": clmmQ(4)}}}
+		accrual := map[string]any{"position_id": pos, "liquidity": "100", "tick_lower_index": clmmTickBits(-100), "tick_upper_index": clmmTickBits(100), "fee_owned_a": "5", "fee_owned_b": "9", "fee_growth_inside_a": clmmQ(3), "fee_growth_inside_b": clmmQ(2), "rewards": []any{map[string]any{"amount_owned": "7", "growth_inside": clmmQ(4)}}}
 		address, _ := ParseSuiAddress(pos)
 		id, _ := suiCLMMFieldID(states, "0x2::object::ID", address[:])
 		f.objects[id] = latestObject(id, suiFieldType("0x2::object::ID", cetusTablePackage+"::linked_table::Node<0x2::object::ID,"+pkg+"::position::PositionInfo>"), "OBJECT", states, map[string]any{"name": pos, "value": map[string]any{"value": accrual}})

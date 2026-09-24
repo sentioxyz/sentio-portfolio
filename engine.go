@@ -65,13 +65,6 @@ type ScanOptions struct {
 	SkipPrices  bool
 }
 
-func (o ScanOptions) empty() bool {
-	return len(o.ProtocolIDs) == 0 &&
-		len(o.ChainIDs) == 0 &&
-		len(o.BlockNumber) == 0 &&
-		!o.SkipPrices
-}
-
 func (o ScanOptions) includesProtocol(protocolID string) bool {
 	if len(o.ProtocolIDs) == 0 {
 		return true
