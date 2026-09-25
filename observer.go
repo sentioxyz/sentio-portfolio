@@ -92,8 +92,9 @@ type IndexerObservation struct {
 	// ChainID is the chain the request served, or zero for a status request, which covers every
 	// chain of a processor at once.
 	ChainID ChainID
-	// Kind is IndexerStatus for a processor status read, IndexerGraphQL for a position query, or
-	// IndexerLane for the time spent waiting to enter the shared indexer lane.
+	// Kind is IndexerStatus for a processor status read, IndexerGraphQL for a position query,
+	// IndexerSQL for a SQL statement from submission to result, or IndexerLane for the time spent
+	// waiting to enter the shared indexer lane.
 	Kind string
 	// Attempt is 1-based for requests and zero for a lane wait.
 	Attempt  int
@@ -105,6 +106,7 @@ type IndexerObservation struct {
 const (
 	IndexerStatus  = "status"
 	IndexerGraphQL = "graphql"
+	IndexerSQL     = "sql"
 	IndexerLane    = "lane"
 )
 

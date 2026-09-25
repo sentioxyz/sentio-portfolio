@@ -22,6 +22,8 @@ single processor:
 Every indexer request passes through one `indexerLane` per engine (`sentio_lane.go`), sized
 by `EngineConfig.IndexerConcurrency`: the adapters share one API key, so admission is bounded
 per engine, not per protocol. Do not add a second lock or a per-adapter limiter in front of it.
+A SQL statement holds its slot from submission until it finishes, polls included, since the
+statement is what occupies the key's server-side queue.
 
 `sentioAPIClient` keeps one `http.Client` that is never replaced and never locked, on a transport
 restricted to HTTP/1.1 and offering only http/1.1 through ALPN (`newSentioTransport`; a clone of the
@@ -122,10 +124,17 @@ the `sui.rpc.v2` services a fullnode, or a proxy in front of one, serves. The ru
   a past pin; NAVI's history is served by its index instead, see below.
 - Suilend is read from a version-pinned SQL processor index (`sui_history.go`, `sui_sql.go`,
   `sui_sql_query.go`), for latest and historical positions alike. Each address read is one SQL
-  statement executed once, with no automatic HTTP retry, no Sui node call and no status or
-  GraphQL follow-up; an unconfigured index is an error, never a node read. Hosts supply
-  `SentioIndexerConfig.SQLURL` and an explicit processor version. Volo, Cetus and Bluefin
+  statement, executed once, with no Sui node call and no status or GraphQL follow-up; an
+  unconfigured index is an error, never a node read. Hosts supply `SentioIndexerConfig.SQLURL`
+  (the project's `…/sql/execute`) and an explicit processor version. Volo, Cetus and Bluefin
   still read head state from a node and still have no history.
+- Every SQL statement goes through `sentio_sql.go`: submitted to the async execute endpoint on the
+  LARGE engine and polled at `…/sql/query_result/{id}` until it finishes. A poll that fails
+  transiently is asked again; the submission never is, because asking again executes the
+  statement again. A statement that outlives `sentioSQLStatementTimeout` or its caller is
+  cancelled, and one that ran out of time or hit a ClickHouse execution limit is reported as too
+  costly, so a range read asks for fewer samples. A server error keeps none of its message, which
+  may name the deployment.
 - NAVI is read from the same index machinery, but only for history. Its
   `ReadLatest` stays on the node, which answers for the head rather than for the
   newest completed sample; `NaviHistoryReader.ReadAtTime` / `ReadAtCheckpoint`

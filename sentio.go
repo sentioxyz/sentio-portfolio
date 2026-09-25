@@ -32,8 +32,9 @@ const (
 // SentioIndexerConfig is supplied by the host at runtime. Endpoint values may
 // contain private project paths and must never be included in public errors.
 type SentioIndexerConfig struct {
-	// SQLURL is the version-pinned SQL execute endpoint a Sui protocol index
-	// is read through. Empty derives it from GraphQLURL.
+	// SQLURL is the version-pinned SQL execute endpoint (…/sql/execute) a Sui
+	// protocol index is read through; statements run on the async routes beside
+	// it (sentio_sql.go). Empty derives it from GraphQLURL.
 	SQLURL           string
 	GraphQLURL       string
 	StatusURL        string
@@ -82,8 +83,10 @@ type sentioAPIClient struct {
 	// only (see newSentioTransport), so requests from the scan workers run concurrently, each on
 	// its own connection, with nothing in front of them but the indexer lane.
 	httpClient *http.Client
-	statusMu   sync.Mutex
-	statuses   map[string]sentioStatusCache
+	// sql paces and bounds SQL statements (sentio_sql.go).
+	sql      sentioSQLTiming
+	statusMu sync.Mutex
+	statuses map[string]sentioStatusCache
 }
 
 func newSentioAPIClient() *sentioAPIClient {
@@ -131,67 +134,28 @@ func (c *sentioAPIClient) doJSON(
 	return c.doJSONAttempts(ctx, method, endpoint, body, result, 3)
 }
 
-// SQL portfolio reads are one statement and one HTTP execution. A timeout or
-// retryable status must surface to the caller instead of executing it again.
-func (c *sentioAPIClient) doJSONOnce(ctx context.Context, method, endpoint string, body, result any) error {
-	return c.doJSONAttempts(ctx, method, endpoint, body, result, 1)
-}
-
 func (c *sentioAPIClient) doJSONAttempts(ctx context.Context, method, endpoint string, body, result any, attempts int) error {
 	if c.apiKey == "" {
 		return fmt.Errorf("Sentio API key is not configured")
 	}
-	var last error
-	for attempt := 0; attempt < attempts; attempt++ {
-		var reader io.Reader
-		if body != nil {
-			payload, err := json.Marshal(body)
-			if err != nil {
-				return err
-			}
-			reader = bytes.NewReader(payload)
-		}
-		request, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
-		if err != nil {
+	var payload []byte
+	if body != nil {
+		var err error
+		if payload, err = json.Marshal(body); err != nil {
 			return err
 		}
-		request.Header.Set("accept", "application/json")
-		request.Header.Set("accept-encoding", "identity")
-		request.Header.Set("api-key", c.apiKey)
-		if body != nil {
-			request.Header.Set("content-type", "application/json")
-		}
+	}
+	var last error
+	for attempt := 0; attempt < attempts; attempt++ {
 		startedAt := time.Now()
-		response, err := c.httpClient.Do(request)
-		if err == nil {
-			payload, readErr := io.ReadAll(io.LimitReader(response.Body, sentioResponseLimit+1))
-			response.Body.Close()
-			if readErr != nil {
-				err = readErr
-			} else if response.StatusCode != http.StatusOK {
-				err = sentioHTTPError{status: response.StatusCode, message: fmt.Sprintf(
-					"HTTP %d: %s",
-					response.StatusCode,
-					strings.TrimSpace(string(payload[:min(len(payload), 300)])),
-				)}
-				if response.StatusCode != http.StatusTooManyRequests &&
-					response.StatusCode < http.StatusInternalServerError {
-					observeIndexerRequest(ctx, method, attempt, startedAt, err)
-					return redactEndpoints(err)
-				}
-			} else if len(payload) > sentioResponseLimit {
-				// A cut body would only fail to decode. The same request answers the
-				// same way again, so it is reported rather than retried.
-				observeIndexerRequest(ctx, method, attempt, startedAt, errSentioResponseTooLarge)
-				return errSentioResponseTooLarge
-			} else if decodeErr := json.Unmarshal(payload, result); decodeErr != nil {
-				err = decodeErr
-			} else {
-				observeIndexerRequest(ctx, method, attempt, startedAt, nil)
-				return nil
-			}
-		}
+		retry, err := c.roundTrip(ctx, method, endpoint, payload, result)
 		observeIndexerRequest(ctx, method, attempt, startedAt, err)
+		if err == nil {
+			return nil
+		}
+		if !retry {
+			return redactEndpoints(err)
+		}
 		last = err
 		if attempt+1 < attempts {
 			timer := time.NewTimer(sentioRetryInitial << attempt)
@@ -204,6 +168,51 @@ func (c *sentioAPIClient) doJSONAttempts(ctx context.Context, method, endpoint s
 		}
 	}
 	return fmt.Errorf("request failed after %d attempts: %w", attempts, redactEndpoints(last))
+}
+
+// roundTrip sends one request with payload as its JSON body and decodes a 200 response into
+// result. It neither retries nor observes; retry reports whether another attempt may answer
+// differently: a transport, read or decode failure, a 429 or a 5xx. A body past
+// sentioResponseLimit is not one of them: a cut body would only fail to decode, and the same
+// request answers the same way again.
+func (c *sentioAPIClient) roundTrip(ctx context.Context, method, endpoint string, payload []byte, result any) (retry bool, err error) {
+	var reader io.Reader
+	if payload != nil {
+		reader = bytes.NewReader(payload)
+	}
+	request, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
+	if err != nil {
+		return false, err
+	}
+	request.Header.Set("accept", "application/json")
+	request.Header.Set("accept-encoding", "identity")
+	request.Header.Set("api-key", c.apiKey)
+	if payload != nil {
+		request.Header.Set("content-type", "application/json")
+	}
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return true, err
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, sentioResponseLimit+1))
+	response.Body.Close()
+	switch {
+	case err != nil:
+		return true, err
+	case response.StatusCode != http.StatusOK:
+		return response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= http.StatusInternalServerError,
+			sentioHTTPError{status: response.StatusCode, message: fmt.Sprintf(
+				"HTTP %d: %s",
+				response.StatusCode,
+				strings.TrimSpace(string(body[:min(len(body), 300)])),
+			)}
+	case len(body) > sentioResponseLimit:
+		return false, errSentioResponseTooLarge
+	}
+	if err := json.Unmarshal(body, result); err != nil {
+		return true, err
+	}
+	return false, nil
 }
 
 // observeIndexerRequest reports one indexer round trip. The two request shapes the client makes

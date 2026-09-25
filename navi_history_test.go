@@ -116,7 +116,7 @@ func newNaviIndexFixture(t *testing.T, f *latestSuiFixture, values []suiSQLValue
 	for _, value := range values {
 		fixture.rows = append(fixture.rows, sqlFixtureRow("value", value))
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+	server := httptest.NewServer(asyncSQLHandler(t, func(w http.ResponseWriter, request *http.Request) {
 		fixture.calls++
 		response := map[string]any{"result": map[string]any{"rows": fixture.rows, "cursor": ""}}
 		if fixture.mutate != nil {
@@ -129,6 +129,7 @@ func newNaviIndexFixture(t *testing.T, f *latestSuiFixture, values []suiSQLValue
 	if err != nil {
 		t.Fatal(err)
 	}
+	fastSQL(reader.api)
 	return fixture, reader
 }
 

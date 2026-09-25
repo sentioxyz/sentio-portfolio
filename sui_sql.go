@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -179,38 +178,32 @@ func (r *suiHistoryIndex) readSQL(ctx context.Context, owner SuiAddress, selecti
 var errSuiSQLPaged = errors.New("Sui SQL query failed or returned incomplete data")
 
 // executeSQL runs one version-pinned statement, once, and returns its rows only
-// when the response is the statement's whole result.
+// when the result is the statement's whole result.
 func (r *suiHistoryIndex) executeSQL(ctx context.Context, query string) ([]suiSQLRow, error) {
-	var response struct {
-		Result *struct {
-			Rows       []suiSQLRow     `json:"rows"`
-			Cursor     json.RawMessage `json:"cursor"`
-			NextCursor json.RawMessage `json:"nextCursor"`
-			Truncated  bool            `json:"truncated"`
-			HasMore    bool            `json:"hasMore"`
-		} `json:"result"`
-		Error  json.RawMessage   `json:"error"`
-		Errors []json.RawMessage `json:"errors"`
-		Cursor json.RawMessage   `json:"cursor"`
-	}
-	version, _ := strconv.ParseUint(r.config.ProcessorVersion, 10, 64)
-	body := map[string]any{"version": version, "sqlQuery": map[string]any{"sql": query, "size": suiSQLRowLimit}, "sync_v1": true}
-	if err := r.request(ctx, http.MethodPost, r.config.SQLURL, body, &response); err != nil {
+	raw, err := r.statement(ctx, query, suiSQLRowLimit)
+	if err != nil {
 		if errors.Is(err, errSentioResponseTooLarge) {
 			return nil, errSuiSQLPaged
 		}
 		return nil, err
 	}
+	var result struct {
+		Rows       []suiSQLRow     `json:"rows"`
+		Cursor     json.RawMessage `json:"cursor"`
+		NextCursor json.RawMessage `json:"nextCursor"`
+		Truncated  bool            `json:"truncated"`
+		HasMore    bool            `json:"hasMore"`
+	}
+	if json.Unmarshal(raw, &result) != nil {
+		return nil, fmt.Errorf("Sui SQL query failed or returned incomplete data")
+	}
 	nonempty := func(v json.RawMessage) bool {
 		return len(v) > 0 && string(v) != "null" && string(v) != "\"\"" && string(v) != "{}"
 	}
-	if nonempty(response.Error) || len(response.Errors) > 0 || response.Result == nil {
-		return nil, fmt.Errorf("Sui SQL query failed or returned incomplete data")
-	}
-	if nonempty(response.Cursor) || nonempty(response.Result.Cursor) || nonempty(response.Result.NextCursor) || response.Result.Truncated || response.Result.HasMore || len(response.Result.Rows) >= suiSQLRowLimit {
+	if nonempty(result.Cursor) || nonempty(result.NextCursor) || result.Truncated || result.HasMore || len(result.Rows) >= suiSQLRowLimit {
 		return nil, errSuiSQLPaged
 	}
-	return response.Result.Rows, nil
+	return result.Rows, nil
 }
 
 // suiSQLResult is one sample's rows, decoded but not yet checked against each

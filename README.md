@@ -75,7 +75,8 @@ rather than from a node, which is what lets it answer for a past checkpoint at
 all. A host configures it with `NewSuilendHistoryReader(SentioIndexerConfig{…})`
 and `SuiProtocolReader.WithSuilendHistory(reader)`; `ReadLatest`,
 `ReadAtTime` and `ReadAtCheckpoint` then each execute one SQL statement, once,
-against the pinned processor version. Without that configuration a Suilend read
+against the pinned processor version: submitted to the async SQL endpoint on the
+LARGE engine and polled until it finishes. Without that configuration a Suilend read
 is an error — it never falls back to a node, because a node cannot answer for a
 historical checkpoint and a head answer under a past pin would be a wrong number
 nobody can see is wrong. The other four Sui protocols have no history.
