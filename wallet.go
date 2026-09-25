@@ -126,8 +126,8 @@ func groupAccount(snapshot Snapshot, group Group) common.Address {
 // counted, keyed by chain and by the account that holds them.
 //
 // Every adapter that reads a token an account holds — an LST, a vault share, an aToken, an LP
-// token — records the contract it read in Source. Matching that provenance against
-// provider-discovered holdings prevents double counting as adapters are added.
+// token — declares it in Source.Holds. Matching those declarations against provider-discovered
+// holdings prevents double counting as adapters are added.
 //
 // The account is part of the key because a scan aggregates several of them. A DSA proxy staking
 // a token says nothing about the same token sitting in the root wallet: those are two balances
@@ -144,19 +144,30 @@ func walletHeldContracts(snapshots []Snapshot) map[holdingScope]map[common.Addre
 				Account: groupAccount(snapshot, group),
 			}
 			for _, component := range group.Components {
-				contract := component.Source.Contract
-				if contract == (common.Address{}) ||
-					!strings.Contains(component.Source.Method, "balanceOf") {
-					continue
+				for _, contract := range heldContracts(component.Source) {
+					if held[scope] == nil {
+						held[scope] = make(map[common.Address]struct{})
+					}
+					held[scope][contract] = struct{}{}
 				}
-				if held[scope] == nil {
-					held[scope] = make(map[common.Address]struct{})
-				}
-				held[scope][contract] = struct{}{}
 			}
 		}
 	}
 	return held
+}
+
+// heldContracts reports the ERC-20s whose balance a component consumed. Declared holdings are
+// authoritative, an empty declaration included. A source that declares nothing falls back to the
+// inference that predates Holds — Contract is held when Method mentions balanceOf — which misses
+// every adapter that names a converter as Contract or describes its read without that word.
+func heldContracts(source Source) []common.Address {
+	if source.Holds != nil {
+		return source.Holds
+	}
+	if source.Contract == (common.Address{}) || !strings.Contains(source.Method, "balanceOf") {
+		return nil
+	}
+	return []common.Address{source.Contract}
 }
 
 // suppressDuplicateHoldings removes the holdings a protocol snapshot already reports. It runs

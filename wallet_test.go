@@ -154,6 +154,16 @@ func groupByID(groups []Group, id string) (Group, bool) {
 	return Group{}, false
 }
 
+// walletHoldings returns the holdings that survived suppression, none if the snapshot is gone.
+func walletHoldings(snapshots []Snapshot) []Group {
+	for _, snapshot := range snapshots {
+		if snapshot.ProtocolID == walletProtocolID {
+			return snapshot.Groups
+		}
+	}
+	return nil
+}
+
 func holdingSnapshot(groups ...Group) Snapshot {
 	return Snapshot{
 		ProtocolID:   walletProtocolID,
@@ -235,10 +245,13 @@ func TestSuppressDuplicateHoldingsDropsTokensAnAdapterAlreadyRead(t *testing.T) 
 	}
 }
 
-// Supplying USDC to a lending market reports USDC as the component token while reading the
-// aToken balance. The wallet's own USDC is a different balance and must survive.
+// Supplying USDC to a lending market reports USDC as the component token while the account holds
+// the aToken. The source is the shape the Aave adapter really emits: it reads the supply from the
+// data provider, so only the declared holding names the aToken. The wallet's aToken is the same
+// balance and must go; the wallet's own USDC is a different balance and must survive.
 func TestSuppressDuplicateHoldingsKeepsAnUnderlyingAssetHeldInTheWallet(t *testing.T) {
 	aToken := common.HexToAddress("0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c")
+	dataProvider := common.HexToAddress("0x497a1994c46d4f6C864904A9f1fac6328Cb7C8a6")
 	snapshots := suppressDuplicateHoldings([]Snapshot{
 		{
 			ProtocolID: "aave-v3",
@@ -249,22 +262,104 @@ func TestSuppressDuplicateHoldingsKeepsAnUnderlyingAssetHeldInTheWallet(t *testi
 					"asset",
 					Token{ChainID: Ethereum, Address: walletTestUSDC, Decimals: 6},
 					big.NewInt(100),
-					Source{Contract: aToken, Method: "balanceOf"},
+					Source{
+						Contract: dataProvider,
+						Method:   "getUserReserveData.currentATokenBalance",
+						Holds:    []common.Address{aToken},
+					},
 				)},
 			}},
 		},
-		holdingSnapshot(holdingGroup("token", walletTestUSDC, "9")),
+		holdingSnapshot(
+			holdingGroup("token", walletTestUSDC, "9"),
+			holdingGroup("token", aToken, "100"),
+		),
 	})
-	for _, snapshot := range snapshots {
-		if snapshot.ProtocolID != walletProtocolID {
-			continue
-		}
-		if _, exists := groupByID(snapshot.Groups, walletTokenGroupID(walletTestUSDC)); !exists {
-			t.Fatal("wallet USDC was dropped because a market reports USDC as its underlying")
-		}
-		return
+	holdings := walletHoldings(snapshots)
+	if _, exists := groupByID(holdings, walletTokenGroupID(walletTestUSDC)); !exists {
+		t.Error("wallet USDC was dropped because a market reports USDC as its underlying")
 	}
-	t.Fatal("the holdings snapshot was removed entirely")
+	if _, exists := groupByID(holdings, walletTokenGroupID(aToken)); exists {
+		t.Error("the aToken is counted twice: the market already reports it as supplied USDC")
+	}
+}
+
+// An adapter often reads an amount through a converter, an oracle or a data provider and names
+// that contract in Source, or describes the read without the word balanceOf. Declared holdings
+// say which ERC-20s the account held, so the wallet drops exactly those and keeps the rest.
+func TestSuppressDuplicateHoldingsDropsDeclaredHoldings(t *testing.T) {
+	converter := common.HexToAddress("0x0000000000000000000000000000000000000c01")
+	receipt := common.HexToAddress("0x0000000000000000000000000000000000000a01")
+	gauge := common.HexToAddress("0x0000000000000000000000000000000000000a02")
+	tests := []struct {
+		name       string
+		source     Source
+		suppressed []common.Address
+		kept       []common.Address
+	}{
+		{
+			// The converter is not held: declared holdings replace the inference from Contract.
+			name: "the source is a converter",
+			source: Source{
+				Contract: converter, Method: "mETHToETH(mETH.balanceOf)",
+				Holds: []common.Address{receipt},
+			},
+			suppressed: []common.Address{receipt},
+			kept:       []common.Address{converter, walletTestUSDC},
+		},
+		{
+			name: "the method never says balanceOf",
+			source: Source{
+				Contract: receipt, Method: "convertToAssets(vault balance + gauge balance)",
+				Holds: []common.Address{receipt, gauge},
+			},
+			suppressed: []common.Address{receipt, gauge},
+			kept:       []common.Address{walletTestUSDC},
+		},
+		{
+			// A staking contract's internal balance is no ERC-20, whatever the method mentions.
+			name: "an empty declaration holds nothing",
+			source: Source{
+				Contract: receipt, Method: "Unipool.balanceOf * pair.getReserves / totalSupply",
+				Holds: []common.Address{},
+			},
+			kept: []common.Address{receipt, walletTestUSDC},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			holdings := make([]Group, 0, len(test.suppressed)+len(test.kept))
+			for _, token := range append(append([]common.Address(nil), test.suppressed...), test.kept...) {
+				holdings = append(holdings, holdingGroup("token", token, "1"))
+			}
+			remaining := walletHoldings(suppressDuplicateHoldings([]Snapshot{
+				{
+					ProtocolID: "protocol",
+					ChainID:    Ethereum,
+					Groups: []Group{{
+						ID: "position",
+						Components: []Component{NewComponent(
+							"asset",
+							Token{ChainID: Ethereum, Address: walletTestUSDC, Decimals: 6},
+							big.NewInt(1),
+							test.source,
+						)},
+					}},
+				},
+				holdingSnapshot(holdings...),
+			}))
+			for _, token := range test.suppressed {
+				if _, exists := groupByID(remaining, walletTokenGroupID(token)); exists {
+					t.Errorf("%s is counted twice: the position already consumed it", token)
+				}
+			}
+			for _, token := range test.kept {
+				if _, exists := groupByID(remaining, walletTokenGroupID(token)); !exists {
+					t.Errorf("%s was dropped although no position holds it", token)
+				}
+			}
+		})
+	}
 }
 
 func TestSuppressDuplicateHoldingsIgnoresOtherChains(t *testing.T) {

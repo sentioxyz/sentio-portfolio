@@ -54,6 +54,16 @@ type Token struct {
 type Source struct {
 	Contract common.Address `json:"contract"`
 	Method   string         `json:"method"`
+	// Holds names the ERC-20s whose balance in the account this component consumed: the LST a
+	// conversion started from, the aToken behind a supply, the vault and gauge shares a deposit
+	// sums. The wallet reports every ERC-20 an account holds, so a token named here is dropped
+	// from its holdings instead of being counted a second time.
+	//
+	// Contract and Method say where the amount came from, which is often a converter, an oracle
+	// or a data provider rather than the token itself; only Holds says what the account holds.
+	// An empty, non-nil Holds says the component consumed no ERC-20 balance at all; a nil one
+	// leaves the decision to an older inference from Contract and Method (see heldContracts).
+	Holds []common.Address `json:"-"`
 }
 
 // PriceBasis values a component whose own token no price source quotes, by naming a token that

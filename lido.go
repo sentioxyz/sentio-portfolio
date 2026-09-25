@@ -342,7 +342,11 @@ func readLidoEarnETH(
 		"asset",
 		lidoStETHToken,
 		stETHAmount,
-		Source{Contract: lidoEarnETHVaultAddress, Method: "balanceOf + oracle.getReport(wstETH)"},
+		Source{
+			Contract: lidoEarnETHVaultAddress,
+			Method:   "balanceOf + oracle.getReport(wstETH)",
+			Holds:    []common.Address{lidoEarnETHAddress},
+		},
 	)
 	component.Metadata = map[string]any{"shares": shares.String(), "oracle": oracle}
 	return &Group{

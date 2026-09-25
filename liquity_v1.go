@@ -242,7 +242,15 @@ func (a *liquityV1Adapter) Positions(
 			}{{known[token0], reserve0}, {known[token1], reserve1}} {
 				amount := new(big.Int).Mul(stakedLP, row.reserve)
 				amount.Div(amount, totalSupply)
-				unipool = appendLiquityComponent(unipool, "asset", row.token, amount, liquityPair, "Unipool.balanceOf * pair.getReserves / totalSupply")
+				if amount.Sign() > 0 {
+					// The staked LP is Unipool's internal balance, not an ERC-20 the account holds;
+					// declaring nothing keeps any unstaked LP of the pair in the wallet.
+					unipool = append(unipool, NewComponent("asset", row.token, amount, Source{
+						Contract: liquityPair,
+						Method:   "Unipool.balanceOf * pair.getReserves / totalSupply",
+						Holds:    []common.Address{},
+					}))
+				}
 			}
 		}
 		unipool = appendLiquityComponent(unipool, "reward", liquityLQTY, reward, liquityUniPool, "earned")

@@ -97,6 +97,10 @@ func TestEtherfiVaultComponentPreservesPinnedOptimismSharesAndRates(t *testing.T
 			if component.Source.Contract != position.Accountant || component.Source.Method != "getRateSafe" {
 				t.Errorf("source = %+v", component.Source)
 			}
+			// The rate comes from the accountant, but the account holds the vault's shares.
+			if held := heldContracts(component.Source); len(held) != 1 || held[0] != position.Vault {
+				t.Errorf("declared holdings = %v, want the vault share %s", held, position.Vault)
+			}
 			if component.Metadata["sharesRaw"] != test.shares || component.Metadata["rateRaw"] != test.rate {
 				t.Errorf("metadata = %+v", component.Metadata)
 			}

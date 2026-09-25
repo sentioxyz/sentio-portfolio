@@ -1602,16 +1602,18 @@ func (a *PendleAdapter) marketGroups(
 				selectedLeg = preview
 			}
 		}
+		// Both reserve legs are shares of the one LP balance the account holds.
+		lpHeld := []common.Address{market}
 		if selectedLeg.amount != nil {
 			components = append(components, NewComponent(
 				"asset", tokens[selectedLeg.token], selectedLeg.amount,
-				Source{Contract: market, Method: selectedLeg.source},
+				Source{Contract: market, Method: selectedLeg.source, Holds: lpHeld},
 			))
 		}
 		if ptAmount.Sign() > 0 {
 			if ptToken, known := tokens[state.pt]; known {
 				ptComponent := NewComponent("asset", ptToken, ptAmount,
-					Source{Contract: market, Method: "readState(totalPt)"})
+					Source{Contract: market, Method: "readState(totalPt)", Holds: lpHeld})
 				// The reserve is reported as the PT itself, the way DeBank reports it, and priced
 				// through the same accounting asset as the SY leg. Both legs therefore value when
 				// that asset is usable, while malformed optional metadata leaves the PT unpriced.

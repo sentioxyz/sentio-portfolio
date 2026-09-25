@@ -78,8 +78,20 @@ token discovery: assets held only at the requested block may be absent. Pinned
 quantities do not establish a complete historical token universe.
 
 The provider is not the price source. `PriceProvider` alone supplies valuation.
-`suppressDuplicateHoldings` uses `Source.Contract` and the attributed account to
-avoid counting tokens already read by protocol adapters, so preserve provenance.
+
+`suppressDuplicateHoldings` drops a holding when a protocol component on the
+same chain and attributed account declares that token in `Source.Holds`. An
+adapter that consumes an ERC-20 balance of the account — an LST it converts,
+the aToken or debt token behind a data provider's amount, vault or gauge
+shares, an LP token it decomposes — must declare the token there, whatever
+`Source.Contract` names: the converter, oracle or data provider an amount came
+from is provenance, not a holding. Declare only balances the component
+consumed; a declared token disappears from the wallet, so naming an underlying
+the account also holds outright hides a real balance. A component that consumed
+no ERC-20 balance — a staking contract's internal balance, say — declares an
+empty `Holds`. Only a nil `Holds` falls back to treating `Source.Contract` as
+held when `Source.Method` mentions `balanceOf`, an inference that misses every
+other shape, so new code declares explicitly.
 
 ## Sui reads
 

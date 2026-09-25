@@ -70,7 +70,7 @@ func etherfiVaultComponent(
 		"asset",
 		baseToken,
 		amount,
-		Source{Contract: position.Accountant, Method: rateMethod},
+		Source{Contract: position.Accountant, Method: rateMethod, Holds: []common.Address{position.Vault}},
 	)
 	component.AmountDenominatorRaw = amountDenominator.String()
 	component.Metadata = map[string]any{

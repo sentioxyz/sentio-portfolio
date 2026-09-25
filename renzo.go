@@ -232,7 +232,11 @@ func (a *RenzoAdapter) readMainnetReceipts(
 			}
 			component := NewComponent(
 				"asset", renzoETH, amount,
-				Source{Contract: oracle, Method: "calculateRedeemAmount(balanceOf,totalSupply,totalTVL)"},
+				Source{
+					Contract: oracle,
+					Method:   "calculateRedeemAmount(balanceOf,totalSupply,totalTVL)",
+					Holds:    []common.Address{renzoEZETH.Address},
+				},
 			)
 			component.Metadata = map[string]any{
 				"ezETHRaw": balance.String(), "totalTVLRaw": totalTVL.String(),
@@ -497,7 +501,7 @@ func (a *RenzoAdapter) readEigenVaults(
 			ID: vault.ID, Label: vault.Label,
 			Components: []Component{NewComponent(
 				"asset", vault.Underlying, amount,
-				Source{Contract: vault.Address, Method: "userUnderlying"},
+				Source{Contract: vault.Address, Method: "userUnderlying", Holds: []common.Address{vault.Address}},
 			)},
 			Metadata: map[string]any{"vault": vault.Address},
 		})

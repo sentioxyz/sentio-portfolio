@@ -134,8 +134,10 @@ func (a *StakeWiseAdapter) Positions(
 		if assets.Sign() == 0 {
 			continue
 		}
+		// An ERC-20 vault's getShares is its balanceOf; other vaults' shares are no wallet token.
 		component := NewComponent("asset", eth, assets, Source{
 			Contract: holding.vault, Method: "convertToAssets(getShares(account))",
+			Holds: []common.Address{holding.vault},
 		})
 		component.Metadata = map[string]any{"shares": holding.shares.String()}
 		groups = append(groups, Group{

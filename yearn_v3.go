@@ -431,11 +431,20 @@ func (a *yearnV3Adapter) Positions(
 				return nil, conversionErr
 			}
 			if amount.Sign() > 0 {
+				held := make([]common.Address, 0, 2)
+				if directShares.Sign() > 0 {
+					held = append(held, vault.Address)
+				}
+				// A VeYFI gauge's shares are an ERC-20 the account holds; V3 Staking keeps its
+				// balances internally.
+				if vault.Staking != nil && vault.Staking.Source == "VeYFI" && state.shares.Sign() > 0 {
+					held = append(held, vault.Staking.Address)
+				}
 				component := NewComponent(
 					"asset",
 					underlying,
 					amount,
-					Source{Contract: vault.Address, Method: "balanceOf*pricePerShare"},
+					Source{Contract: vault.Address, Method: "balanceOf*pricePerShare", Holds: held},
 				)
 				pathStrings := make([]string, len(path))
 				for index, address := range path {
