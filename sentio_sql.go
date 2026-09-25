@@ -22,8 +22,11 @@ const (
 	// deadline the caller's context already carries. A statement still unfinished then is
 	// cancelled and reported as too costly, so a range read asks for fewer samples.
 	sentioSQLStatementTimeout = 2 * time.Minute
-	sentioSQLPollInitial      = 100 * time.Millisecond
-	sentioSQLPollMax          = 2 * time.Second
+	// Polls start at sentioSQLPollInitial and double to sentioSQLPollMax. The cap bounds how long
+	// a finished result waits to be seen: statements usually take a second or two, and a poll only
+	// reads the execution's row.
+	sentioSQLPollInitial = 100 * time.Millisecond
+	sentioSQLPollMax     = 500 * time.Millisecond
 	// sentioSQLCancelTimeout bounds the best-effort cancellation of a statement given up on.
 	sentioSQLCancelTimeout = 5 * time.Second
 )
