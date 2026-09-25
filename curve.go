@@ -705,8 +705,16 @@ func curveLendingPrincipalGroups(
 				return nil, err
 			}
 			if assets.Sign() > 0 {
+				held := make([]common.Address, 0, 2)
+				if item.directShares.Sign() > 0 {
+					held = append(held, item.market.vault)
+				}
+				if item.gaugeShares.Sign() > 0 {
+					held = append(held, item.market.gauge)
+				}
 				component := NewComponent("asset", borrowed, assets, Source{
 					Contract: item.market.vault, Method: "convertToAssets(vault balance + gauge balance)",
+					Holds: held,
 				})
 				component.Metadata = map[string]any{
 					"directShares": item.directShares.String(), "gaugeShares": item.gaugeShares.String(),

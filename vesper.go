@@ -422,9 +422,11 @@ func (a *VesperAdapter) Positions(
 			if decodeErr != nil {
 				return nil, fmt.Errorf("Vesper locked VSP rewards: %w", decodeErr)
 			}
+			// esVSP is this lock's escrow token: its wallet balance is the position reported here as
+			// locked VSP, not a separate holding.
 			components := []Component{NewComponent(
 				"asset", vesperVSP, locked,
-				Source{Contract: vesperLockedVSP, Method: "locked"},
+				Source{Contract: vesperLockedVSP, Method: "locked", Holds: []common.Address{vesperLockedVSP}},
 			)}
 			claimableRow, claimableErr := client.Call(
 				ctx, block, rewardsAddress, vesperLockedRewardsABI, "claimableRewards", account,

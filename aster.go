@@ -211,6 +211,8 @@ func (a *AsterAdapter) readYieldPositions(
 		if err != nil || amount == nil || amount.Sign() <= 0 || underlyingAddress == (common.Address{}) {
 			return groups, fmt.Errorf("%s conversion returned invalid state", state.position.Receipt.Symbol)
 		}
+		// Every branch names its minter, but what it converted is the receipt balance read above.
+		source.Holds = []common.Address{state.position.Receipt.Address}
 		// Report the minter's own underlying, whatever it is. asBNB converts through slisBNB,
 		// so the amount above is slisBNB-denominated; naming it BNB priced a slisBNB quantity
 		// at the BNB price and understated the position by the slisBNB/BNB premium.

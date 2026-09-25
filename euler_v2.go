@@ -24,6 +24,7 @@ var (
       {"type":"function","name":"balanceOf","stateMutability":"view","inputs":[{"name":"account","type":"address"}],"outputs":[{"type":"uint256"}]},
       {"type":"function","name":"convertToAssets","stateMutability":"view","inputs":[{"name":"shares","type":"uint256"}],"outputs":[{"type":"uint256"}]},
       {"type":"function","name":"debtOf","stateMutability":"view","inputs":[{"name":"account","type":"address"}],"outputs":[{"type":"uint256"}]},
+      {"type":"function","name":"dToken","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
       {"type":"function","name":"balanceForwarderEnabled","stateMutability":"view","inputs":[{"name":"account","type":"address"}],"outputs":[{"type":"bool"}]},
       {"type":"function","name":"name","stateMutability":"view","inputs":[],"outputs":[{"type":"string"}]},
       {"type":"function","name":"symbol","stateMutability":"view","inputs":[],"outputs":[{"type":"string"}]}
@@ -182,6 +183,8 @@ type eulerPositionState struct {
 	balanceForwarderEnabled bool
 	name                    string
 	symbol                  string
+	// debtToken is the EVault's DToken, a read-only ERC-20 whose balance is the account's debt.
+	debtToken common.Address
 }
 
 func (a *EulerV2Adapter) ownedRefs(
@@ -254,6 +257,7 @@ func (a *EulerV2Adapter) readStates(
 			calls = append(calls,
 				ContractCall{Contract: ref.Vault, ABI: eulerVaultABI, Method: "debtOf", Args: []any{ref.Account}},
 				ContractCall{Contract: ref.Vault, ABI: eulerVaultABI, Method: "balanceForwarderEnabled", Args: []any{ref.Account}},
+				ContractCall{Contract: ref.Vault, ABI: eulerVaultABI, Method: "dToken"},
 			)
 		} else {
 			calls = append(calls,
@@ -292,6 +296,13 @@ func (a *EulerV2Adapter) readStates(
 			state.balanceForwarderEnabled, err = BoolAt(rows[4], 0)
 			if err != nil {
 				return nil, fmt.Errorf("vault %s reward forwarding: %w", ref.Vault, err)
+			}
+			state.debtToken, err = AddressAt(rows[5], 0)
+			if err != nil {
+				return nil, fmt.Errorf("vault %s debt token: %w", ref.Vault, err)
+			}
+			if state.debt.Sign() > 0 && state.debtToken == (common.Address{}) {
+				return nil, fmt.Errorf("vault %s returned zero debt token", ref.Vault)
 			}
 		} else {
 			state.name, err = StringAt(rows[3], 0)
@@ -546,7 +557,7 @@ func (a *EulerV2Adapter) buildGroups(
 			if state.debt.Sign() > 0 {
 				component := NewComponent(
 					"debt", Token{ChainID: block.ChainID, Address: state.asset}, state.debt,
-					Source{Contract: state.ref.Vault, Method: "debtOf"},
+					Source{Contract: state.ref.Vault, Method: "debtOf", Holds: []common.Address{state.debtToken}},
 				)
 				component.Metadata = map[string]any{
 					"account": state.ref.Account, "vault": state.ref.Vault, "marketId": marketID,
@@ -612,7 +623,12 @@ func (a *EulerV2Adapter) buildGroups(
 	for _, vesting := range vestings {
 		component := NewComponent(
 			"asset", chain.EUL, vesting.Amount,
-			Source{Contract: chain.RewardEUL, Method: "getLockedAmounts/getWithdrawAmountsByLockTimestamp"},
+			// rEUL holds every lock as the account's own rEUL balance.
+			Source{
+				Contract: chain.RewardEUL,
+				Method:   "getLockedAmounts/getWithdrawAmountsByLockTimestamp",
+				Holds:    []common.Address{chain.RewardEUL},
+			},
 		)
 		component.Metadata = map[string]any{
 			"account": owner, "lockTimestamp": vesting.Timestamp.String(),

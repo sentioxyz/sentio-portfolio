@@ -628,7 +628,11 @@ func (a *MethAdapter) Positions(
 			"asset",
 			methETHToken,
 			amount,
-			Source{Contract: methStakingAddress, Method: "mETHToETH(mETH.balanceOf)"},
+			Source{
+				Contract: methStakingAddress,
+				Method:   "mETHToETH(mETH.balanceOf)",
+				Holds:    []common.Address{methTokenAddress},
+			},
 		)
 		component.Metadata = map[string]any{"shares": shares.String()}
 		groups = append(groups, Group{

@@ -332,7 +332,8 @@ func (a *FraxlendAdapter) Positions(
 				"asset",
 				assetToken,
 				supplied,
-				Source{Contract: row.pair, Method: accountingMode},
+				// The pair is also the ERC-20 of its lenders' shares.
+				Source{Contract: row.pair, Method: accountingMode, Holds: []common.Address{row.pair}},
 			)
 			component.Metadata = map[string]any{"shares": row.assetShares.String()}
 			components = append(components, component)

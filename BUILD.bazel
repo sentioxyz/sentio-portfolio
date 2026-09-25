@@ -188,6 +188,7 @@ go_test(
         "valuation_test.go",
         "vesper_test.go",
         "wallet_test.go",
+        "wallet_holds_test.go",
         "wallet_provider_test.go",
         "yearn_v3_test.go",
     ],

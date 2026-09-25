@@ -3,6 +3,7 @@ package portfolio
 import (
 	"context"
 	"fmt"
+	"math/big"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -305,7 +306,7 @@ func decodeAaveIncentiveAssets(
 				len(row),
 			)
 		}
-		for tokenIndex, tokenKind := range []string{"aToken", "stable debt token", "variable debt token"} {
+		for tokenIndex, tokenKind := range aaveReserveTokenKinds {
 			// Aave's V2 and V3 reward controllers read every supplied asset
 			// through the scaled-balance interface. Stable debt tokens do not
 			// implement that interface, so production callers exclude them.
@@ -354,6 +355,60 @@ func readAaveIncentiveAssets(
 		return nil, err
 	}
 	return decodeAaveIncentiveAssets(reserves, tokenRows, includeStableDebt)
+}
+
+// aaveReserveTokenKinds names the tokens getReserveTokensAddresses returns, in its order.
+var aaveReserveTokenKinds = [3]string{"aToken", "stable debt token", "variable debt token"}
+
+// aaveUserReserve is an account's position in one reserve of a market.
+type aaveUserReserve struct {
+	token        Token
+	supply       *big.Int
+	stableDebt   *big.Int
+	variableDebt *big.Int
+	collateral   bool
+	// holds are the reserve's tokens in aaveReserveTokenKinds order: the account holds its supply
+	// as the aToken and its debt as a debt token, which the data provider's amounts never name.
+	holds [3]common.Address
+}
+
+// readAaveHeldTokens fills in the tokens each position is held as. The wallet reports every
+// ERC-20 the account holds, aTokens and debt tokens included, and drops only those a component
+// declares. Only reserves the account has a position in are looked up.
+func readAaveHeldTokens(
+	ctx context.Context,
+	client *RPCClient,
+	block BlockRef,
+	dataProvider common.Address,
+	positions []aaveUserReserve,
+) error {
+	calls := make([]ContractCall, len(positions))
+	for index, position := range positions {
+		calls[index] = ContractCall{
+			Contract: dataProvider,
+			ABI:      aaveDataProviderABI,
+			Method:   "getReserveTokensAddresses",
+			Args:     []any{position.token.Address},
+		}
+	}
+	rows, err := client.ParallelCalls(ctx, block, calls)
+	if err != nil {
+		return err
+	}
+	for index, row := range rows {
+		position := &positions[index]
+		for tokenIndex, amount := range []*big.Int{position.supply, position.stableDebt, position.variableDebt} {
+			address, decodeErr := AddressAt(row, tokenIndex)
+			if decodeErr != nil {
+				return fmt.Errorf("%s %s: %w", position.token.Symbol, aaveReserveTokenKinds[tokenIndex], decodeErr)
+			}
+			if amount.Sign() > 0 && address == (common.Address{}) {
+				return fmt.Errorf("%s returned zero %s", position.token.Symbol, aaveReserveTokenKinds[tokenIndex])
+			}
+			position.holds[tokenIndex] = address
+		}
+	}
+	return nil
 }
 
 func readSparkRewardComponents(
@@ -505,7 +560,7 @@ func (a *AaveAdapter) Positions(
 		if err != nil {
 			return nil, fmt.Errorf("%s user reserves: %w", market.Label, err)
 		}
-		components := make([]Component, 0)
+		positions := make([]aaveUserReserve, 0)
 		for index, reserve := range reserves {
 			userData := results[index*2]
 			decimalsData := results[index*2+1]
@@ -529,38 +584,65 @@ func (a *AaveAdapter) Positions(
 			if err != nil {
 				return nil, fmt.Errorf("%s %s decimals are invalid", market.Label, reserve.Symbol)
 			}
-			token := Token{
-				ChainID:  block.ChainID,
-				Address:  reserve.TokenAddress,
-				Symbol:   reserve.Symbol,
-				Decimals: decimals,
+			if supply.Sign() == 0 && stableDebt.Sign() == 0 && variableDebt.Sign() == 0 {
+				continue
 			}
-			if supply.Sign() > 0 {
+			positions = append(positions, aaveUserReserve{
+				token: Token{
+					ChainID:  block.ChainID,
+					Address:  reserve.TokenAddress,
+					Symbol:   reserve.Symbol,
+					Decimals: decimals,
+				},
+				supply:       supply,
+				stableDebt:   stableDebt,
+				variableDebt: variableDebt,
+				collateral:   collateral,
+			})
+		}
+		if err := readAaveHeldTokens(ctx, client, block, market.DataProvider, positions); err != nil {
+			return nil, fmt.Errorf("%s reserve tokens: %w", market.Label, err)
+		}
+		components := make([]Component, 0, len(positions))
+		for _, position := range positions {
+			if position.supply.Sign() > 0 {
 				component := NewComponent(
 					"asset",
-					token,
-					supply,
-					Source{Contract: market.DataProvider, Method: "getUserReserveData.currentATokenBalance"},
+					position.token,
+					position.supply,
+					Source{
+						Contract: market.DataProvider,
+						Method:   "getUserReserveData.currentATokenBalance",
+						Holds:    []common.Address{position.holds[0]},
+					},
 				)
-				component.Metadata = map[string]any{"collateral": collateral}
+				component.Metadata = map[string]any{"collateral": position.collateral}
 				components = append(components, component)
 			}
-			if stableDebt.Sign() > 0 {
+			if position.stableDebt.Sign() > 0 {
 				component := NewComponent(
 					"debt",
-					token,
-					stableDebt,
-					Source{Contract: market.DataProvider, Method: "getUserReserveData.currentStableDebt"},
+					position.token,
+					position.stableDebt,
+					Source{
+						Contract: market.DataProvider,
+						Method:   "getUserReserveData.currentStableDebt",
+						Holds:    []common.Address{position.holds[1]},
+					},
 				)
 				component.Metadata = map[string]any{"debtType": "stable"}
 				components = append(components, component)
 			}
-			if variableDebt.Sign() > 0 {
+			if position.variableDebt.Sign() > 0 {
 				component := NewComponent(
 					"debt",
-					token,
-					variableDebt,
-					Source{Contract: market.DataProvider, Method: "getUserReserveData.currentVariableDebt"},
+					position.token,
+					position.variableDebt,
+					Source{
+						Contract: market.DataProvider,
+						Method:   "getUserReserveData.currentVariableDebt",
+						Holds:    []common.Address{position.holds[2]},
+					},
 				)
 				component.Metadata = map[string]any{"debtType": "variable"}
 				components = append(components, component)

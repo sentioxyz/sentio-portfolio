@@ -554,6 +554,7 @@ func (a *StaderAdapter) polygonPositions(
 			Source{
 				Contract: sourceContract,
 				Method:   sourceMethod,
+				Holds:    []common.Address{deployment.liquidToken.Address},
 			},
 		)
 		component.Metadata = metadata
@@ -906,7 +907,11 @@ func (a *StaderAdapter) ethereumPositions(
 			"asset",
 			staderETHToken,
 			amount,
-			Source{Contract: staderStakePoolManager, Method: "convertToAssets(ETHx.balanceOf)"},
+			Source{
+				Contract: staderStakePoolManager,
+				Method:   "convertToAssets(ETHx.balanceOf)",
+				Holds:    []common.Address{staderETHxAddress},
+			},
 		)
 		component.Metadata = map[string]any{"shares": ethxShares.String()}
 		groups = append(groups, Group{

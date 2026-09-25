@@ -298,7 +298,11 @@ func readAaveUmbrellaPrincipal(
 	if err != nil {
 		return Component{}, fmt.Errorf("decode converted stake shares: %w", err)
 	}
-	source := Source{Contract: stake.StakeToken, Method: "convertToAssets(balanceOf)"}
+	source := Source{
+		Contract: stake.StakeToken,
+		Method:   "convertToAssets(balanceOf)",
+		Holds:    []common.Address{stake.StakeToken},
+	}
 	metadata := map[string]any{
 		"shares":     shares.String(),
 		"stakeToken": stake.StakeToken,
@@ -324,7 +328,11 @@ func readAaveUmbrellaPrincipal(
 		if decodeErr != nil {
 			return Component{}, fmt.Errorf("decode nested assets: %w", decodeErr)
 		}
-		source = Source{Contract: configuredAsset, Method: "convertToAssets"}
+		source = Source{
+			Contract: configuredAsset,
+			Method:   "convertToAssets",
+			Holds:    []common.Address{stake.StakeToken},
+		}
 		metadata["wrappedShares"] = rows[1][0].(*big.Int).String()
 		metadata["wrapper"] = configuredAsset
 		configuredAsset = asset
