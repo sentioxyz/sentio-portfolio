@@ -82,7 +82,7 @@ func newSQLPortfolioFixture(t *testing.T, protocol string, base *latestSuiFixtur
 	for _, coin := range base.metadata {
 		fixture.rows = append(fixture.rows, sqlFixtureRow("metadata", suiSQLMetadata{Status: "found", CoinType: coin.CoinType, Decimals: fmt.Sprint(coin.Decimals), Symbol: coin.Symbol, Name: coin.Name, Checkpoint: fmt.Sprint(pin.Sequence), MaterializedAtCheckpoint: fmt.Sprint(pin.Sequence + 100)}))
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+	server := httptest.NewServer(asyncSQLHandler(t, func(w http.ResponseWriter, request *http.Request) {
 		fixture.calls++
 		var body struct {
 			Version  uint64 `json:"version"`
@@ -90,12 +90,12 @@ func newSQLPortfolioFixture(t *testing.T, protocol string, base *latestSuiFixtur
 				SQL  string `json:"sql"`
 				Size int    `json:"size"`
 			} `json:"sqlQuery"`
-			Sync bool `json:"sync_v1"`
+			Engine string `json:"engine"`
 		}
 		if request.Method != "POST" || request.URL.Path != "/sql/execute" {
 			t.Errorf("unexpected non-SQL request %s %s", request.Method, request.URL.Path)
 		}
-		if json.NewDecoder(request.Body).Decode(&body) != nil || body.Version != 1 || !body.Sync || body.SQLQuery.Size != suiSQLRowLimit || !strings.HasPrefix(body.SQLQuery.SQL, "WITH ") {
+		if json.NewDecoder(request.Body).Decode(&body) != nil || body.Version != 1 || body.Engine != "LARGE" || body.SQLQuery.Size != suiSQLRowLimit || !strings.HasPrefix(body.SQLQuery.SQL, "WITH ") {
 			t.Error("invalid version-pinned SQL request")
 		}
 		response := map[string]any{"result": map[string]any{"rows": fixture.rows, "cursor": ""}}
@@ -109,6 +109,7 @@ func newSQLPortfolioFixture(t *testing.T, protocol string, base *latestSuiFixtur
 	if err != nil {
 		t.Fatal(err)
 	}
+	fastSQL(reader.api)
 	return fixture, reader
 }
 func newSuilendIndexFixture(t *testing.T, base *latestSuiFixture) (*sqlPortfolioFixture, *SuilendHistoryReader) {
@@ -330,7 +331,7 @@ func TestSuiSQLNeverRetriesHTTPExecution(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			reader, err := NewSuilendHistoryReader(SentioIndexerConfig{SQLURL: server.URL, ProcessorVersion: "1"})
+			reader, err := NewSuilendHistoryReader(SentioIndexerConfig{SQLURL: server.URL + "/sql/execute", ProcessorVersion: "1"})
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -100,11 +100,12 @@ func (r *suiHistoryIndex) ReadRange(ctx context.Context, owner SuiAddress, from,
 }
 
 // suiSQLRangeTooCostly reports a statement that did not fit: a response past what
-// one carries, or one the client or the endpoint gave up on. Each is asked again
-// for fewer samples, which is a smaller statement rather than the same one twice;
-// any other failure ends the range.
+// one carries, one that outlived its timeout or hit an execution limit, or one
+// the client or the endpoint gave up on. Each is asked again for fewer samples,
+// which is a smaller statement rather than the same one twice; any other failure
+// ends the range.
 func suiSQLRangeTooCostly(err error) bool {
-	if errors.Is(err, errSuiSQLPaged) {
+	if errors.Is(err, errSuiSQLPaged) || errors.Is(err, errSentioSQLTooCostly) {
 		return true
 	}
 	var timeout interface{ Timeout() bool }

@@ -48,7 +48,7 @@ func newSuiRangeServer(t *testing.T, hours int) (*suiRangeServer, *suiHistoryInd
 			SchemaVersion: "2", StartCheckpoint: fmt.Sprint(s.start), MaterializedAtCheckpoint: fmt.Sprint(cp + 1000), NextCheckpoint: fmt.Sprint(cp + 1000),
 			NextTimestampMs: fmt.Sprint(ts.Add(time.Hour).UnixMilli()), PreviousCheckpoint: fmt.Sprint(previous), ObjectCount: "0", ValueCount: "0"})
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+	server := httptest.NewServer(asyncSQLHandler(t, func(w http.ResponseWriter, request *http.Request) {
 		var body struct {
 			SQLQuery struct {
 				SQL string `json:"sql"`
@@ -90,6 +90,7 @@ func newSuiRangeServer(t *testing.T, hours int) (*suiRangeServer, *suiHistoryInd
 	if err != nil {
 		t.Fatal(err)
 	}
+	fastSQL(index.api)
 	return s, index, base
 }
 

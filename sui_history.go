@@ -2,6 +2,7 @@ package portfolio
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -17,6 +18,7 @@ type suiHistoryIndex struct {
 	start            uint64
 	api              *sentioAPIClient
 	config           SentioIndexerConfig
+	sql              sentioSQLEndpoints
 	engine           *Engine
 }
 
@@ -44,7 +46,11 @@ func newSuiHistoryIndex(config SentioIndexerConfig, protocolID, name string, sta
 		return nil, fmt.Errorf("Sui SQL endpoint version mismatch")
 	}
 	config.SQLURL = endpoint.String()
-	return &suiHistoryIndex{api: newSentioAPIClient(), config: config, protocolID: protocolID, name: name, start: start}, nil
+	sql, err := newSentioSQLEndpoints(config.SQLURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Sui SQL endpoint")
+	}
+	return &suiHistoryIndex{api: newSentioAPIClient(), config: config, sql: sql, protocolID: protocolID, name: name, start: start}, nil
 }
 
 func (r *suiHistoryIndex) WithEngine(engine *Engine) *suiHistoryIndex {
@@ -53,17 +59,20 @@ func (r *suiHistoryIndex) WithEngine(engine *Engine) *suiHistoryIndex {
 	return &copy
 }
 
-func (r *suiHistoryIndex) request(ctx context.Context, method, endpoint string, body, out any) error {
+// statement runs one SQL statement against the pinned version, holding a slot of the engine's
+// indexer lane from submission until it finishes.
+func (r *suiHistoryIndex) statement(ctx context.Context, query string, rowLimit int) (json.RawMessage, error) {
 	if r.engine != nil {
 		scope := scopeFrom(ctx)
 		scope.lane, scope.observer, scope.protocolID = r.engine.indexerLane, r.engine.observer, r.protocolID
 		ctx = context.WithValue(ctx, scanScopeKey{}, scope)
 	}
 	if err := lockSentioLane(ctx); err != nil {
-		return err
+		return nil, err
 	}
 	defer unlockSentioLane(ctx)
-	return r.api.doJSONOnce(ctx, method, endpoint, body, out)
+	version, _ := strconv.ParseUint(r.config.ProcessorVersion, 10, 64)
+	return r.api.executeSQL(ctx, r.sql, version, query, rowLimit)
 }
 
 func indexedSuiCheckpoint(sequence, timestamp, digest string, start uint64) (SuiCheckpoint, error) {
