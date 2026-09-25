@@ -16,9 +16,10 @@ import (
 
 // asyncSQLHandler serves the async SQL routes from a handler written for the synchronous execute
 // endpoint. A submission to …/sql/execute/async runs handle as a request to …/sql/execute: a
-// non-200 answer fails the submission, and a 200 answer becomes the finished execution that
-// …/sql/query_result/{id} returns, its "error" as the execution's error. handle runs once per
-// submission, so it counts executions.
+// non-200 answer fails the submission itself, and a 200 answer becomes the execution that
+// …/sql/query_result/{id} returns, finished with its "result", or its "error" as the execution's
+// error, unless "executionStatus" holds it in another state (RUNNING, KILLED). handle runs once
+// per submission, so it counts executions.
 func asyncSQLHandler(t *testing.T, handle http.HandlerFunc) http.HandlerFunc {
 	var mu sync.Mutex
 	executions := map[string][]byte{}
@@ -50,9 +51,13 @@ func asyncSQLHandler(t *testing.T, handle http.HandlerFunc) http.HandlerFunc {
 			var outcome struct {
 				Result json.RawMessage `json:"result"`
 				Error  json.RawMessage `json:"error"`
+				Status string          `json:"executionStatus"`
 			}
 			_ = json.Unmarshal(body, &outcome)
 			info := map[string]any{"status": "FINISHED"}
+			if outcome.Status != "" {
+				info["status"] = outcome.Status
+			}
 			if len(outcome.Result) > 0 {
 				info["result"] = outcome.Result
 			}
@@ -269,6 +274,10 @@ func TestSentioSQLRetriesPollsButNeverResubmits(t *testing.T) {
 		var status sentioHTTPError
 		if !errors.As(err, &status) || status.status != http.StatusServiceUnavailable || len(server.submissions) != 1 || len(server.polls) != 0 {
 			t.Fatalf("err %v, %d submissions, %d polls", err, len(server.submissions), len(server.polls))
+		}
+		// The submission may have been accepted, so its failure is no reason to ask for less.
+		if errors.Is(err, errSentioSQLTooCostly) || suiSQLRangeTooCostly(err) {
+			t.Fatalf("failed submission %v counted as too costly", err)
 		}
 	})
 	t.Run("rejected poll", func(t *testing.T) {

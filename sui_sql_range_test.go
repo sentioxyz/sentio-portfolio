@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -21,7 +23,10 @@ type suiRangeServer struct {
 	t       *testing.T
 	start   uint64
 	samples []suiSQLSnapshot
-	limits  []int
+	// mu guards limits: the handler of a statement the client gave up on may
+	// still be running when the test reads them.
+	mu     sync.Mutex
+	limits []int
 	// respond may replace a statement's response; it returns false to keep it.
 	respond func(statement int, limit int, w http.ResponseWriter) bool
 	// pad inflates every sample row, to steer sizing by bytes.
@@ -65,8 +70,11 @@ func newSuiRangeServer(t *testing.T, hours int) (*suiRangeServer, *suiHistoryInd
 		upper, _ := strconv.ParseInt(match[1], 10, 64)
 		lower, _ := strconv.ParseInt(match[2], 10, 64)
 		limit, _ := strconv.Atoi(match[3])
+		s.mu.Lock()
 		s.limits = append(s.limits, limit)
-		if s.respond != nil && s.respond(len(s.limits)-1, limit, w) {
+		statement := len(s.limits) - 1
+		s.mu.Unlock()
+		if s.respond != nil && s.respond(statement, limit, w) {
 			return
 		}
 		rows := []suiSQLRow{}
@@ -94,6 +102,13 @@ func newSuiRangeServer(t *testing.T, hours int) (*suiRangeServer, *suiHistoryInd
 	return s, index, base
 }
 
+// statements returns the LIMIT of every statement received so far.
+func (s *suiRangeServer) statements() []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.limits)
+}
+
 func suiRangeOwner() SuiAddress {
 	owner, _ := ParseSuiAddress("0x11")
 	return owner
@@ -113,8 +128,8 @@ func TestSuiHistoryRangeReadsWindowsInOrder(t *testing.T) {
 			t.Fatalf("sample %d: %+v", i, sample)
 		}
 	}
-	if fmt.Sprint(server.limits) != "[2 8 8 8]" {
-		t.Fatalf("statement limits %v", server.limits)
+	if fmt.Sprint(server.statements()) != "[2 8 8 8]" {
+		t.Fatalf("statement limits %v", server.statements())
 	}
 }
 
@@ -127,8 +142,8 @@ func TestSuiHistoryRangeSizesStatementsByBytes(t *testing.T) {
 	if err != nil || len(samples) != 10 {
 		t.Fatalf("%d samples, %v", len(samples), err)
 	}
-	if fmt.Sprint(server.limits) != "[2 3 3 3]" {
-		t.Fatalf("statement limits %v", server.limits)
+	if fmt.Sprint(server.statements()) != "[2 3 3 3]" {
+		t.Fatalf("statement limits %v", server.statements())
 	}
 }
 
@@ -154,35 +169,66 @@ func TestSuiHistoryRangeShrinksIncompleteResponses(t *testing.T) {
 			if err != nil || len(samples) != 6 {
 				t.Fatalf("%d samples, %v", len(samples), err)
 			}
-			if fmt.Sprint(server.limits) != "[2 1 1 1 1 1 1]" {
-				t.Fatalf("statement limits %v", server.limits)
+			if fmt.Sprint(server.statements()) != "[2 1 1 1 1 1 1]" {
+				t.Fatalf("statement limits %v", server.statements())
 			}
 		})
 	}
 }
 
-// A statement the client times out or the endpoint kills is asked again for
-// fewer samples; a failure that says nothing about cost ends the range.
-func TestSuiHistoryRangeShrinksStatementsThatDoNotFinish(t *testing.T) {
-	for _, scenario := range []string{"timeout", "killed", "unauthorized"} {
+// An execution that outlives its timeout, is killed or hits a ClickHouse limit
+// is asked again for fewer samples.
+func TestSuiHistoryRangeShrinksExecutionsThatDoNotFinish(t *testing.T) {
+	for _, scenario := range []string{"statement timeout", "killed", "execution limit"} {
 		t.Run(scenario, func(t *testing.T) {
 			server, index, base := newSuiRangeServer(t, 4)
-			release := make(chan struct{})
-			defer close(release)
-			if scenario == "timeout" {
-				index.api.httpClient.Timeout = 200 * time.Millisecond
-			}
+			index.api.sql.statement = 50 * time.Millisecond
 			server.respond = func(_ int, limit int, w http.ResponseWriter) bool {
 				if limit <= 1 {
 					return false
 				}
+				outcome := map[string]any{}
 				switch scenario {
-				case "timeout":
+				case "statement timeout":
+					outcome["executionStatus"] = "RUNNING"
+				case "killed":
+					outcome["executionStatus"] = "KILLED"
+				default:
+					outcome["error"] = "Code: 159. DB::Exception: Timeout exceeded (TIMEOUT_EXCEEDED)"
+				}
+				_ = json.NewEncoder(w).Encode(outcome)
+				return true
+			}
+			samples, err := index.ReadRange(context.Background(), suiRangeOwner(), base, base.Add(3*time.Hour))
+			if err != nil || len(samples) != 4 || fmt.Sprint(server.statements()) != "[2 1 1 1 1]" {
+				t.Fatalf("%d samples, limits %v, %v", len(samples), server.statements(), err)
+			}
+		})
+	}
+}
+
+// A failed submission, even one the client or the gateway gave up on, may have
+// been accepted with only its answer lost. A smaller statement would then run
+// beside one nobody can cancel, so the range ends at the failure instead.
+func TestSuiHistoryRangeDoesNotShrinkFailedSubmissions(t *testing.T) {
+	for _, scenario := range []string{"client timeout", "gateway timeout", "client closed", "unauthorized"} {
+		t.Run(scenario, func(t *testing.T) {
+			server, index, base := newSuiRangeServer(t, 4)
+			release := make(chan struct{})
+			defer close(release)
+			if scenario == "client timeout" {
+				index.api.httpClient.Timeout = 200 * time.Millisecond
+			}
+			server.respond = func(_ int, _ int, w http.ResponseWriter) bool {
+				switch scenario {
+				case "client timeout":
 					select {
 					case <-release:
 					case <-time.After(2 * time.Second):
 					}
-				case "killed":
+				case "gateway timeout":
+					w.WriteHeader(http.StatusGatewayTimeout)
+				case "client closed":
 					w.WriteHeader(499)
 				default:
 					w.WriteHeader(http.StatusUnauthorized)
@@ -190,14 +236,8 @@ func TestSuiHistoryRangeShrinksStatementsThatDoNotFinish(t *testing.T) {
 				return true
 			}
 			samples, err := index.ReadRange(context.Background(), suiRangeOwner(), base, base.Add(3*time.Hour))
-			if scenario == "unauthorized" {
-				if err == nil || len(server.limits) != 1 {
-					t.Fatalf("%d statements, %v", len(server.limits), err)
-				}
-				return
-			}
-			if err != nil || len(samples) != 4 || fmt.Sprint(server.limits) != "[2 1 1 1 1]" {
-				t.Fatalf("%d samples, limits %v, %v", len(samples), server.limits, err)
+			if err == nil || len(samples) != 0 || fmt.Sprint(server.statements()) != "[2]" {
+				t.Fatalf("%d samples, limits %v, %v", len(samples), server.statements(), err)
 			}
 		})
 	}
@@ -214,8 +254,8 @@ func TestSuiHistoryRangeReturnsEarlierSamplesWithAFailure(t *testing.T) {
 		return false
 	}
 	samples, err := index.ReadRange(context.Background(), suiRangeOwner(), base, base.Add(11*time.Hour))
-	if err == nil || len(samples) != 2 || len(server.limits) != 2 {
-		t.Fatalf("%d samples after %d statements, %v", len(samples), len(server.limits), err)
+	if err == nil || len(samples) != 2 || len(server.statements()) != 2 {
+		t.Fatalf("%d samples after %d statements, %v", len(samples), len(server.statements()), err)
 	}
 }
 
@@ -243,8 +283,8 @@ func TestSuiHistoryRangeIsolatesASampleFailure(t *testing.T) {
 func TestSuiHistoryRangeWithoutSamples(t *testing.T) {
 	server, index, base := newSuiRangeServer(t, 2)
 	samples, err := index.ReadRange(context.Background(), suiRangeOwner(), base.Add(5*time.Hour), base.Add(9*time.Hour))
-	if err != nil || len(samples) != 0 || len(server.limits) != 1 {
-		t.Fatalf("%d samples after %d statements, %v", len(samples), len(server.limits), err)
+	if err != nil || len(samples) != 0 || len(server.statements()) != 1 {
+		t.Fatalf("%d samples after %d statements, %v", len(samples), len(server.statements()), err)
 	}
 	if _, err := index.ReadRange(context.Background(), suiRangeOwner(), base.Add(time.Hour), base); err == nil {
 		t.Fatal("accepted a reversed range")

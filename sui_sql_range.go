@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"net/http"
 	"slices"
 	"sort"
 	"strconv"
@@ -20,8 +19,8 @@ import (
 // an account's obligations name. So each statement is sized from the bytes per
 // sample the previous one returned, toward suiSQLRangeBytes, starting from a
 // small probe and never above suiSQLRangeSamples. A statement that still does not
-// fit, in its response or in the time the client or the endpoint allows it, is
-// asked again for half as many samples.
+// fit, in its result or in the time its execution is allowed, is asked again for
+// half as many samples.
 const (
 	suiSQLRangeSamples      = 8
 	suiSQLRangeProbeSamples = 2
@@ -99,27 +98,15 @@ func (r *suiHistoryIndex) ReadRange(ctx context.Context, owner SuiAddress, from,
 	return out, nil
 }
 
-// suiSQLRangeTooCostly reports a statement that did not fit: a response past what
-// one carries, one that outlived its timeout or hit an execution limit, or one
-// the client or the endpoint gave up on. Each is asked again for fewer samples,
-// which is a smaller statement rather than the same one twice; any other failure
-// ends the range.
+// suiSQLRangeTooCostly reports a statement that executed and did not fit: a
+// result past what one response carries, or an execution that outlived its
+// timeout, was killed or hit a ClickHouse execution limit. Each is asked again
+// for fewer samples, which is a smaller statement rather than the same one
+// twice. A failed submission says nothing about cost: its answer may have been
+// lost after the service accepted it, and a smaller statement would then run
+// beside one nobody can cancel. It ends the range like any other failure.
 func suiSQLRangeTooCostly(err error) bool {
-	if errors.Is(err, errSuiSQLPaged) || errors.Is(err, errSentioSQLTooCostly) {
-		return true
-	}
-	var timeout interface{ Timeout() bool }
-	if errors.As(err, &timeout) && timeout.Timeout() {
-		return true
-	}
-	var status sentioHTTPError
-	if errors.As(err, &status) {
-		switch status.status {
-		case 499, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-			return true
-		}
-	}
-	return false
+	return errors.Is(err, errSuiSQLPaged) || errors.Is(err, errSentioSQLTooCostly)
 }
 
 // suiSQLRangeLimit sizes the next statement from the last one's bytes per sample.
