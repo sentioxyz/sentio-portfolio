@@ -133,8 +133,10 @@ the `sui.rpc.v2` services a fullnode, or a proxy in front of one, serves. The ru
   transiently is asked again; the submission never is, because asking again executes the
   statement again. A statement that outlives `sentioSQLStatementTimeout` or its caller is
   cancelled, and one that ran out of time or hit a ClickHouse execution limit is reported as too
-  costly, so a range read asks for fewer samples. A server error keeps none of its message, which
-  may name the deployment.
+  costly, so a range read asks for fewer samples. A failed submission never is, whatever its
+  status: its answer may have been lost after the service accepted it, and a smaller statement
+  would run beside one nobody can cancel. A server error keeps none of its message, which may
+  name the deployment.
 - NAVI is read from the same index machinery, but only for history. Its
   `ReadLatest` stays on the node, which answers for the head rather than for the
   newest completed sample; `NaviHistoryReader.ReadAtTime` / `ReadAtCheckpoint`
