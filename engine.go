@@ -203,6 +203,9 @@ type chainScan struct {
 	accounts               []attributedAccount
 	walletProviderAccounts map[common.Address]walletProviderAccount
 	walletProviderErrors   []error
+	// walletCoverage says which tokens the wallet could not have discovered — on a chain the
+	// provider does not cover, or at a pin its sample was not taken at — where no read failed.
+	walletCoverage []error
 }
 
 func attributedGroups(
@@ -443,6 +446,17 @@ func (e *Engine) ScanWithOptions(
 							ProtocolID:   info.ID,
 							ProtocolName: info.Name,
 							Message:      PublicError(providerErr),
+						})
+					}
+					// A coverage note qualifies holdings that were read as asked: the wallet may
+					// lack a token, but every balance it reports is the one at the pin.
+					for _, note := range chain.walletCoverage {
+						response.Errors = append(response.Errors, ScanError{
+							Scope:        "coverage",
+							ChainID:      job.chainID,
+							ProtocolID:   info.ID,
+							ProtocolName: info.Name,
+							Message:      PublicError(note),
 						})
 					}
 				}

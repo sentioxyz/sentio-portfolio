@@ -73,11 +73,20 @@ An empty successful `balanceOf` return disqualifies a discovery candidate for
 that scan. Reverts, RPC failures, and malformed non-empty results remain errors.
 Do not implement an address blacklist or silently turn failed reads into zero.
 
-Provider failure, unsupported chains, and missing account results must surface
-explicit coverage errors; native balances can still be read independently.
-Historical scans with discovery sampled at another block must report incomplete
-token discovery: assets held only at the requested block may be absent. Pinned
-quantities do not establish a complete historical token universe.
+Provider failures and missing account results are errors (`protocol` scope):
+the wallet was not read as asked. A target the provider marks `Unsupported` (a
+chain it does not index) and a historical scan whose discovery was sampled at
+another block are `coverage` notes instead: every balance reported was read at
+the pin, but assets held only at the requested block may be absent. Keep the
+two apart — a host that stores only scans without chain or protocol errors
+retries the first and keeps the second. Pinned quantities do not establish a
+complete historical token universe. Native balances are read independently in
+every case.
+
+`WalletBalanceRequest.Pins` tells the provider the block each chain is pinned
+to. A provider may answer at the pin, or decide from it whether a sample it
+keeps between scans is recent enough to discover from; it changes nothing the
+kernel verifies.
 
 The provider is not the price source. `PriceProvider` alone supplies valuation.
 
