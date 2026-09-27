@@ -22,6 +22,8 @@ type laggingPool struct {
 	callBlocks    []uint64
 	// blockTimestamp, when set, chooses each block's timestamp; every block reports 1 otherwise.
 	blockTimestamp func(number uint64) uint64
+	// nativeBalance answers eth_getBalance at every block; zero when unset.
+	nativeBalance *big.Int
 }
 
 func (p *laggingPool) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -78,6 +80,12 @@ func (p *laggingPool) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			// Enough zero words to decode as whatever the caller expects. This pool exists to
 			// exercise block selection, not contract semantics.
 			return respond(call.ID, "0x"+strings.Repeat("00", 32*8), "")
+		case "eth_getBalance":
+			balance := new(big.Int)
+			if p.nativeBalance != nil {
+				balance = p.nativeBalance
+			}
+			return respond(call.ID, "0x"+balance.Text(16), "")
 		default:
 			p.t.Fatalf("unexpected method %q", call.Method)
 			return nil

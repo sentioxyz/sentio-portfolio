@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -26,6 +27,7 @@ func (p *recordingWalletBalanceProvider) WalletBalances(
 	copyRequest := WalletBalanceRequest{
 		RootAccount: request.RootAccount,
 		Targets:     append([]WalletBalanceTarget(nil), request.Targets...),
+		Pins:        maps.Clone(request.Pins),
 	}
 	p.requests = append(p.requests, copyRequest)
 	return p.result, p.err
@@ -437,6 +439,63 @@ func TestEngineUsesExactProviderBalanceAtSettledBlockAndCoinQuotePrice(t *testin
 	}
 }
 
+// A fixed-block scan discovers from the provider's newer sample and reads every balance at the
+// pin. What it may have missed is coverage, not a failed read: hosts that only accept scans
+// without chain or protocol errors keep such a sample.
+func TestEngineReportsHistoricalDiscoveryAsCoverage(t *testing.T) {
+	const pinNumber = uint64(996)
+	pool := &laggingPool{t: t, announcedHead: 1_000, servedHead: 1_000, nativeBalance: big.NewInt(5)}
+	server := httptest.NewServer(pool)
+	t.Cleanup(server.Close)
+	owner := common.HexToAddress("0x000000000000000000000000000000000000dEaD")
+	provider := &recordingWalletBalanceProvider{result: WalletBalanceResult{Chains: []WalletBalanceChain{{
+		Block: BlockRef{ChainID: Ethereum, Number: 1_000, Hash: common.HexToHash("0x1000")},
+		Accounts: []WalletBalanceAccount{{Account: owner, Balances: []WalletBalance{{
+			Token:     Token{ChainID: Ethereum, Address: walletTestUSDC, Symbol: "USDC", Decimals: 6},
+			AmountRaw: "0", MetadataComplete: true,
+		}}}},
+	}}}}
+	engine := NewEngineWithConfig(
+		map[ChainID]string{Ethereum: server.URL},
+		nil,
+		EngineConfig{WalletBalanceProvider: provider},
+	)
+
+	response := engine.ScanWithOptions(context.Background(), owner, ScanOptions{
+		ProtocolIDs: map[string]struct{}{walletProtocolID: {}},
+		ChainIDs:    map[ChainID]struct{}{Ethereum: {}},
+		BlockNumber: map[ChainID]uint64{Ethereum: pinNumber},
+		SkipPrices:  true,
+	})
+
+	if len(provider.requests) != 1 {
+		t.Fatalf("provider requests = %d, want 1", len(provider.requests))
+	}
+	if pin := provider.requests[0].Pins[Ethereum]; pin.Number != pinNumber || !pin.Fixed {
+		t.Fatalf("provider was told pin %+v, want fixed block %d", pin, pinNumber)
+	}
+	if len(response.Errors) != 1 || response.Errors[0].Scope != "coverage" ||
+		response.Errors[0].ProtocolID != walletProtocolID ||
+		!strings.Contains(response.Errors[0].Message, "historical wallet token discovery is incomplete") {
+		t.Fatalf("scan errors = %+v, want only the historical coverage note", response.Errors)
+	}
+	if len(response.Snapshots) != 1 || response.Snapshots[0].Block.Number != pinNumber {
+		t.Fatalf("snapshots = %+v, want the wallet at the pin", response.Snapshots)
+	}
+	native, exists := groupByID(response.Snapshots[0].Groups, walletNativeGroupID)
+	if !exists || native.Components[0].AmountRaw != "5" || len(response.Snapshots[0].Groups) != 1 {
+		t.Fatalf("groups = %+v, want the native balance and no zero token", response.Snapshots[0].Groups)
+	}
+	for _, block := range pool.callBlocks {
+		if block != pinNumber {
+			t.Fatalf("balance read at block %d, want every read at the pin %d", block, pinNumber)
+		}
+	}
+	if len(pool.callBlocks) == 0 {
+		t.Fatal("the discovered token was not re-read at the pin")
+	}
+}
+
 func TestConfigureWalletBalancesReportsSameHeightHashMismatch(t *testing.T) {
 	client, _ := newLaggingPoolClient(t, 1_000, 1_000)
 	initial, err := client.BlockByNumber(context.Background(), 996)
@@ -647,17 +706,47 @@ func TestConfigureWalletBalancesUsesDiscoveryForHistoricalBlocks(t *testing.T) {
 	if len(provider.requests) != 1 || chain.block != pin {
 		t.Fatal("historical discovery bypassed provider or changed the pin")
 	}
+	if got := provider.requests[0].Pins[Ethereum]; got != pin {
+		t.Fatalf("provider was asked for pin %+v, want %+v", got, pin)
+	}
 	account, ok := chain.walletProviderAccounts[owner]
 	if !ok || account.exactBlock {
 		t.Fatal("current provider balance accepted as historical")
 	}
-	if err := errors.Join(chain.walletProviderErrors...); err == nil || !strings.Contains(err.Error(), "historical wallet token discovery is incomplete") {
-		t.Fatalf("missing historical coverage error: %v", err)
+	if err := errors.Join(chain.walletCoverage...); err == nil || !strings.Contains(err.Error(), "historical wallet token discovery is incomplete") {
+		t.Fatalf("missing historical coverage note: %v", err)
+	}
+	if len(chain.walletProviderErrors) != 0 {
+		t.Fatalf("historical discovery was reported as a failed read: %v", chain.walletProviderErrors)
 	}
 	server := &walletTestServer{t: t, native: big.NewInt(0), balances: map[common.Address]*big.Int{walletTestUSDC: big.NewInt(7)}}
 	groups, err := providerWalletGroups(context.Background(), newWalletTestClient(t, server), pin, Ethereum, owner, account)
 	if err != nil || len(groups) != 1 || groups[0].Components[0].AmountRaw != "7" || server.calls != 1 {
 		t.Fatalf("historical balance was not re-read: groups=%+v calls=%d err=%v", groups, server.calls, err)
+	}
+}
+
+func TestConfigureWalletBalancesReportsUnsupportedTargetsAsCoverage(t *testing.T) {
+	owner := common.HexToAddress("0x1")
+	for name, failure := range map[string]WalletBalanceFailure{
+		"account": {ChainID: Plasma, Account: owner, Message: "discovery does not cover this chain", Unsupported: true},
+		"chain":   {ChainID: Plasma, Message: "discovery does not cover this chain", Unsupported: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			provider := &recordingWalletBalanceProvider{result: WalletBalanceResult{Failures: []WalletBalanceFailure{failure}}}
+			chain := &chainScan{block: BlockRef{ChainID: Plasma, Number: 996}, accounts: []attributedAccount{{Address: owner}}}
+			configureWalletBalances(context.Background(), provider, owner, map[ChainID]*chainScan{Plasma: chain})
+			if len(chain.walletProviderErrors) != 0 {
+				t.Fatalf("an unsupported target was reported as a failed read: %v", chain.walletProviderErrors)
+			}
+			if len(chain.walletCoverage) != 1 || !strings.Contains(chain.walletCoverage[0].Error(), "does not cover this chain") {
+				t.Fatalf("coverage = %v, want the provider's note alone", chain.walletCoverage)
+			}
+			// Without provider data the wallet adapter reads the native balance alone.
+			if chain.walletProviderAccounts != nil {
+				t.Fatalf("an unsupported target installed provider data: %+v", chain.walletProviderAccounts)
+			}
+		})
 	}
 }
 

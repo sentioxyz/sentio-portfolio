@@ -18,12 +18,14 @@ Providers may supply per-account block metadata when address batches sample
 different blocks. A candidate whose successful `balanceOf` returns empty data
 is omitted; reverts, RPC failures, and malformed non-empty results remain errors.
 
-Unavailable discovery, unsupported chains, and missing account results produce
-explicit coverage errors. Native balances can still be read independently over
-RPC. Historical scans using a provider sample from another block report that
-token discovery is incomplete: a token held only at the historical block may be
-absent from current discovery. Returned quantities remain pinned, but the
-response does not claim a complete historical token universe.
+Unavailable discovery and missing account results are `protocol` errors. A
+target the provider marks unsupported, and a historical scan using a provider
+sample from another block, are `coverage` notes: every returned quantity is
+pinned, but a token held only at the historical block may be absent from
+current discovery, so the response does not claim a complete historical token
+universe. Native balances are read independently over RPC in every case. The
+request tells the provider each chain's pin, so a provider that keeps samples
+between scans can tell whether one is recent enough to discover from.
 
 A token already counted by a protocol adapter is suppressed from wallet holdings
 by its source contract and attributed account. Final USD valuation always comes

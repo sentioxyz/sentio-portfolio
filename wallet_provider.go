@@ -37,6 +37,12 @@ type WalletBalanceRequest struct {
 	// first, batch all remaining targets, and report any uncovered target as a failure.
 	RootAccount common.Address
 	Targets     []WalletBalanceTarget
+	// Pins holds the block the scan settled each requested chain at, Fixed for a historical
+	// scan. A provider may answer at the pin, or from any other sample it labels with that
+	// sample's own block; one that keeps samples between scans can use the pin to decide
+	// whether a sample it holds is recent enough to discover from. The pin changes nothing the
+	// kernel verifies.
+	Pins map[ChainID]BlockRef
 }
 
 // WalletBalanceResult may contain verified account results together with failures.
@@ -84,6 +90,11 @@ type WalletBalanceFailure struct {
 	Account common.Address
 	Asset   *AssetID
 	Message string
+	// Unsupported marks a target the provider cannot discover tokens for at all, such as a chain
+	// it does not index, rather than a request that failed. Asking again would not change it, so
+	// the kernel reports it as a coverage note rather than an error; the native balance is still
+	// read.
+	Unsupported bool
 }
 
 type walletProviderAccount struct {
@@ -111,11 +122,13 @@ func configureWalletBalances(
 
 	targets := make([]WalletBalanceTarget, 0)
 	requested := make(map[ChainID]map[common.Address]attributedAccount)
+	pins := make(map[ChainID]BlockRef, len(chains))
 	for _, chainID := range SupportedChainIDs {
 		chain := chains[chainID]
 		if chain == nil {
 			continue
 		}
+		pins[chainID] = chain.block
 		requested[chainID] = make(map[common.Address]attributedAccount, len(chain.accounts))
 		for _, account := range chain.accounts {
 			requested[chainID][account.Address] = account
@@ -136,6 +149,7 @@ func configureWalletBalances(
 	result, providerErr := provider.WalletBalances(ctx, WalletBalanceRequest{
 		RootAccount: root,
 		Targets:     targets,
+		Pins:        pins,
 	})
 	if providerErr != nil {
 		for chainID := range requested {
@@ -171,10 +185,14 @@ func configureWalletBalances(
 		if chain == nil || requested[failure.ChainID] == nil {
 			continue
 		}
-		chain.walletProviderErrors = append(
-			chain.walletProviderErrors,
-			walletBalanceFailureError(failure),
-		)
+		if failure.Unsupported {
+			chain.walletCoverage = append(chain.walletCoverage, walletBalanceFailureError(failure))
+		} else {
+			chain.walletProviderErrors = append(
+				chain.walletProviderErrors,
+				walletBalanceFailureError(failure),
+			)
+		}
 		if failure.Account == (common.Address{}) {
 			failedChains[failure.ChainID] = struct{}{}
 			continue
@@ -297,7 +315,7 @@ func configureWalletBalances(
 			historicalCoverageGap = historicalCoverageGap || (chain.block.Fixed && !exactBlock)
 		}
 		if historicalCoverageGap {
-			chain.walletProviderErrors = append(chain.walletProviderErrors,
+			chain.walletCoverage = append(chain.walletCoverage,
 				errors.New("historical wallet token discovery is incomplete: provider holdings are from a different block; tokens held only at the requested block may be missing"))
 		}
 		chain.walletProviderAccounts = providerAccounts
