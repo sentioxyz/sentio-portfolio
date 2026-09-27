@@ -578,6 +578,31 @@ func discoveredProviderWalletGroups(
 		seen[balance.Token.Address] = struct{}{}
 		candidates = append(candidates, balance)
 	}
+	// A candidate discovered at another block may not exist yet at a historical pin, and the
+	// account cannot hold a token that does not exist. Its balanceOf there need not come back
+	// empty: a precompile-backed token reverts until it is activated, which would fail every
+	// sample before then. Live pins sit next to the provider's block, so only fixed ones pay
+	// for the check.
+	if block.Fixed && len(candidates) > 0 {
+		addresses := make([]common.Address, len(candidates))
+		for index, candidate := range candidates {
+			addresses[index] = candidate.Token.Address
+		}
+		deployed, err := client.DeployedAt(ctx, block, addresses)
+		if err != nil {
+			return groups, errors.Join(
+				errors.Join(failures...),
+				fmt.Errorf("wallet token code at settled block: %w", err),
+			)
+		}
+		existing := candidates[:0]
+		for index, candidate := range candidates {
+			if deployed[index] {
+				existing = append(existing, candidate)
+			}
+		}
+		candidates = existing
+	}
 	if len(candidates) == 0 {
 		sort.Slice(groups, func(left, right int) bool { return groups[left].ID < groups[right].ID })
 		return groups, errors.Join(failures...)

@@ -16,7 +16,9 @@ only when their block number and hash match that pin; otherwise every discovered
 balance is re-read at the settled block, including provider rows reporting zero.
 Providers may supply per-account block metadata when address batches sample
 different blocks. A candidate whose successful `balanceOf` returns empty data
-is omitted; reverts, RPC failures, and malformed non-empty results remain errors.
+is omitted, and so, at a fixed pin, is a candidate with no code at that block:
+a token that did not exist yet cannot be held. Reverts of deployed tokens, RPC
+failures, and malformed non-empty results remain errors.
 
 Unavailable discovery and missing account results are `protocol` errors. A
 target the provider marks unsupported, and a historical scan using a provider
