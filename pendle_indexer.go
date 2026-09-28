@@ -131,11 +131,8 @@ type pendleMarketsResponse struct {
 
 type pendleWalletResponse struct {
 	Data struct {
-		Checkpoints []struct {
-			BlockNumber string `json:"blockNumber"`
-			TimestampMS string `json:"timestampMs"`
-		} `json:"indexerCheckpoints"`
-		Refs []struct {
+		Checkpoints []indexerCheckpointRow `json:"indexerCheckpoints"`
+		Refs        []struct {
 			ID      string `json:"id"`
 			ChainID int    `json:"chainId"`
 			Account string `json:"account"`
@@ -192,6 +189,7 @@ func (i *pendleIndexer) graphqlPage(
 	account common.Address,
 	after string,
 	block uint64,
+	start indexStart,
 ) (pendleWalletPage, error) {
 	var payload pendleWalletResponse
 	err := i.api.doJSON(
@@ -219,16 +217,9 @@ func (i *pendleIndexer) graphqlPage(
 		}
 		return pendleWalletPage{}, pendleGraphQLError(messages)
 	}
-	if len(payload.Data.Checkpoints) != 1 {
-		return pendleWalletPage{}, fmt.Errorf("GraphQL returned %d checkpoints", len(payload.Data.Checkpoints))
-	}
-	checkpointBlock, err := strconv.ParseUint(payload.Data.Checkpoints[0].BlockNumber, 10, 64)
+	checkpointBlock, checkpointMS, err := start.checkpoint(ctx, payload.Data.Checkpoints)
 	if err != nil {
-		return pendleWalletPage{}, fmt.Errorf("invalid checkpoint block: %w", err)
-	}
-	checkpointMS, err := strconv.ParseUint(payload.Data.Checkpoints[0].TimestampMS, 10, 64)
-	if err != nil {
-		return pendleWalletPage{}, fmt.Errorf("invalid checkpoint timestamp: %w", err)
+		return pendleWalletPage{}, err
 	}
 	prefix := pendleRefRowPrefix(chainID, account)
 	page := pendleWalletPage{CheckpointBlock: checkpointBlock, CheckpointMS: checkpointMS}
@@ -473,6 +464,7 @@ func (i *pendleIndexer) indexedRefs(
 	ctx context.Context,
 	block BlockRef,
 	account common.Address,
+	start indexStart,
 ) (pendleIndexedSnapshot, error) {
 	statuses, err := i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, false)
 	if err != nil {
@@ -510,7 +502,7 @@ func (i *pendleIndexer) indexedRefs(
 	var checkpointBlock, checkpointMS uint64
 	firstPage := true
 	for {
-		page, pageErr := i.graphqlPage(ctx, block.ChainID, account, after, queryBlock)
+		page, pageErr := i.graphqlPage(ctx, block.ChainID, account, after, queryBlock, start)
 		if pageErr != nil {
 			return pendleIndexedSnapshot{}, pageErr
 		}
@@ -822,7 +814,7 @@ func (i *pendleIndexer) PositionRefs(
 			return pendleIndexedSnapshot{}, err
 		}
 		defer unlockSentioLane(ctx)
-		return i.indexedRefs(ctx, block, account)
+		return i.indexedRefs(ctx, block, account, indexStart{client: client, block: chain.ActivationBlock})
 	}()
 	if err != nil {
 		return nil, fmt.Errorf("Pendle index query: %w", err)

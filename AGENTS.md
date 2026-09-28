@@ -51,6 +51,26 @@ path. A proof established at an earlier indexed block still holds — the chain 
 block as its indexed block so the RPC tail starts there — except for an indexer with no RPC
 tail, which may only use a proof at the very block it would query.
 
+### Indexer checkpoints
+
+An index read is certified by the index's `IndexerCheckpoint` row for the chain, read by the
+same time-travel query at the query block and validated against the pin: not ahead of it, and no
+staler than the live or backfill lag. Processors write that row on a time interval, a week long
+while they backfill, and the driver fires the interval on weekly boundaries rather than at the
+processor's start block, so the first row lands up to seven days after the index starts. A query
+block before it finds no checkpoint, although the chain status proves the processor has passed
+it. `indexStart` (`sentio_checkpoint.go`) then stands the start block in as the checkpoint, with
+that block's time, and the usual validation decides: the stand-in passes only within the lag of
+the start, and a checkpoint still missing after that fails as a stale one.
+
+The start block an adapter passes must be the block the processor's checkpoint binding starts
+at on that chain, which is also the adapter's own activation for the index. An index that started
+later than the adapter's window would read as empty there for up to the backfill lag instead of
+failing, so keep the two equal when adding a chain. The presence probe never uses the stand-in: a
+chain without a checkpoint is not proven empty and runs its own pages. The Lista, Morpho, Pendle
+and Euler indexers stand the start in; the owner-token, account-request, mETH and Uniswap
+indexers still require a written checkpoint.
+
 ## Wallet holdings
 
 A host-injected `WalletBalanceProvider` is the only ERC-20 discovery source for

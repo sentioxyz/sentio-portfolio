@@ -160,7 +160,7 @@ func TestPresenceProbeSkipsChainsProvenEmpty(t *testing.T) {
 	ctx := presenceScanContext(pinned)
 
 	for _, chainID := range chains {
-		refs, err := indexer.indexedRefs(ctx, pinned[chainID], presenceTestAccount, false)
+		refs, err := indexer.indexedRefs(ctx, pinned[chainID], presenceTestAccount, false, indexStart{})
 		if err != nil {
 			t.Fatalf("chain %d: %v", chainID, err)
 		}
@@ -204,10 +204,10 @@ func TestPresenceProbeIsMemoizedPerAccount(t *testing.T) {
 	ctx := presenceScanContext(pinned)
 	other := common.HexToAddress("0x1111111111111111111111111111111111111111")
 	for _, chainID := range chains {
-		if _, err := indexer.indexedRefs(ctx, pinned[chainID], presenceTestAccount, false); err != nil {
+		if _, err := indexer.indexedRefs(ctx, pinned[chainID], presenceTestAccount, false, indexStart{}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := indexer.indexedRefs(ctx, pinned[chainID], other, false); err != nil {
+		if _, err := indexer.indexedRefs(ctx, pinned[chainID], other, false, indexStart{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -256,7 +256,7 @@ func TestPresenceProbeFallsBackWhenItCannotProveAnything(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			indexer, _ := newPresenceTestMorpho(t, test.server)
 			for _, chainID := range chains {
-				if _, err := indexer.indexedRefs(test.ctx, pinned[chainID], presenceTestAccount, test.feeMarkets); err != nil {
+				if _, err := indexer.indexedRefs(test.ctx, pinned[chainID], presenceTestAccount, test.feeMarkets, indexStart{}); err != nil {
 					t.Fatalf("chain %d: %v", chainID, err)
 				}
 			}
@@ -276,11 +276,11 @@ func TestPresenceProbeDoesNotSkipAStaleChain(t *testing.T) {
 	indexer, _ := newPresenceTestMorpho(t, server)
 	pinned := presenceTestPinned(chains...)
 	ctx := presenceScanContext(pinned)
-	if _, err := indexer.indexedRefs(ctx, pinned[Ethereum], presenceTestAccount, false); err != nil {
+	if _, err := indexer.indexedRefs(ctx, pinned[Ethereum], presenceTestAccount, false, indexStart{}); err != nil {
 		t.Fatal(err)
 	}
 	// The stale chain's page fails the same freshness check the probe applied, exactly as before.
-	if _, err := indexer.indexedRefs(ctx, pinned[BSC], presenceTestAccount, false); err == nil ||
+	if _, err := indexer.indexedRefs(ctx, pinned[BSC], presenceTestAccount, false, indexStart{}); err == nil ||
 		!strings.Contains(err.Error(), "stale") {
 		t.Fatalf("stale chain error = %v, want the checkpoint staleness error", err)
 	}
@@ -337,7 +337,7 @@ func TestPrefetchedPresenceIsReusedByTheChainJobs(t *testing.T) {
 	// A second prefetch for the same account starts nothing new.
 	indexer.prefetchPresence(ctx, presenceTestAccount)
 	for _, chainID := range chains {
-		refs, err := indexer.indexedRefs(ctx, pinned[chainID], presenceTestAccount, false)
+		refs, err := indexer.indexedRefs(ctx, pinned[chainID], presenceTestAccount, false, indexStart{})
 		if err != nil {
 			t.Fatalf("chain %d: %v", chainID, err)
 		}
@@ -373,13 +373,13 @@ func TestPresenceProofFromAnEarlierIndexedBlockStartsTheTailThere(t *testing.T) 
 
 	// Probe at processed = 1000, then the index advances to 1010 before the chain job runs.
 	indexer.prefetchPresence(ctx, presenceTestAccount)
-	if _, err := indexer.indexedRefs(ctx, pinned[Base], presenceTestAccount, false); err != nil {
+	if _, err := indexer.indexedRefs(ctx, pinned[Base], presenceTestAccount, false, indexStart{}); err != nil {
 		t.Fatal(err)
 	}
 	server.processed.Store(presenceTestBlock + 10)
 	indexer.api.statuses = make(map[string]sentioStatusCache)
 
-	refs, err := indexer.indexedRefs(ctx, pinned[Ethereum], presenceTestAccount, false)
+	refs, err := indexer.indexedRefs(ctx, pinned[Ethereum], presenceTestAccount, false, indexStart{})
 	if err != nil {
 		t.Fatal(err)
 	}

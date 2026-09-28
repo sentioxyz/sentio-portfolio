@@ -179,11 +179,8 @@ query EulerWalletPositions(
 
 type eulerGraphQLResponse struct {
 	Data struct {
-		Checkpoints []struct {
-			BlockNumber string `json:"blockNumber"`
-			TimestampMS string `json:"timestampMs"`
-		} `json:"indexerCheckpoints"`
-		Positions []struct {
+		Checkpoints []indexerCheckpointRow `json:"indexerCheckpoints"`
+		Positions   []struct {
 			ID, OwnerPrefix, Account, Vault, VaultKind string
 			ChainID                                    int `json:"chainId"`
 		} `json:"eulerPositionRefs"`
@@ -240,6 +237,7 @@ func (i *eulerIndexer) graphqlPage(
 	owner common.Address,
 	positionAfter, rewardAfter, vaultAfter string,
 	block uint64,
+	start indexStart,
 ) (eulerGraphQLPage, error) {
 	var payload eulerGraphQLResponse
 	err := i.api.doJSON(ctx, http.MethodPost, i.config.GraphQLURL, map[string]any{
@@ -262,16 +260,9 @@ func (i *eulerIndexer) graphqlPage(
 		}
 		return eulerGraphQLPage{}, fmt.Errorf("GraphQL: %s", strings.Join(messages, "; "))
 	}
-	if len(payload.Data.Checkpoints) != 1 {
-		return eulerGraphQLPage{}, fmt.Errorf("GraphQL returned %d checkpoints", len(payload.Data.Checkpoints))
-	}
-	checkpointBlock, err := strconv.ParseUint(payload.Data.Checkpoints[0].BlockNumber, 10, 64)
+	checkpointBlock, checkpointMS, err := start.checkpoint(ctx, payload.Data.Checkpoints)
 	if err != nil {
-		return eulerGraphQLPage{}, fmt.Errorf("invalid checkpoint block: %w", err)
-	}
-	checkpointMS, err := strconv.ParseUint(payload.Data.Checkpoints[0].TimestampMS, 10, 64)
-	if err != nil {
-		return eulerGraphQLPage{}, fmt.Errorf("invalid checkpoint timestamp: %w", err)
+		return eulerGraphQLPage{}, err
 	}
 	prefix := eulerOwnerPrefix(owner)
 	page := eulerGraphQLPage{
@@ -362,6 +353,7 @@ func (i *eulerIndexer) indexedSnapshot(
 	ctx context.Context,
 	block BlockRef,
 	owner common.Address,
+	start indexStart,
 ) (eulerIndexedSnapshot, error) {
 	if err := lockSentioLane(ctx); err != nil {
 		return eulerIndexedSnapshot{}, err
@@ -403,7 +395,7 @@ func (i *eulerIndexer) indexedSnapshot(
 	positionDone, rewardDone, vaultDone := false, false, false
 	for !positionDone || !rewardDone || !vaultDone {
 		page, pageErr := i.graphqlPage(
-			ctx, block.ChainID, owner, positionAfter, rewardAfter, vaultAfter, indexedBlock,
+			ctx, block.ChainID, owner, positionAfter, rewardAfter, vaultAfter, indexedBlock, start,
 		)
 		if pageErr != nil {
 			return eulerIndexedSnapshot{}, pageErr
@@ -636,7 +628,8 @@ func (i *eulerIndexer) PositionRefs(
 	block BlockRef,
 	owner common.Address,
 ) ([]eulerPositionRef, error) {
-	snapshot, err := i.indexedSnapshot(ctx, block, owner)
+	start := indexStart{client: client, block: eulerV2ChainConfigs[block.ChainID].ActivationBlock}
+	snapshot, err := i.indexedSnapshot(ctx, block, owner, start)
 	if err != nil {
 		return nil, err
 	}
