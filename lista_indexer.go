@@ -97,11 +97,8 @@ query ListaWalletPositions(
 
 type listaGraphQLResponse struct {
 	Data struct {
-		Checkpoints []struct {
-			BlockNumber string `json:"blockNumber"`
-			TimestampMS string `json:"timestampMs"`
-		} `json:"indexerCheckpoints"`
-		Markets []struct {
+		Checkpoints []indexerCheckpointRow `json:"indexerCheckpoints"`
+		Markets     []struct {
 			ID       string `json:"id"`
 			ChainID  int    `json:"chainId"`
 			Account  string `json:"account"`
@@ -139,6 +136,7 @@ func (i *listaIndexer) graphqlPage(
 	marketAfter string,
 	vaultAfter string,
 	block uint64,
+	start indexStart,
 ) (listaGraphQLPage, error) {
 	var payload listaGraphQLResponse
 	err := i.api.doJSON(
@@ -166,16 +164,9 @@ func (i *listaIndexer) graphqlPage(
 		}
 		return listaGraphQLPage{}, fmt.Errorf("GraphQL: %s", strings.Join(messages, "; "))
 	}
-	if len(payload.Data.Checkpoints) != 1 {
-		return listaGraphQLPage{}, fmt.Errorf("GraphQL returned %d checkpoints", len(payload.Data.Checkpoints))
-	}
-	checkpointBlock, err := strconv.ParseUint(payload.Data.Checkpoints[0].BlockNumber, 10, 64)
+	checkpointBlock, checkpointMS, err := start.checkpoint(ctx, payload.Data.Checkpoints)
 	if err != nil {
-		return listaGraphQLPage{}, fmt.Errorf("invalid checkpoint block: %w", err)
-	}
-	checkpointMS, err := strconv.ParseUint(payload.Data.Checkpoints[0].TimestampMS, 10, 64)
-	if err != nil {
-		return listaGraphQLPage{}, fmt.Errorf("invalid checkpoint timestamp: %w", err)
+		return listaGraphQLPage{}, err
 	}
 	prefix := listaRowPrefix(chainID, account)
 	page := listaGraphQLPage{CheckpointBlock: checkpointBlock, CheckpointMS: checkpointMS}
@@ -321,6 +312,7 @@ func (i *listaIndexer) indexedRefs(
 	block BlockRef,
 	account common.Address,
 	includeFeeMarkets bool,
+	start indexStart,
 ) (listaPositionRefs, error) {
 	statuses, err := i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, false)
 	if err != nil {
@@ -359,7 +351,7 @@ func (i *listaIndexer) indexedRefs(
 	firstPage := true
 	for !marketDone || !vaultDone {
 		page, pageErr := i.graphqlPage(
-			ctx, block.ChainID, account, marketAfter, vaultAfter, queryBlock,
+			ctx, block.ChainID, account, marketAfter, vaultAfter, queryBlock, start,
 		)
 		if pageErr != nil {
 			return listaPositionRefs{}, pageErr
@@ -533,7 +525,10 @@ func (i *listaIndexer) PositionRefs(
 			return listaPositionRefs{}, err
 		}
 		defer unlockSentioLane(ctx)
-		return i.indexedRefs(ctx, block, account, includeCurrentFeeMarkets)
+		return i.indexedRefs(
+			ctx, block, account, includeCurrentFeeMarkets,
+			indexStart{client: client, block: deployment.ActivationBlock},
+		)
 	}()
 	if err != nil {
 		return listaPositionRefs{}, fmt.Errorf("Lista index query: %w", err)
