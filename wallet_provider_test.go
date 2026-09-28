@@ -719,10 +719,51 @@ func TestConfigureWalletBalancesUsesDiscoveryForHistoricalBlocks(t *testing.T) {
 	if len(chain.walletProviderErrors) != 0 {
 		t.Fatalf("historical discovery was reported as a failed read: %v", chain.walletProviderErrors)
 	}
-	server := &walletTestServer{t: t, native: big.NewInt(0), balances: map[common.Address]*big.Int{walletTestUSDC: big.NewInt(7)}}
+	server := &walletTestServer{
+		t: t, native: big.NewInt(0),
+		balances: map[common.Address]*big.Int{walletTestUSDC: big.NewInt(7)},
+		code:     map[common.Address]struct{}{walletTestUSDC: {}},
+	}
 	groups, err := providerWalletGroups(context.Background(), newWalletTestClient(t, server), pin, Ethereum, owner, account)
 	if err != nil || len(groups) != 1 || groups[0].Components[0].AmountRaw != "7" || server.calls != 1 {
 		t.Fatalf("historical balance was not re-read: groups=%+v calls=%d err=%v", groups, server.calls, err)
+	}
+}
+
+// A token discovered from a newer sample may not exist yet at a historical pin. Its balanceOf
+// there can revert instead of returning empty data, as a precompile-backed token's does before
+// activation; the account cannot hold it, so it is skipped unread rather than failing the scan.
+// Live discovery is unchanged: a revert there is still an error.
+func TestHistoricalDiscoverySkipsTokensWithoutCodeAtThePin(t *testing.T) {
+	owner := common.HexToAddress("0x1")
+	account := walletProviderAccount{balances: []WalletBalance{
+		{Token: Token{ChainID: Ethereum, Address: walletTestUSDC, Symbol: "USDC", Decimals: 6}, AmountRaw: "0", MetadataComplete: true},
+		{Token: Token{ChainID: Ethereum, Address: walletTestWBTC, Symbol: "WBTC", Decimals: 8}, AmountRaw: "0", MetadataComplete: true},
+	}}
+	newServer := func() *walletTestServer {
+		return &walletTestServer{
+			t: t, native: big.NewInt(0),
+			balances: map[common.Address]*big.Int{walletTestUSDC: big.NewInt(7)},
+			code:     map[common.Address]struct{}{walletTestUSDC: {}},
+			reverts:  map[common.Address]struct{}{walletTestWBTC: {}},
+		}
+	}
+
+	pinned := newServer()
+	pin := BlockRef{ChainID: Ethereum, Number: 996, Hash: common.HexToHash("0x996"), Fixed: true}
+	groups, err := providerWalletGroups(context.Background(), newWalletTestClient(t, pinned), pin, Ethereum, owner, account)
+	if err != nil || len(groups) != 1 || groups[0].ID != walletTokenGroupID(walletTestUSDC) || groups[0].Components[0].AmountRaw != "7" {
+		t.Fatalf("groups=%+v err=%v, want USDC alone and no error", groups, err)
+	}
+	if pinned.calls != 1 {
+		t.Fatalf("eth_call count = %d, want only the deployed token read", pinned.calls)
+	}
+
+	live := newServer()
+	latest := BlockRef{ChainID: Ethereum, Number: 996, Hash: common.HexToHash("0x996")}
+	if _, err := providerWalletGroups(context.Background(), newWalletTestClient(t, live), latest, Ethereum, owner, account); err == nil ||
+		!strings.Contains(err.Error(), "reverted") {
+		t.Fatalf("live discovery err = %v, want the revert reported", err)
 	}
 }
 

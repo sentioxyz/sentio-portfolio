@@ -86,6 +86,9 @@ func (p *laggingPool) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 				balance = p.nativeBalance
 			}
 			return respond(call.ID, "0x"+balance.Text(16), "")
+		case "eth_getCode":
+			// Every contract exists; block selection is what this pool exercises.
+			return respond(call.ID, "0x60006000", "")
 		default:
 			p.t.Fatalf("unexpected method %q", call.Method)
 			return nil

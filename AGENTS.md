@@ -70,8 +70,13 @@ metadata or on-chain `symbol` and `decimals` (including bytes32 symbols). Never
 invent either field or obtain it from a static token registry.
 
 An empty successful `balanceOf` return disqualifies a discovery candidate for
-that scan. Reverts, RPC failures, and malformed non-empty results remain errors.
-Do not implement an address blacklist or silently turn failed reads into zero.
+that scan. At a fixed pin, a candidate with no code at the pinned block is
+skipped before it is read: the token did not exist then, so the account could
+not hold it, and its `balanceOf` may revert rather than return empty data (a
+precompile-backed token does until it is activated). Live pins sit next to the
+provider's sample and skip the check. Reverts of deployed tokens, RPC
+failures, and malformed non-empty results remain errors. Do not implement an
+address blacklist or silently turn failed reads into zero.
 
 Provider failures and missing account results are errors (`protocol` scope):
 the wallet was not read as asked. A target the provider marks `Unsupported` (a
