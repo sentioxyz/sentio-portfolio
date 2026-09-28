@@ -17,14 +17,28 @@ var mapleQueueABI = MustABI(`[
   {"type":"function","name":"requests","stateMutability":"view","inputs":[{"type":"uint128"}],"outputs":[{"type":"address"},{"type":"uint256"}]}
 ]`)
 
+// mapleQueueV200Block is the block of the one transaction that upgraded every version 100 withdrawal
+// queue except cashUSDT's to version 200 (the queue factory's InstanceUpgraded events, 100 to 200).
+const mapleQueueV200Block = 23_890_581
+
 type mapleQueue struct {
 	Address         common.Address
 	Pool            common.Address
 	Asset           Token
 	Share           Token
 	ActivationBlock uint64
-	Legacy          bool
-	OutputShares    bool
+	// Legacy marks a queue still on version 100, which keeps one request per owner behind
+	// requests(requestIds(account)). Version 200 lets an owner hold several requests and sums them
+	// in userEscrowedShares, which reverts on version 100. UpgradeBlock is the first block at which
+	// a queue deployed at version 100 runs version 200, and zero for a queue deployed at version 200.
+	Legacy       bool
+	UpgradeBlock uint64
+	OutputShares bool
+}
+
+// legacyAt reports whether the queue ran version 100 at the block.
+func (q mapleQueue) legacyAt(block uint64) bool {
+	return q.Legacy || block < q.UpgradeBlock
 }
 
 type MapleAdapter struct {
@@ -74,24 +88,24 @@ func newMapleAdapter() Adapter {
 	share := func(address, symbol string, decimals uint8) Token {
 		return token(Ethereum, address, symbol, decimals)
 	}
-	queue := func(index int, address string, activation uint64, legacy, outputShares bool, shareToken Token) mapleQueue {
+	queue := func(index int, address string, activation, upgrade uint64, legacy, outputShares bool, shareToken Token) mapleQueue {
 		return mapleQueue{
 			Address: common.HexToAddress(address), Pool: vaults[index].Address, Asset: vaults[index].Asset,
-			Share: shareToken, ActivationBlock: activation, Legacy: legacy, OutputShares: outputShares,
+			Share: shareToken, ActivationBlock: activation, Legacy: legacy, UpgradeBlock: upgrade, OutputShares: outputShares,
 		}
 	}
 	queues := []mapleQueue{
-		queue(0, "0x1bc47a0dd0fdab96e9ef982fdf1f34dc6207cfe3", 19_920_366, false, false, share(vaults[0].Address.Hex(), "syrupUSDC", 6)),
-		queue(1, "0x86ebdf902d800f2a82038290b6dbb2a5ee29eb8c", 20_434_756, false, false, share(vaults[1].Address.Hex(), "syrupUSDT", 6)),
-		queue(2, "0xaf63c06970086d535f338565d77c5fa3bdc5fd79", 25_173_105, false, false, share(vaults[2].Address.Hex(), "syrupUSDG", 6)),
-		queue(3, "0x8a665131e796203a5232527fac441480e02fbb7f", 19_363_393, false, false, share(vaults[3].Address.Hex(), "MPLhysUSDC1", 6)),
-		queue(4, "0x98c0d6cd8af6274801de98aead27dc9ef03c6ab2", 21_667_004, false, false, share(vaults[4].Address.Hex(), "MAPLE_L+L_1", 6)),
-		queue(5, "0xc512e614ac4d0d4ff9e548f4cad8dfe63b8a36c1", 21_831_616, false, false, share(vaults[5].Address.Hex(), "MAPLE_L+L_2", 6)),
-		queue(7, "0xf18066db3a9590c401e1841598ad90663b4c6d23", 18_970_300, false, false, share(vaults[7].Address.Hex(), "MPLdirUSDC1", 6)),
-		queue(8, "0xeb7b1e9c750190214cdfbbaf0abe398a5e47d230", 18_821_432, false, false, share(vaults[8].Address.Hex(), "MPLohyUSDC1", 6)),
-		queue(9, "0x58a534945f357aa0d2fb56b8bdf7dfa1073bd7a1", 19_335_435, false, false, share(vaults[9].Address.Hex(), "MPLhycWETH1", 18)),
-		queue(10, "0x447dcea1d616f792645ed6e71bc32955a0dbcbaa", 18_821_432, false, false, share(vaults[10].Address.Hex(), "MPLcashUSDC", 6)),
-		queue(11, "0xf4dd63ee071178a6485e2035ed279839f5453512", 18_821_432, true, true, share(vaults[11].Address.Hex(), "MPLcashUSDT", 6)),
+		queue(0, "0x1bc47a0dd0fdab96e9ef982fdf1f34dc6207cfe3", 19_920_366, mapleQueueV200Block, false, false, share(vaults[0].Address.Hex(), "syrupUSDC", 6)),
+		queue(1, "0x86ebdf902d800f2a82038290b6dbb2a5ee29eb8c", 20_434_756, mapleQueueV200Block, false, false, share(vaults[1].Address.Hex(), "syrupUSDT", 6)),
+		queue(2, "0xaf63c06970086d535f338565d77c5fa3bdc5fd79", 25_173_105, 0, false, false, share(vaults[2].Address.Hex(), "syrupUSDG", 6)),
+		queue(3, "0x8a665131e796203a5232527fac441480e02fbb7f", 19_363_393, mapleQueueV200Block, false, false, share(vaults[3].Address.Hex(), "MPLhysUSDC1", 6)),
+		queue(4, "0x98c0d6cd8af6274801de98aead27dc9ef03c6ab2", 21_667_004, mapleQueueV200Block, false, false, share(vaults[4].Address.Hex(), "MAPLE_L+L_1", 6)),
+		queue(5, "0xc512e614ac4d0d4ff9e548f4cad8dfe63b8a36c1", 21_831_616, mapleQueueV200Block, false, false, share(vaults[5].Address.Hex(), "MAPLE_L+L_2", 6)),
+		queue(7, "0xf18066db3a9590c401e1841598ad90663b4c6d23", 18_970_300, mapleQueueV200Block, false, false, share(vaults[7].Address.Hex(), "MPLdirUSDC1", 6)),
+		queue(8, "0xeb7b1e9c750190214cdfbbaf0abe398a5e47d230", 18_821_432, mapleQueueV200Block, false, false, share(vaults[8].Address.Hex(), "MPLohyUSDC1", 6)),
+		queue(9, "0x58a534945f357aa0d2fb56b8bdf7dfa1073bd7a1", 19_335_435, mapleQueueV200Block, false, false, share(vaults[9].Address.Hex(), "MPLhycWETH1", 18)),
+		queue(10, "0x447dcea1d616f792645ed6e71bc32955a0dbcbaa", 18_821_432, mapleQueueV200Block, false, false, share(vaults[10].Address.Hex(), "MPLcashUSDC", 6)),
+		queue(11, "0xf4dd63ee071178a6485e2035ed279839f5453512", 18_821_432, 0, true, true, share(vaults[11].Address.Hex(), "MPLcashUSDT", 6)),
 	}
 	return &MapleAdapter{
 		adapterBase: adapterBase{info: ProtocolInfo{ID: "maple", Name: "Maple", Chains: []ChainID{Ethereum}}},
@@ -140,7 +154,7 @@ func (a *MapleAdapter) queuePositions(
 		if actualPool != queue.Pool || actualAsset != queue.Asset.Address {
 			return nil, fmt.Errorf("Maple queue %s identity changed: pool %s asset %s", queue.Address, actualPool, actualAsset)
 		}
-		if !queue.Legacy {
+		if !queue.legacyAt(block.Number) {
 			row, callErr := client.Call(ctx, block, queue.Address, mapleQueueABI, "userEscrowedShares", account)
 			if callErr != nil {
 				return nil, callErr
@@ -192,7 +206,7 @@ func (a *MapleAdapter) queuePositions(
 		amount := new(big.Int).Set(item.shares)
 		token := item.queue.Share
 		method := "requests(requestIds(account))"
-		if !item.queue.Legacy {
+		if !item.queue.legacyAt(block.Number) {
 			method = "userEscrowedShares(account)"
 		}
 		if !item.queue.OutputShares {
