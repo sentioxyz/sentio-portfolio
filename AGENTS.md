@@ -33,7 +33,15 @@ returning it to the pool, so a retry never lands on it. Do not enable HTTP/2 on 
 and do not put a mutex or a client rotation around the request: multiplexing puts every chain of a
 protocol on one connection, and the lock that made rotation safe serialized them all behind one
 request. Besides the lane, the only place indexer requests wait on each other is the status cache,
-whose fetch runs under `statusMu` so concurrent chains of one protocol share one status read.
+whose fetch runs under a one-slot `statusGate` so concurrent chains of one protocol share one status
+read. Waiting at that gate must stay cancelable — a waiter usually holds a lane slot, and a scan's
+collection deadline is only a bound if every wait under it ends with its context — so do not turn
+it back into a `sync.Mutex`.
+
+A scan with `ScanOptions.CollectDeadline` stops reading at that time and reports each chain or
+deployment it did not finish as an `incomplete` error rather than a failure; pricing then runs on
+its own context, bounded by `PricingDeadline`, so what was read is still valued. Any new wait on
+the scan path must select on its context for that to hold.
 
 An adapter whose protocol spans several chains should answer "which chains hold anything for
 this account" with one request rather than one per chain: `sentio_presence.go` aliases a

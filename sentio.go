@@ -84,9 +84,33 @@ type sentioAPIClient struct {
 	// its own connection, with nothing in front of them but the indexer lane.
 	httpClient *http.Client
 	// sql paces and bounds SQL statements (sentio_sql.go).
-	sql      sentioSQLTiming
-	statusMu sync.Mutex
-	statuses map[string]sentioStatusCache
+	sql        sentioSQLTiming
+	statusGate statusGate
+	statuses   map[string]sentioStatusCache
+}
+
+// statusGate serializes processor status reads, so concurrent chains of one protocol share one
+// refresh. Unlike a mutex it lets a caller waiting behind a slow refresh — up to three attempts
+// of the client's timeout — give up when its own context ends; the waiter usually holds an
+// indexer lane slot, and a scan cannot return before its workers do. The zero value is ready to
+// use.
+type statusGate struct {
+	once sync.Once
+	slot chan struct{}
+}
+
+func (g *statusGate) lock(ctx context.Context) error {
+	g.once.Do(func() { g.slot = make(chan struct{}, 1) })
+	select {
+	case g.slot <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (g *statusGate) unlock() {
+	<-g.slot
 }
 
 func newSentioAPIClient() *sentioAPIClient {
@@ -298,8 +322,10 @@ func (c *sentioAPIClient) chainStatuses(
 	if err := config.validate(); err != nil {
 		return nil, err
 	}
-	c.statusMu.Lock()
-	defer c.statusMu.Unlock()
+	if err := c.statusGate.lock(ctx); err != nil {
+		return nil, err
+	}
+	defer c.statusGate.unlock()
 	cacheKey := config.StatusURL + "@" + config.ProcessorVersion
 	if !forceRefresh {
 		if cached, exists := c.statuses[cacheKey]; exists && time.Since(cached.At) < sentioStatusCacheTTL {

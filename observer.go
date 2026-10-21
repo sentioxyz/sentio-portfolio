@@ -51,8 +51,13 @@ type ScanObservation struct {
 	// Errors is the scan's error list as the Response reports it. It is shared with the
 	// Response, so observers must treat it as read-only.
 	Errors []ScanError
+	// Incomplete counts what the scan stopped before reading — chains it never set up,
+	// deployments it never started or stopped midway — each also an "incomplete" error. It is
+	// nonzero only when the collection deadline or the context ended the scan early.
+	Incomplete int
 	// Canceled reports that the context ended before the scan finished; a canceled scan's
-	// durations describe how far it got, not how long the work takes.
+	// durations describe how far it got, not how long the work takes. A scan stopped by its own
+	// collection deadline is not canceled.
 	Canceled bool
 }
 
