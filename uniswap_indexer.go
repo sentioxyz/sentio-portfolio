@@ -346,10 +346,11 @@ func (i *uniswapIndexer) indexedNFTs(
 	}
 
 	i.api.awaitPresence(ctx, i.presenceProbe(definition, account), strings.ToLower(account.Hex()))
-	if err := lockSentioLane(ctx); err != nil {
+	release, err := lockSentioLane(ctx)
+	if err != nil {
 		return uniswapIndexedNFTs{}, err
 	}
-	defer unlockSentioLane(ctx)
+	defer release()
 	statuses, err := i.chainStatuses(ctx, definition, block.ChainID)
 	if err != nil {
 		return uniswapIndexedNFTs{}, err

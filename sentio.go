@@ -230,6 +230,7 @@ func observeIndexerRequest(ctx context.Context, method string, attempt int, star
 		ProtocolID: scope.protocolID,
 		ChainID:    chainID,
 		Kind:       kind,
+		Presence:   scope.presence,
 		Attempt:    attempt + 1,
 		Duration:   time.Since(startedAt),
 		Err:        redactEndpoints(err),

@@ -359,6 +359,57 @@ func TestPrefetchedPresenceIsReusedByTheChainJobs(t *testing.T) {
 	}
 }
 
+// A probe's requests report apart from the per-chain pages, whether the engine prefetched it or a
+// chain job computed it inline, and a prefetched probe's lane slot reports as the probe's.
+func TestPresenceProbeReportsApartFromPages(t *testing.T) {
+	chains := []ChainID{Ethereum, BSC, Base, Arbitrum}
+	for _, prefetched := range []bool{true, false} {
+		server := &presenceTestServer{t: t, chains: chains}
+		indexer, _ := newPresenceTestMorpho(t, server)
+		pinned := presenceTestPinned(chains...)
+		recorder := &recordingObserver{}
+		ctx := withPinnedBlocks(withScan(context.Background(), recorder, newIndexerLane(1)), pinned)
+		if prefetched {
+			indexer.prefetchPresence(ctx, presenceTestAccount)
+		}
+		for _, chainID := range chains {
+			if _, err := indexer.indexedRefs(ctx, pinned[chainID], presenceTestAccount, false, indexStart{}); err != nil {
+				t.Fatalf("prefetched=%t chain %d: %v", prefetched, chainID, err)
+			}
+		}
+
+		recorder.mu.Lock()
+		var probeQueries, pageQueries, probeLaneWaits, probeLaneHolds int
+		for _, observation := range recorder.indexers {
+			switch {
+			case observation.Kind == IndexerGraphQL && observation.Presence:
+				probeQueries++
+			case observation.Kind == IndexerGraphQL:
+				pageQueries++
+			case observation.Kind == IndexerLane && observation.Presence:
+				probeLaneWaits++
+			case observation.Kind == IndexerLaneHold && observation.Presence:
+				probeLaneHolds++
+			}
+		}
+		recorder.mu.Unlock()
+		if probeQueries != 1 || int64(probeQueries) != int64(server.probes.Load()) {
+			t.Fatalf("prefetched=%t: probe queries reported = %d, sent = %d, want 1", prefetched, probeQueries, server.probes.Load())
+		}
+		if pageQueries != 1 || int64(pageQueries) != int64(server.pages.Load()) {
+			t.Fatalf("prefetched=%t: page queries reported = %d, sent = %d, want 1", prefetched, pageQueries, server.pages.Load())
+		}
+		// Only a prefetched probe takes a slot of its own; an inline one runs on its chain job's.
+		want := 0
+		if prefetched {
+			want = 1
+		}
+		if probeLaneWaits != want || probeLaneHolds != want {
+			t.Fatalf("prefetched=%t: probe lane waits = %d, holds = %d, want %d each", prefetched, probeLaneWaits, probeLaneHolds, want)
+		}
+	}
+}
+
 // A proof established while the index stood at block N still holds after the index advances: the
 // chain job then reports N as its indexed block so the RPC tail starts right after the proof.
 func TestPresenceProofFromAnEarlierIndexedBlockStartsTheTailThere(t *testing.T) {

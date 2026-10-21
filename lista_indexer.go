@@ -521,10 +521,11 @@ func (i *listaIndexer) PositionRefs(
 	}
 	includeCurrentFeeMarkets := feeRecipient != (common.Address{}) && feeRecipient == account
 	indexed, err := func() (listaPositionRefs, error) {
-		if err := lockSentioLane(ctx); err != nil {
+		release, err := lockSentioLane(ctx)
+		if err != nil {
 			return listaPositionRefs{}, err
 		}
-		defer unlockSentioLane(ctx)
+		defer release()
 		return i.indexedRefs(
 			ctx, block, account, includeCurrentFeeMarkets,
 			indexStart{client: client, block: deployment.ActivationBlock},

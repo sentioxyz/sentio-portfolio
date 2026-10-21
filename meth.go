@@ -430,10 +430,11 @@ func (a *MethAdapter) requestIDs(
 	block BlockRef,
 	account common.Address,
 ) ([]*big.Int, error) {
-	if err := lockSentioLane(ctx); err != nil {
+	release, err := lockSentioLane(ctx)
+	if err != nil {
 		return nil, err
 	}
-	defer unlockSentioLane(ctx)
+	defer release()
 	processed, err := a.processedBlock(ctx)
 	if err != nil {
 		return nil, err

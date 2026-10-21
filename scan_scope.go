@@ -23,6 +23,9 @@ type scanScope struct {
 	prefetchSlots chan struct{}
 	protocolID    string
 	chainID       ChainID
+	// presence marks work done for a presence probe, so its lane waits and requests report
+	// apart from the per-chain pages.
+	presence bool
 }
 
 // prefetchConcurrency is how many presence probes run ahead of the workers at once. Two leaves
@@ -72,6 +75,16 @@ func withDeployment(ctx context.Context, protocolID string, chainID ChainID) con
 	}
 	scope.protocolID = protocolID
 	scope.chainID = chainID
+	return context.WithValue(ctx, scanScopeKey{}, scope)
+}
+
+// withPresence marks what runs under ctx as work for a presence probe.
+func withPresence(ctx context.Context) context.Context {
+	scope, ok := ctx.Value(scanScopeKey{}).(scanScope)
+	if !ok {
+		return ctx
+	}
+	scope.presence = true
 	return context.WithValue(ctx, scanScopeKey{}, scope)
 }
 

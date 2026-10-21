@@ -333,10 +333,11 @@ func (i *pendleIndexer) MarketsForPT(
 	}
 	// Valuation asks for markets after PositionRefs has released the lane, so this lookup takes
 	// its own slot: every indexer request counts against the shared API key's bound.
-	if err := lockSentioLane(ctx); err != nil {
+	release, err := lockSentioLane(ctx)
+	if err != nil {
 		return nil, err
 	}
-	defer unlockSentioLane(ctx)
+	defer release()
 	requested := make(map[string]common.Address, len(pts))
 	for _, pt := range pts {
 		requested[strings.ToLower(pt.Hex())] = pt
@@ -810,10 +811,11 @@ func (i *pendleIndexer) PositionRefs(
 	}
 	indexed, err := func() (pendleIndexedSnapshot, error) {
 		i.api.awaitPresence(ctx, i.presenceProbe(account), strings.ToLower(account.Hex()))
-		if err := lockSentioLane(ctx); err != nil {
+		release, err := lockSentioLane(ctx)
+		if err != nil {
 			return pendleIndexedSnapshot{}, err
 		}
-		defer unlockSentioLane(ctx)
+		defer release()
 		return i.indexedRefs(ctx, block, account, indexStart{client: client, block: chain.ActivationBlock})
 	}()
 	if err != nil {

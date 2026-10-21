@@ -259,15 +259,11 @@ func (i *ownerTokenIndexer) positionRefs(
 	if len(contracts) == 0 {
 		return nil, nil
 	}
-	if err := lockSentioLane(ctx); err != nil {
+	release, err := lockSentioLane(ctx)
+	if err != nil {
 		return nil, err
 	}
-	queryLocked := true
-	defer func() {
-		if queryLocked {
-			unlockSentioLane(ctx)
-		}
-	}()
+	defer release()
 	statuses, err := i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, false)
 	if err != nil {
 		return nil, err
@@ -330,8 +326,8 @@ func (i *ownerTokenIndexer) positionRefs(
 		}
 		after = next
 	}
-	unlockSentioLane(ctx)
-	queryLocked = false
+	// The RPC tail needs no indexer slot; hand it back before reading logs.
+	release()
 	if indexedBlock < block.Number {
 		topics := []common.Hash{erc721TransferTopic}
 		if standard == ownerTokenERC1155 {
