@@ -94,7 +94,7 @@ func (c *sentioAPIClient) chainProvenEmpty(
 		return presenceProof{}, false
 	}
 	result, _ := scope.memo.once(ctx, presenceKey(probe, account), func() any {
-		return c.presence(ctx, probe, scope.pinned, statuses, account)
+		return c.presence(withPresence(ctx), probe, scope.pinned, statuses, account)
 	}).(presenceResult)
 	proof, proven := result.proofs[block.ChainID]
 	if !proven || proof.QueryBlock > min(block.Number, statuses[block.ChainID].ProcessedBlock) {
@@ -122,6 +122,7 @@ func (c *sentioAPIClient) prefetchPresence(ctx context.Context, probe presencePr
 	if scope.memo == nil || len(scope.pinned) == 0 {
 		return
 	}
+	ctx = withPresence(ctx)
 	scope.memo.start(presenceKey(probe, account), func() any {
 		if scope.prefetchSlots != nil {
 			select {
@@ -131,10 +132,11 @@ func (c *sentioAPIClient) prefetchPresence(ctx context.Context, probe presencePr
 				return presenceResult{}
 			}
 		}
-		if err := lockSentioLane(ctx); err != nil {
+		release, err := lockSentioLane(ctx)
+		if err != nil {
 			return presenceResult{}
 		}
-		defer unlockSentioLane(ctx)
+		defer release()
 		statuses, err := c.chainStatuses(ctx, probe.config, nil, false)
 		if err != nil {
 			return presenceResult{}

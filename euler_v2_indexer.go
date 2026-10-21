@@ -355,10 +355,11 @@ func (i *eulerIndexer) indexedSnapshot(
 	owner common.Address,
 	start indexStart,
 ) (eulerIndexedSnapshot, error) {
-	if err := lockSentioLane(ctx); err != nil {
+	release, err := lockSentioLane(ctx)
+	if err != nil {
 		return eulerIndexedSnapshot{}, err
 	}
-	defer unlockSentioLane(ctx)
+	defer release()
 	statuses, err := i.api.chainStatuses(ctx, i.config, []ChainID{block.ChainID}, false)
 	if err != nil {
 		return eulerIndexedSnapshot{}, err

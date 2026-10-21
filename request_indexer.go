@@ -229,10 +229,11 @@ func (i *accountRequestIndexer) IndexedRefs(
 	for _, contract := range contracts {
 		allowed[contract] = struct{}{}
 	}
-	if err := lockSentioLane(ctx); err != nil {
+	release, err := lockSentioLane(ctx)
+	if err != nil {
 		return accountRequestSnapshot{}, err
 	}
-	defer unlockSentioLane(ctx)
+	defer release()
 	statuses, err := i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, false)
 	if err != nil {
 		return accountRequestSnapshot{}, err

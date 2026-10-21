@@ -895,10 +895,11 @@ func (i *morphoIndexer) PositionRefs(
 		if !includeCurrentFeeMarkets {
 			i.api.awaitPresence(ctx, i.presenceProbe(account), strings.ToLower(account.Hex()))
 		}
-		if err := lockSentioLane(ctx); err != nil {
+		release, err := lockSentioLane(ctx)
+		if err != nil {
 			return morphoPositionRefs{}, err
 		}
-		defer unlockSentioLane(ctx)
+		defer release()
 		return i.indexedRefs(
 			ctx, block, account, includeCurrentFeeMarkets,
 			indexStart{client: client, block: deployment.Window.ActivationBlock},

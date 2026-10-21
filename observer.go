@@ -21,8 +21,8 @@ type Observer interface {
 	ObserveProtocol(ProtocolObservation)
 	// ObserveRPC fires once per JSON-RPC round trip, including every retry.
 	ObserveRPC(RPCObservation)
-	// ObserveIndexer fires once per Sentio indexer request, including every retry, and once per
-	// wait for the shared indexer lane.
+	// ObserveIndexer fires once per Sentio indexer request, including every retry, once per wait
+	// for the shared indexer lane, and once per release of a lane slot.
 	ObserveIndexer(IndexerObservation)
 }
 
@@ -86,28 +86,36 @@ type RPCObservation struct {
 	Err      error
 }
 
-// IndexerObservation is one Sentio indexer request, or one wait for the indexer lane.
+// IndexerObservation is one Sentio indexer request, one wait for the indexer lane, or one hold of
+// a lane slot.
 type IndexerObservation struct {
 	ProtocolID string
 	// ChainID is the chain the request served, or zero for a status request, which covers every
-	// chain of a processor at once.
+	// chain of a processor at once, and for a presence probe started ahead of the workers.
 	ChainID ChainID
 	// Kind is IndexerStatus for a processor status read, IndexerGraphQL for a position query,
-	// IndexerSQL for a SQL statement from submission to result, or IndexerLane for the time spent
-	// waiting to enter the shared indexer lane.
+	// IndexerSQL for a SQL statement from submission to result, IndexerLane for the time spent
+	// waiting to enter the shared indexer lane, or IndexerLaneHold for the time from entering
+	// the lane to leaving it.
 	Kind string
-	// Attempt is 1-based for requests and zero for a lane wait.
+	// Presence marks requests, lane waits and lane holds made for a presence probe, which asks
+	// every chain of an indexer at once, apart from the per-chain pages.
+	Presence bool
+	// Attempt is 1-based for requests and zero for a lane wait or hold.
 	Attempt  int
 	Duration time.Duration
-	Err      error
+	// Err is the request's failure, redacted, or nil. A lane wait reports the context's error
+	// when the caller gave up before a slot freed up.
+	Err error
 }
 
 // Kinds reported in IndexerObservation.Kind.
 const (
-	IndexerStatus  = "status"
-	IndexerGraphQL = "graphql"
-	IndexerSQL     = "sql"
-	IndexerLane    = "lane"
+	IndexerStatus   = "status"
+	IndexerGraphQL  = "graphql"
+	IndexerSQL      = "sql"
+	IndexerLane     = "lane"
+	IndexerLaneHold = "lane_hold"
 )
 
 type noopObserver struct{}

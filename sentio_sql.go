@@ -223,6 +223,7 @@ func observeIndexerSQL(ctx context.Context, startedAt time.Time, err error) {
 		ProtocolID: scope.protocolID,
 		ChainID:    scope.chainID,
 		Kind:       IndexerSQL,
+		Presence:   scope.presence,
 		Attempt:    1,
 		Duration:   time.Since(startedAt),
 		Err:        redactEndpoints(err),

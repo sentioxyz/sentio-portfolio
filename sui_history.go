@@ -67,10 +67,11 @@ func (r *suiHistoryIndex) statement(ctx context.Context, query string, rowLimit 
 		scope.lane, scope.observer, scope.protocolID = r.engine.indexerLane, r.engine.observer, r.protocolID
 		ctx = context.WithValue(ctx, scanScopeKey{}, scope)
 	}
-	if err := lockSentioLane(ctx); err != nil {
+	release, err := lockSentioLane(ctx)
+	if err != nil {
 		return nil, err
 	}
-	defer unlockSentioLane(ctx)
+	defer release()
 	version, _ := strconv.ParseUint(r.config.ProcessorVersion, 10, 64)
 	return r.api.executeSQL(ctx, r.sql, version, query, rowLimit)
 }

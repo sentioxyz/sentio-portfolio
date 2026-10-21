@@ -25,46 +25,126 @@ func withScanLane(ctx context.Context, lane *indexerLane) context.Context {
 	return context.WithValue(ctx, scanScopeKey{}, scope)
 }
 
+// mustLockLane takes a lane slot for a test and returns its release function.
+func mustLockLane(t *testing.T, ctx context.Context) func() {
+	t.Helper()
+	release, err := lockSentioLane(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return release
+}
+
+// waitForLaneStats polls the lane until it reports want, since a waiter registers asynchronously.
+func waitForLaneStats(t *testing.T, lane *indexerLane, want IndexerLaneStats) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for lane.stats() != want {
+		if time.Now().After(deadline) {
+			t.Fatalf("lane stats = %+v, want %+v", lane.stats(), want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestIndexerLaneAdmitsUpToItsConcurrency(t *testing.T) {
 	lane := newIndexerLane(2)
 	ctx := withScanLane(context.Background(), lane)
-	for slot := 0; slot < 2; slot++ {
-		if err := lockSentioLane(ctx); err != nil {
-			t.Fatalf("slot %d: %v", slot, err)
-		}
+	first := mustLockLane(t, ctx)
+	second := mustLockLane(t, ctx)
+	type acquisition struct {
+		release func()
+		err     error
 	}
-	third := make(chan error, 1)
-	go func() { third <- lockSentioLane(ctx) }()
+	third := make(chan acquisition, 1)
+	go func() {
+		release, err := lockSentioLane(ctx)
+		third <- acquisition{release, err}
+	}()
 	select {
-	case err := <-third:
-		t.Fatalf("third acquisition did not wait: %v", err)
+	case result := <-third:
+		t.Fatalf("third acquisition did not wait: %v", result.err)
 	case <-time.After(30 * time.Millisecond):
 	}
-	unlockSentioLane(ctx)
+	first()
 	select {
-	case err := <-third:
-		if err != nil {
-			t.Fatalf("third acquisition after a release: %v", err)
+	case result := <-third:
+		if result.err != nil {
+			t.Fatalf("third acquisition after a release: %v", result.err)
 		}
+		result.release()
 	case <-time.After(time.Second):
 		t.Fatalf("third acquisition did not proceed after a release")
 	}
-	unlockSentioLane(ctx)
-	unlockSentioLane(ctx)
+	second()
+	waitForLaneStats(t, lane, IndexerLaneStats{Capacity: 2})
 }
 
 func TestIndexerLaneHonoursCancellationWhileWaiting(t *testing.T) {
 	lane := newIndexerLane(1)
 	holder := withScanLane(context.Background(), lane)
-	if err := lockSentioLane(holder); err != nil {
-		t.Fatal(err)
-	}
-	defer unlockSentioLane(holder)
+	defer mustLockLane(t, holder)()
 	ctx, cancel := context.WithTimeout(withScanLane(context.Background(), lane), 20*time.Millisecond)
 	defer cancel()
-	err := lockSentioLane(ctx)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("waiting acquisition error = %v, want deadline exceeded", err)
+	release, err := lockSentioLane(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) || release != nil {
+		t.Fatalf("waiting acquisition = (%v, %v), want no slot and deadline exceeded", release != nil, err)
+	}
+	// The abandoned wait is no longer counted, and the holder's slot is still the only one in use.
+	waitForLaneStats(t, lane, IndexerLaneStats{Capacity: 1, InUse: 1})
+}
+
+func TestIndexerLaneReleaseIsIdempotent(t *testing.T) {
+	lane := newIndexerLane(1)
+	ctx := withScanLane(context.Background(), lane)
+	release := mustLockLane(t, ctx)
+	done := make(chan struct{})
+	go func() {
+		// A second release must not take another value out of the lane: that would block on an
+		// empty lane, or free a slot someone else holds.
+		release()
+		release()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatalf("a repeated release blocked")
+	}
+	other := mustLockLane(t, ctx)
+	release()
+	waitForLaneStats(t, lane, IndexerLaneStats{Capacity: 1, InUse: 1})
+	other()
+}
+
+func TestIndexerLaneReportsItsStats(t *testing.T) {
+	lane := newIndexerLane(2)
+	ctx := withScanLane(context.Background(), lane)
+	waitForLaneStats(t, lane, IndexerLaneStats{Capacity: 2})
+	first := mustLockLane(t, ctx)
+	second := mustLockLane(t, ctx)
+	// Taking free slots is not waiting.
+	waitForLaneStats(t, lane, IndexerLaneStats{Capacity: 2, InUse: 2})
+	waiterCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	waited := make(chan error, 1)
+	go func() {
+		_, err := lockSentioLane(waiterCtx)
+		waited <- err
+	}()
+	waitForLaneStats(t, lane, IndexerLaneStats{Capacity: 2, InUse: 2, Waiting: 1})
+	cancel()
+	if err := <-waited; !errors.Is(err, context.Canceled) {
+		t.Fatalf("waiter error = %v, want canceled", err)
+	}
+	waitForLaneStats(t, lane, IndexerLaneStats{Capacity: 2, InUse: 2})
+	first()
+	second()
+	waitForLaneStats(t, lane, IndexerLaneStats{Capacity: 2})
+
+	engine := NewEngineWithConfig(nil, nil, EngineConfig{IndexerConcurrency: 16})
+	if got := engine.IndexerLaneStats(); got != (IndexerLaneStats{Capacity: 16}) {
+		t.Fatalf("engine lane stats = %+v, want an idle lane of 16", got)
 	}
 }
 
@@ -148,9 +228,7 @@ func TestPendleMarketLookupWaitsForTheLane(t *testing.T) {
 
 	lane := newIndexerLane(1)
 	holder := withScanLane(context.Background(), lane)
-	if err := lockSentioLane(holder); err != nil {
-		t.Fatal(err)
-	}
+	releaseHolder := mustLockLane(t, holder)
 	type outcome struct {
 		markets map[common.Address][]common.Address
 		err     error
@@ -170,7 +248,7 @@ func TestPendleMarketLookupWaitsForTheLane(t *testing.T) {
 	if requests.Load() != 0 {
 		t.Fatalf("market lookup sent %d requests while the only slot was held", requests.Load())
 	}
-	unlockSentioLane(holder)
+	releaseHolder()
 	select {
 	case result := <-done:
 		if result.err != nil {
@@ -186,10 +264,7 @@ func TestPendleMarketLookupWaitsForTheLane(t *testing.T) {
 		t.Fatalf("market lookup sent %d requests, want 1", requests.Load())
 	}
 	// The slot is free again afterwards.
-	if err := lockSentioLane(holder); err != nil {
-		t.Fatal(err)
-	}
-	unlockSentioLane(holder)
+	mustLockLane(t, holder)()
 }
 
 func TestScanMemoStartComputesInTheBackground(t *testing.T) {

@@ -3,6 +3,7 @@ package portfolio
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -230,33 +231,70 @@ func TestSentioLaneReportsWait(t *testing.T) {
 	// A lane of one slot makes the second acquisition wait for the first to release.
 	lane := newIndexerLane(1)
 	scoped := withScanLane(ctx, lane)
-	if err := lockSentioLane(withScanLane(context.Background(), lane)); err != nil {
+	releaseHolder, err := lockSentioLane(withScanLane(context.Background(), lane))
+	if err != nil {
 		t.Fatal(err)
 	}
 	released := make(chan struct{})
 	go func() {
 		time.Sleep(20 * time.Millisecond)
-		unlockSentioLane(withScanLane(context.Background(), lane))
+		releaseHolder()
 		close(released)
 	}()
-	if err := lockSentioLane(scoped); err != nil {
+	release, err := lockSentioLane(scoped)
+	if err != nil {
 		t.Fatal(err)
 	}
-	unlockSentioLane(scoped)
+	time.Sleep(10 * time.Millisecond)
+	release()
 	<-released
 
 	recorder.mu.Lock()
 	defer recorder.mu.Unlock()
+	if len(recorder.indexers) != 2 {
+		t.Fatalf("lane observations = %+v, want the scoped acquisition's wait and hold", recorder.indexers)
+	}
+	wait, hold := recorder.indexers[0], recorder.indexers[1]
+	for _, observation := range []IndexerObservation{wait, hold} {
+		if observation.ProtocolID != "pendle" || observation.ChainID != Arbitrum || observation.Attempt != 0 ||
+			observation.Presence || observation.Err != nil {
+			t.Fatalf("lane observation = %+v", observation)
+		}
+	}
+	if wait.Kind != IndexerLane || wait.Duration < 15*time.Millisecond {
+		t.Fatalf("lane wait = %+v, want at least the 20ms the lane was held", wait)
+	}
+	if hold.Kind != IndexerLaneHold || hold.Duration < 10*time.Millisecond {
+		t.Fatalf("lane hold = %+v, want at least the 10ms the slot was kept", hold)
+	}
+}
+
+func TestSentioLaneReportsAWaitThatGaveUp(t *testing.T) {
+	recorder := &recordingObserver{}
+	lane := newIndexerLane(1)
+	releaseHolder, err := lockSentioLane(withScanLane(context.Background(), lane))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseHolder()
+	ctx, cancel := context.WithTimeout(
+		withScanLane(withDeployment(withObserver(context.Background(), recorder), "morpho-blue", Base), lane),
+		20*time.Millisecond,
+	)
+	defer cancel()
+	if release, err := lockSentioLane(ctx); !errors.Is(err, context.DeadlineExceeded) || release != nil {
+		t.Fatalf("acquisition = (%v, %v), want no slot and the deadline", release != nil, err)
+	}
+
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
 	if len(recorder.indexers) != 1 {
-		t.Fatalf("lane observations = %+v, want exactly one for the scoped acquisition", recorder.indexers)
+		t.Fatalf("observations = %+v, want only the abandoned wait", recorder.indexers)
 	}
-	observation := recorder.indexers[0]
-	if observation.Kind != IndexerLane || observation.ProtocolID != "pendle" ||
-		observation.ChainID != Arbitrum || observation.Attempt != 0 {
-		t.Fatalf("lane observation = %+v", observation)
-	}
-	if observation.Duration < 15*time.Millisecond {
-		t.Fatalf("lane wait = %s, want at least the 20ms the lane was held", observation.Duration)
+	wait := recorder.indexers[0]
+	if wait.Kind != IndexerLane || !errors.Is(wait.Err, context.DeadlineExceeded) ||
+		wait.ProtocolID != "morpho-blue" || wait.ChainID != Base || wait.Duration < 15*time.Millisecond {
+		t.Fatalf("abandoned wait = %+v", wait)
 	}
 }
 
