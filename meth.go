@@ -13,7 +13,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -120,7 +119,7 @@ type MethAdapter struct {
 	indexer    SentioIndexerConfig
 	apiKey     string
 	httpClient *http.Client
-	statusMu   sync.Mutex
+	statusGate statusGate
 	statusAt   time.Time
 	processed  uint64
 }
@@ -212,8 +211,10 @@ func (a *MethAdapter) processedBlock(ctx context.Context) (uint64, error) {
 	if err := a.indexer.validate(); err != nil {
 		return 0, err
 	}
-	a.statusMu.Lock()
-	defer a.statusMu.Unlock()
+	if err := a.statusGate.lock(ctx); err != nil {
+		return 0, err
+	}
+	defer a.statusGate.unlock()
 	if time.Since(a.statusAt) < 30*time.Second && a.processed > 0 {
 		return a.processed, nil
 	}

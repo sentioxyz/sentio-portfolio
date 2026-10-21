@@ -69,6 +69,39 @@ type ScanOptions struct {
 	ChainIDs    map[ChainID]struct{}
 	BlockNumber map[ChainID]uint64
 	SkipPrices  bool
+	// CollectDeadline, when set, is when the scan stops reading positions. Chain setup, wallet
+	// discovery, presence probes and adapters still running are canceled, deployments not yet
+	// started are skipped, and each is reported as an "incomplete" error; the scan then values
+	// what it read. Zero reads everything, bounded only by ctx.
+	CollectDeadline time.Time
+	// PricingDeadline, when set, bounds pricing. It is separate from CollectDeadline so that a
+	// scan stopped at its collection deadline can still price what it read. Pricing that fails
+	// because its context ended is reported as an "incomplete" error about no chain, apart from
+	// the per-token pricing errors. Zero bounds pricing by ctx alone.
+	PricingDeadline time.Time
+}
+
+// incompleteScope labels what a scan stopped before reading, as opposed to what failed: a chain
+// it never set up, a deployment it never started, one it stopped midway, or — about no chain at
+// all — prices it did not finish fetching. An unpriced holding is therefore unquotable only when
+// no such pricing entry is present.
+const incompleteScope = "incomplete"
+
+// Messages of the errors a scan reports in incompleteScope. They say what is missing, not why the
+// scan stopped: its collection deadline or the caller's context.
+const (
+	chainNotSetUpMessage    = "chain not set up before the scan stopped"
+	notReadMessage          = "not read before the scan stopped"
+	stoppedMessage          = "stopped before it finished reading"
+	pricesNotFetchedMessage = "prices not all fetched before the scan stopped"
+)
+
+// withOptionalDeadline bounds ctx by deadline unless deadline is zero.
+func withOptionalDeadline(ctx context.Context, deadline time.Time) (context.Context, context.CancelFunc) {
+	if deadline.IsZero() {
+		return ctx, func() {}
+	}
+	return context.WithDeadline(ctx, deadline)
 }
 
 func (o ScanOptions) includesProtocol(protocolID string) bool {
@@ -289,8 +322,16 @@ func (e *Engine) ScanWithOptions(
 ) *Response {
 	scanStartedAt := time.Now()
 	observation := ScanObservation{Options: options}
+	// The scan owns its context: what it starts in the background, such as presence probes, ends
+	// when it returns rather than whenever the caller cancels.
+	ctx, cancelScan := context.WithCancel(ctx)
+	defer cancelScan()
 	ctx = withScan(ctx, e.observer, e.indexerLane)
 	observer := observerFrom(ctx)
+	// Reading positions stops at the collection deadline; pricing derives its own context from
+	// ctx, so it can still value what was read.
+	collectCtx, cancelCollect := withOptionalDeadline(ctx, options.CollectDeadline)
+	defer cancelCollect()
 	protocols := make([]ProtocolInfo, 0, len(e.adapters))
 	for _, protocol := range e.Protocols() {
 		if options.includesProtocol(protocol.ID) {
@@ -310,6 +351,17 @@ func (e *Engine) ScanWithOptions(
 	chains := make(map[ChainID]*chainScan)
 	var mutex sync.Mutex
 	var wait sync.WaitGroup
+	// chainFailed reports a chain that could not be set up. A failure once collection has stopped
+	// is the scan's doing rather than the chain's, so it reports what the scan is missing.
+	chainFailed := func(chainID ChainID, err error) {
+		scanError := ScanError{Scope: "chain", ChainID: chainID, Message: PublicError(err)}
+		if collectCtx.Err() != nil {
+			scanError = ScanError{Scope: incompleteScope, ChainID: chainID, Message: chainNotSetUpMessage}
+		}
+		mutex.Lock()
+		response.Errors = append(response.Errors, scanError)
+		mutex.Unlock()
+	}
 	for _, chainID := range SupportedChainIDs {
 		if !options.includesChain(chainID) {
 			continue
@@ -337,40 +389,28 @@ func (e *Engine) ScanWithOptions(
 				mutex.Unlock()
 				return
 			}
-			client, err := DialRPC(ctx, chainID, url)
+			client, err := DialRPC(collectCtx, chainID, url)
 			if err != nil {
-				mutex.Lock()
-				response.Errors = append(response.Errors, ScanError{
-					Scope: "chain", ChainID: chainID, Message: PublicError(err),
-				})
-				mutex.Unlock()
+				chainFailed(chainID, err)
 				return
 			}
 			var block BlockRef
 			blockNumber, fixedBlock := options.BlockNumber[chainID]
 			if fixedBlock {
-				block, err = client.BlockByNumber(ctx, blockNumber)
+				block, err = client.BlockByNumber(collectCtx, blockNumber)
 				block.Fixed = true
 			} else {
-				block, err = client.LatestSettledBlock(ctx, e.headLagBlocks)
+				block, err = client.LatestSettledBlock(collectCtx, e.headLagBlocks)
 			}
 			if err != nil {
 				client.Close()
-				mutex.Lock()
-				response.Errors = append(response.Errors, ScanError{
-					Scope: "chain", ChainID: chainID, Message: PublicError(err),
-				})
-				mutex.Unlock()
+				chainFailed(chainID, err)
 				return
 			}
-			accounts, err := resolveAccountScope(ctx, client, block, address)
+			accounts, err := resolveAccountScope(collectCtx, client, block, address)
 			if err != nil {
 				client.Close()
-				mutex.Lock()
-				response.Errors = append(response.Errors, ScanError{
-					Scope: "chain", ChainID: chainID, Message: PublicError(err),
-				})
-				mutex.Unlock()
+				chainFailed(chainID, err)
 				return
 			}
 			mutex.Lock()
@@ -386,11 +426,11 @@ func (e *Engine) ScanWithOptions(
 	for chainID, chain := range chains {
 		pinned[chainID] = chain.block
 	}
-	ctx = withPinnedBlocks(ctx, pinned)
-	e.prefetchPresence(ctx, options, chains)
+	collectCtx = withPinnedBlocks(collectCtx, pinned)
+	e.prefetchPresence(collectCtx, options, chains)
 	if options.includesProtocol(walletProtocolID) {
 		discoveryStartedAt := time.Now()
-		configureWalletBalances(ctx, e.walletBalanceProvider, address, chains)
+		configureWalletBalances(collectCtx, e.walletBalanceProvider, address, chains)
 		observation.WalletDiscovery = time.Since(discoveryStartedAt)
 	}
 	defer func() {
@@ -425,7 +465,13 @@ func (e *Engine) ScanWithOptions(
 			})
 		}
 	}
-	observation.Deployments = len(deployments)
+	// Wallet holdings go first: they need no indexer slot and take a fraction of a second a chain,
+	// so a scan stopped at its deadline loses slow index-backed protocols before it loses the
+	// wallet. Holdings are reconciled only once every adapter has finished, so the order changes
+	// nothing else.
+	sort.SliceStable(deployments, func(left, right int) bool {
+		return deployments[left].Info().ID == walletProtocolID && deployments[right].Info().ID != walletProtocolID
+	})
 	protocolsStartedAt := time.Now()
 	jobs := make(chan deployment)
 	var workers sync.WaitGroup
@@ -444,7 +490,7 @@ func (e *Engine) ScanWithOptions(
 				}
 				startedAt := time.Now()
 				// Every RPC and indexer request the adapter makes reports under its name.
-				jobCtx := withDeployment(ctx, info.ID, job.chainID)
+				jobCtx := withDeployment(collectCtx, info.ID, job.chainID)
 				groups := make([]Group, 0)
 				var positionErr error
 				for _, account := range chain.accounts {
@@ -481,13 +527,21 @@ func (e *Engine) ScanWithOptions(
 				}
 				mutex.Lock()
 				if positionErr != nil {
-					response.Errors = append(response.Errors, ScanError{
+					scanError := ScanError{
 						Scope:        "protocol",
 						ChainID:      job.chainID,
 						ProtocolID:   info.ID,
 						ProtocolName: info.Name,
 						Message:      PublicError(positionErr),
-					})
+					}
+					// An adapter that fails once collection has stopped was stopped: what the
+					// response lacks is the rest of this deployment, not an error of its own.
+					// Whatever groups it read before are kept, as for any other failure.
+					if collectCtx.Err() != nil {
+						scanError.Scope = incompleteScope
+						scanError.Message = stoppedMessage
+					}
+					response.Errors = append(response.Errors, scanError)
 				}
 				if info.ID == walletProtocolID {
 					// Provider partial failures are independent observations. Keep each one as a
@@ -544,17 +598,38 @@ func (e *Engine) ScanWithOptions(
 			}
 		}()
 	}
+	dispatched := 0
 sendJobs:
 	for _, job := range deployments {
+		if collectCtx.Err() != nil {
+			break
+		}
 		select {
 		case jobs <- job:
-		case <-ctx.Done():
+			dispatched++
+		case <-collectCtx.Done():
 			break sendJobs
 		}
 	}
 	close(jobs)
 	workers.Wait()
 	observation.Protocols = time.Since(protocolsStartedAt)
+	observation.Deployments = dispatched
+	// The deployments the scan never reached are what a stopped scan is missing; name each one
+	// that would have run at its chain's pin.
+	for _, job := range deployments[dispatched:] {
+		if !job.ActiveAt(job.chainID, chains[job.chainID].block.Number) {
+			continue
+		}
+		info := job.Info()
+		response.Errors = append(response.Errors, ScanError{
+			Scope:        incompleteScope,
+			ChainID:      job.chainID,
+			ProtocolID:   info.ID,
+			ProtocolName: info.Name,
+			Message:      notReadMessage,
+		})
+	}
 	// Holdings are decided once every adapter has finished, so a token an adapter already
 	// counted is never reported twice — and never depends on which adapter finished first.
 	response.Snapshots = suppressDuplicateHoldings(response.Snapshots)
@@ -567,7 +642,14 @@ sendJobs:
 
 	pricingStartedAt := time.Now()
 	if !options.SkipPrices {
-		prices, priceErrors := fetchPrices(ctx, e.priceProvider, response.Snapshots)
+		pricingCtx, cancelPricing := withOptionalDeadline(ctx, options.PricingDeadline)
+		prices, priceErrors := fetchPrices(pricingCtx, e.priceProvider, response.Snapshots)
+		// Failures once the pricing context has ended mean pricing was cut short, not that tokens
+		// cannot be quoted; say so, or the holdings it never priced pass for unquotable ones.
+		if len(priceErrors) > 0 && pricingCtx.Err() != nil {
+			response.Errors = append(response.Errors, ScanError{Scope: incompleteScope, Message: pricesNotFetchedMessage})
+		}
+		cancelPricing()
 		response.Prices = prices
 		response.Errors = append(response.Errors, priceErrors...)
 	}
@@ -604,6 +686,11 @@ sendJobs:
 	observation.Duration = time.Since(scanStartedAt)
 	observation.Snapshots = len(response.Snapshots)
 	observation.Errors = response.Errors
+	for _, scanError := range response.Errors {
+		if scanError.Scope == incompleteScope {
+			observation.Incomplete++
+		}
+	}
 	observation.Canceled = ctx.Err() != nil
 	observer.ObserveScan(observation)
 	return response
