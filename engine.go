@@ -22,6 +22,7 @@ type Engine struct {
 	headLagBlocks         uint64
 	observer              Observer
 	indexerLane           *indexerLane
+	disabledChains        map[ChainID]struct{}
 }
 
 // defaultHeadLagBlocks is how far behind the advertised head a live scan pins itself. Four blocks
@@ -45,6 +46,11 @@ type EngineConfig struct {
 	// IndexerConcurrency bounds the Sentio indexer requests this engine keeps in flight across
 	// every protocol, chain and concurrent scan. Zero selects defaultIndexerConcurrency.
 	IndexerConcurrency int
+	// DisabledChains are supported chains this deployment does not serve. The engine dials
+	// nothing on them, Chains omits them, and Protocols drops them from every protocol's chains,
+	// leaving out a protocol with no chain left. A scan that names one reports it as a chain
+	// error. Each entry must be in SupportedChainIDs.
+	DisabledChains []ChainID
 }
 
 func (c EngineConfig) headLagBlocks() uint64 {
@@ -133,6 +139,13 @@ func NewEngineWithConfig(
 	)...)
 	adapters = append(adapters, newWalletAdapter())
 	registrations := mustRegisterAdapters(adapters, protocolAvailabilityByID)
+	disabledChains := make(map[ChainID]struct{}, len(config.DisabledChains))
+	for _, chainID := range config.DisabledChains {
+		if !supportsChain(SupportedChainIDs, chainID) {
+			panic(fmt.Sprintf("disabled chain %d is not a supported chain", chainID))
+		}
+		disabledChains[chainID] = struct{}{}
+	}
 	return &Engine{
 		rpcURLs:               rpcURLs,
 		adapters:              adapters,
@@ -142,6 +155,7 @@ func NewEngineWithConfig(
 		headLagBlocks:         config.headLagBlocks(),
 		observer:              config.Observer,
 		indexerLane:           newIndexerLane(config.IndexerConcurrency),
+		disabledChains:        disabledChains,
 	}
 }
 
@@ -189,10 +203,39 @@ func (e *Engine) prefetchPresence(
 	}
 }
 
+// Chains returns the supported chains this engine serves, in canonical order.
+func (e *Engine) Chains() []ChainID {
+	chains := make([]ChainID, 0, len(SupportedChainIDs))
+	for _, chainID := range SupportedChainIDs {
+		if !e.chainDisabled(chainID) {
+			chains = append(chains, chainID)
+		}
+	}
+	return chains
+}
+
+func (e *Engine) chainDisabled(chainID ChainID) bool {
+	_, disabled := e.disabledChains[chainID]
+	return disabled
+}
+
 func (e *Engine) Protocols() []ProtocolInfo {
 	result := make([]ProtocolInfo, 0, len(e.adapters))
 	for _, adapter := range e.adapters {
-		result = append(result, adapter.Info())
+		info := adapter.Info()
+		if len(e.disabledChains) > 0 {
+			chains := make([]ChainID, 0, len(info.Chains))
+			for _, chainID := range info.Chains {
+				if !e.chainDisabled(chainID) {
+					chains = append(chains, chainID)
+				}
+			}
+			if len(chains) == 0 {
+				continue
+			}
+			info.Chains = chains
+		}
+		result = append(result, info)
 	}
 	return result
 }
@@ -269,6 +312,17 @@ func (e *Engine) ScanWithOptions(
 	var wait sync.WaitGroup
 	for _, chainID := range SupportedChainIDs {
 		if !options.includesChain(chainID) {
+			continue
+		}
+		if e.chainDisabled(chainID) {
+			// Only a scan that names the chain asked for it; an unfiltered scan just skips it.
+			if len(options.ChainIDs) > 0 {
+				mutex.Lock()
+				response.Errors = append(response.Errors, ScanError{
+					Scope: "chain", ChainID: chainID, Message: "chain is disabled",
+				})
+				mutex.Unlock()
+			}
 			continue
 		}
 		wait.Add(1)

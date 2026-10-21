@@ -1,6 +1,11 @@
 package portfolio
 
-import "testing"
+import (
+	"context"
+	"testing"
+
+	"github.com/ethereum/go-ethereum/common"
+)
 
 func testSentioIndexerConfig(name string) SentioIndexerConfig {
 	return SentioIndexerConfig{
@@ -108,4 +113,97 @@ func TestEngineWiresRuntimeSentioIndexerConfig(t *testing.T) {
 			t.Errorf("protocol %q did not receive indexer configuration", protocolID)
 		}
 	}
+}
+
+func TestEngineDisabledChainsLeaveChainsAndProtocols(t *testing.T) {
+	engine := NewEngineWithConfig(nil, nil, EngineConfig{DisabledChains: []ChainID{Polygon, Plasma}})
+	chains := engine.Chains()
+	if len(chains) != len(SupportedChainIDs)-2 {
+		t.Fatalf("chains = %v, want every supported chain but Polygon and Plasma", chains)
+	}
+	for _, chainID := range chains {
+		if chainID == Polygon || chainID == Plasma {
+			t.Fatalf("chains = %v, still lists a disabled chain", chains)
+		}
+	}
+	all := make(map[string]ProtocolInfo)
+	for _, protocol := range NewEngine(nil, nil).Protocols() {
+		all[protocol.ID] = protocol
+	}
+	var aaveV2 []ChainID
+	for _, protocol := range engine.Protocols() {
+		if protocol.ID == "aave-v2" {
+			aaveV2 = protocol.Chains
+		}
+		if len(protocol.Chains) == 0 {
+			t.Fatalf("protocol %q is listed with no chains", protocol.ID)
+		}
+		for _, chainID := range protocol.Chains {
+			if chainID == Polygon || chainID == Plasma {
+				t.Fatalf("protocol %q still lists disabled chain %d", protocol.ID, chainID)
+			}
+		}
+		if want := len(all[protocol.ID].Chains); len(protocol.Chains) > want {
+			t.Fatalf("protocol %q gained chains: %v", protocol.ID, protocol.Chains)
+		}
+	}
+	// Aave v2 is deployed on Ethereum, Polygon and Avalanche.
+	if len(aaveV2) != 2 || aaveV2[0] != Ethereum || aaveV2[1] != Avalanche {
+		t.Fatalf("aave-v2 chains = %v, want Ethereum and Avalanche", aaveV2)
+	}
+}
+
+func TestEngineDropsProtocolWithEveryChainDisabled(t *testing.T) {
+	// Kinza is deployed on BSC alone.
+	engine := NewEngineWithConfig(nil, nil, EngineConfig{DisabledChains: []ChainID{BSC}})
+	for _, protocol := range engine.Protocols() {
+		if protocol.ID == "kinza" {
+			t.Fatalf("kinza is listed with chains %v although BSC is disabled", protocol.Chains)
+		}
+	}
+}
+
+func TestEngineScanSkipsDisabledChains(t *testing.T) {
+	// No RPC URLs: every chain that is dialled fails during setup with a chain error, so the
+	// errors name exactly the chains the scan tried.
+	engine := NewEngineWithConfig(nil, nil, EngineConfig{DisabledChains: []ChainID{Polygon, Plasma}})
+	response := engine.ScanWithOptions(context.Background(), common.HexToAddress("0x1"), ScanOptions{
+		ProtocolIDs: map[string]struct{}{"aave-v3": {}},
+		SkipPrices:  true,
+	})
+	if len(response.Errors) != len(SupportedChainIDs)-2 {
+		t.Fatalf("errors = %+v, want one per enabled chain", response.Errors)
+	}
+	for _, scanError := range response.Errors {
+		if scanError.ChainID == Polygon || scanError.ChainID == Plasma {
+			t.Fatalf("unfiltered scan touched disabled chain: %+v", scanError)
+		}
+		if scanError.Message != "RPC URL is not configured" {
+			t.Fatalf("error = %+v, want the unconfigured RPC", scanError)
+		}
+	}
+	for _, protocol := range response.SupportedProtocols {
+		for _, chainID := range protocol.Chains {
+			if chainID == Polygon || chainID == Plasma {
+				t.Fatalf("supported protocol %q lists disabled chain %d", protocol.ID, chainID)
+			}
+		}
+	}
+
+	response = engine.ScanWithOptions(context.Background(), common.HexToAddress("0x1"), ScanOptions{
+		ChainIDs: map[ChainID]struct{}{Polygon: {}},
+	})
+	if len(response.Errors) != 1 || response.Errors[0].Scope != "chain" ||
+		response.Errors[0].ChainID != Polygon || response.Errors[0].Message != "chain is disabled" {
+		t.Fatalf("errors = %+v, want the named disabled chain", response.Errors)
+	}
+}
+
+func TestEngineRejectsUnsupportedDisabledChain(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("an unsupported disabled chain did not panic")
+		}
+	}()
+	NewEngineWithConfig(nil, nil, EngineConfig{DisabledChains: []ChainID{ChainID(999_999)}})
 }
