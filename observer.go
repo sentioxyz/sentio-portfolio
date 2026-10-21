@@ -52,8 +52,9 @@ type ScanObservation struct {
 	// Response, so observers must treat it as read-only.
 	Errors []ScanError
 	// Incomplete counts what the scan stopped before reading — chains it never set up,
-	// deployments it never started or stopped midway — each also an "incomplete" error. It is
-	// nonzero only when the collection deadline or the context ended the scan early.
+	// deployments it never started or stopped midway, prices it did not finish fetching — each
+	// also an "incomplete" error. It is nonzero only when a deadline or the context ended the scan
+	// early.
 	Incomplete int
 	// Canceled reports that the context ended before the scan finished; a canceled scan's
 	// durations describe how far it got, not how long the work takes. A scan stopped by its own

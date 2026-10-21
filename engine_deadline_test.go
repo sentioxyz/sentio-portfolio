@@ -219,9 +219,45 @@ func TestScanPricingStopsAtItsOwnDeadline(t *testing.T) {
 	if len(response.Snapshots) != 1 || len(response.Prices) != 0 {
 		t.Fatalf("snapshots = %d, prices = %v, want the snapshot read and left unpriced", len(response.Snapshots), response.Prices)
 	}
-	if len(scanErrorsIn(response, "pricing")) == 0 || len(scanErrorsIn(response, incompleteScope)) != 0 {
-		t.Fatalf("errors = %+v, want a pricing failure and nothing incomplete", response.Errors)
+	// The token's own failure stays a pricing error; that pricing was cut short is said apart, about
+	// no chain, so the unpriced holding does not pass for an unquotable one.
+	incomplete := scanErrorsIn(response, incompleteScope)
+	if len(scanErrorsIn(response, "pricing")) == 0 || len(incomplete) != 1 ||
+		incomplete[0].Message != pricesNotFetchedMessage || incomplete[0].ChainID != 0 || incomplete[0].ProtocolID != "" {
+		t.Fatalf("errors = %+v, want the pricing failure and one incomplete entry for the prices", response.Errors)
 	}
+}
+
+// A token the provider will not quote is a pricing error, not missing prices.
+func TestScanReportsRefusedPricesAsPricingErrorsOnly(t *testing.T) {
+	engine := newDeadlineTestEngine(t, availabilityRPCServer{t: t, block: 1_000}, refusingPrices{}, nil,
+		newDeadlineTestAdapter("quick", false),
+	)
+	startedAt := time.Now()
+	response := engine.ScanWithOptions(
+		context.Background(),
+		common.HexToAddress("0x1"),
+		deadlineTestOptions(startedAt.Add(time.Minute), startedAt.Add(time.Minute)),
+	)
+	if len(scanErrorsIn(response, "pricing")) != 1 || len(scanErrorsIn(response, incompleteScope)) != 0 {
+		t.Fatalf("errors = %+v, want one pricing error and nothing incomplete", response.Errors)
+	}
+}
+
+// refusingPrices answers at once that it cannot quote any token.
+type refusingPrices struct{}
+
+func (refusingPrices) USDPrices(_ context.Context, tokens []Token) PriceResult {
+	failures := make([]PriceFailure, 0, len(tokens))
+	for _, token := range tokens {
+		asset := AssetForToken(token)
+		failures = append(failures, PriceFailure{Asset: &asset, Message: "asset not found"})
+	}
+	return PriceResult{Failures: failures}
+}
+
+func (p refusingPrices) USDPricesAt(ctx context.Context, tokens []Token, _ time.Time) PriceResult {
+	return p.USDPrices(ctx, tokens)
 }
 
 func TestScanPricingEndsWithTheCaller(t *testing.T) {
@@ -241,13 +277,13 @@ func TestScanPricingEndsWithTheCaller(t *testing.T) {
 	if elapsed := time.Since(startedAt); elapsed > 2*time.Second {
 		t.Fatalf("scan took %s after its caller gave up at 150ms", elapsed)
 	}
-	if len(scanErrorsIn(response, "pricing")) == 0 {
-		t.Fatalf("errors = %+v, want the abandoned pricing", response.Errors)
+	if len(scanErrorsIn(response, "pricing")) == 0 || len(scanErrorsIn(response, incompleteScope)) != 1 {
+		t.Fatalf("errors = %+v, want the abandoned pricing reported as such", response.Errors)
 	}
 	recorder.mu.Lock()
 	defer recorder.mu.Unlock()
-	if len(recorder.scans) != 1 || !recorder.scans[0].Canceled {
-		t.Fatalf("scan observations = %+v, want one canceled scan", recorder.scans)
+	if len(recorder.scans) != 1 || !recorder.scans[0].Canceled || recorder.scans[0].Incomplete != 1 {
+		t.Fatalf("scan observations = %+v, want one canceled scan missing its prices", recorder.scans)
 	}
 }
 

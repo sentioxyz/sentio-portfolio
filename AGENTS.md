@@ -40,8 +40,10 @@ it back into a `sync.Mutex`.
 
 A scan with `ScanOptions.CollectDeadline` stops reading at that time and reports each chain or
 deployment it did not finish as an `incomplete` error rather than a failure; pricing then runs on
-its own context, bounded by `PricingDeadline`, so what was read is still valued. Any new wait on
-the scan path must select on its context for that to hold.
+its own context, bounded by `PricingDeadline`, so what was read is still valued. Pricing cut short
+by its context adds one `incomplete` error about no chain, kept apart from per-token `pricing`
+errors: a token the provider refuses is unquotable, a token it never reached is not. Any new wait
+on the scan path must select on its context for that to hold.
 
 An adapter whose protocol spans several chains should answer "which chains hold anything for
 this account" with one request rather than one per chain: `sentio_presence.go` aliases a

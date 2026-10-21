@@ -75,21 +75,25 @@ type ScanOptions struct {
 	// what it read. Zero reads everything, bounded only by ctx.
 	CollectDeadline time.Time
 	// PricingDeadline, when set, bounds pricing. It is separate from CollectDeadline so that a
-	// scan stopped at its collection deadline can still price what it read. Zero bounds pricing
-	// by ctx alone.
+	// scan stopped at its collection deadline can still price what it read. Pricing that fails
+	// because its context ended is reported as an "incomplete" error about no chain, apart from
+	// the per-token pricing errors. Zero bounds pricing by ctx alone.
 	PricingDeadline time.Time
 }
 
 // incompleteScope labels what a scan stopped before reading, as opposed to what failed: a chain
-// it never set up, a deployment it never started, or one it stopped midway.
+// it never set up, a deployment it never started, one it stopped midway, or — about no chain at
+// all — prices it did not finish fetching. An unpriced holding is therefore unquotable only when
+// no such pricing entry is present.
 const incompleteScope = "incomplete"
 
 // Messages of the errors a scan reports in incompleteScope. They say what is missing, not why the
 // scan stopped: its collection deadline or the caller's context.
 const (
-	chainNotSetUpMessage = "chain not set up before the scan stopped"
-	notReadMessage       = "not read before the scan stopped"
-	stoppedMessage       = "stopped before it finished reading"
+	chainNotSetUpMessage    = "chain not set up before the scan stopped"
+	notReadMessage          = "not read before the scan stopped"
+	stoppedMessage          = "stopped before it finished reading"
+	pricesNotFetchedMessage = "prices not all fetched before the scan stopped"
 )
 
 // withOptionalDeadline bounds ctx by deadline unless deadline is zero.
@@ -640,6 +644,11 @@ sendJobs:
 	if !options.SkipPrices {
 		pricingCtx, cancelPricing := withOptionalDeadline(ctx, options.PricingDeadline)
 		prices, priceErrors := fetchPrices(pricingCtx, e.priceProvider, response.Snapshots)
+		// Failures once the pricing context has ended mean pricing was cut short, not that tokens
+		// cannot be quoted; say so, or the holdings it never priced pass for unquotable ones.
+		if len(priceErrors) > 0 && pricingCtx.Err() != nil {
+			response.Errors = append(response.Errors, ScanError{Scope: incompleteScope, Message: pricesNotFetchedMessage})
+		}
 		cancelPricing()
 		response.Prices = prices
 		response.Errors = append(response.Errors, priceErrors...)
