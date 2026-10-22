@@ -497,6 +497,13 @@ func (i *pendleIndexer) indexedRefs(
 		// The proof may predate this status read; the RPC tail then starts where it holds.
 		return pendleIndexedSnapshot{Block: proof.QueryBlock, Refs: make([]pendlePositionRef, 0)}, nil
 	}
+	// Only the pages and the token lookup take a lane slot: the status read needs none, and a
+	// chain the probe proved empty sends nothing.
+	release, err := lockSentioLane(ctx)
+	if err != nil {
+		return pendleIndexedSnapshot{}, err
+	}
+	defer release()
 	after := pendleRefRowPrefix(block.ChainID, account)
 	tokens := make([]common.Address, 0)
 	kinds := make([]pendleTokenKind, 0)
@@ -809,15 +816,8 @@ func (i *pendleIndexer) PositionRefs(
 	if !supported {
 		return nil, fmt.Errorf("Pendle is not configured on chain %d", block.ChainID)
 	}
-	indexed, err := func() (pendleIndexedSnapshot, error) {
-		i.api.awaitPresence(ctx, i.presenceProbe(account), strings.ToLower(account.Hex()))
-		release, err := lockSentioLane(ctx)
-		if err != nil {
-			return pendleIndexedSnapshot{}, err
-		}
-		defer release()
-		return i.indexedRefs(ctx, block, account, indexStart{client: client, block: chain.ActivationBlock})
-	}()
+	i.api.awaitPresence(ctx, i.presenceProbe(account), strings.ToLower(account.Hex()))
+	indexed, err := i.indexedRefs(ctx, block, account, indexStart{client: client, block: chain.ActivationBlock})
 	if err != nil {
 		return nil, fmt.Errorf("Pendle index query: %w", err)
 	}

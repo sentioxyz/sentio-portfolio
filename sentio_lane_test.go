@@ -459,9 +459,12 @@ func laneOfOneCases(t *testing.T, server *httptest.Server, account common.Addres
 	}
 }
 
-// Every index-backed read completes on a lane of one slot, which the read itself holds while it
-// refreshes a cold status cache, and so does a presence probe prefetched ahead of it: nothing on
-// the path waits for a second slot.
+// Every index-backed read completes on a lane of one slot with a cold status cache, and so does a
+// presence probe prefetched ahead of it: nothing on the path waits for a second slot.
+//
+// The index holds nothing, so a probing indexer proves every chain empty: its chain job takes no
+// slot at all, and the probe takes one only to send. Every other indexer holds one for its pages,
+// refreshing the status while it does.
 func TestIndexReadsCompleteOnALaneOfOne(t *testing.T) {
 	t.Setenv("PORTFOLIO_SENTIO_API_KEY", "test-key")
 	account := common.HexToAddress("0x00000000000000000000000000000000000000a1")
@@ -479,8 +482,9 @@ func TestIndexReadsCompleteOnALaneOfOne(t *testing.T) {
 			}
 			t.Run(fmt.Sprintf("%s/prefetched=%t", test.name, prefetched), func(t *testing.T) {
 				lane := newIndexerLane(1)
-				scan := withPinnedBlocks(withScan(context.Background(), nil, lane), pinned)
-				statusesBefore := index.statuses.Load()
+				recorder := &recordingObserver{}
+				scan := withPinnedBlocks(withScan(context.Background(), recorder, lane), pinned, nil)
+				statusesBefore, queriesBefore := index.statuses.Load(), index.queries.Load()
 				if prefetched {
 					test.prefetch(withDeployment(scan, test.name, 0))
 				}
@@ -498,6 +502,29 @@ func TestIndexReadsCompleteOnALaneOfOne(t *testing.T) {
 					t.Fatalf("no status read reached the index, so the cache was not cold")
 				}
 				waitForLaneStats(t, lane, IndexerLaneStats{Capacity: 1})
+
+				recorder.mu.Lock()
+				pageSlots, probeSlots := 0, 0
+				for _, observation := range recorder.indexers {
+					switch {
+					case observation.Kind != IndexerLaneHold:
+					case observation.Presence:
+						probeSlots++
+					default:
+						pageSlots++
+					}
+				}
+				recorder.mu.Unlock()
+				wantPageSlots, wantProbeSlots := 1, 0
+				if test.prefetch != nil {
+					wantPageSlots, wantProbeSlots = 0, 1
+				}
+				if pageSlots != wantPageSlots || probeSlots != wantProbeSlots {
+					t.Fatalf("lane holds: pages = %d, probe = %d, want %d and %d", pageSlots, probeSlots, wantPageSlots, wantProbeSlots)
+				}
+				if queries := index.queries.Load() - queriesBefore; test.prefetch != nil && queries != 1 {
+					t.Fatalf("queries = %d, want the probe alone", queries)
+				}
 			})
 		}
 	}

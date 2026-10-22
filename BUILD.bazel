@@ -136,6 +136,8 @@ go_test(
         "deployment_live_test.go",
         "deployment_registry_test.go",
         "deployment_test.go",
+        "engine_deadline_test.go",
+        "engine_presence_test.go",
         "engine_test.go",
         "euler_v2_deployment_window_test.go",
         "expanded_protocols_live_test.go",

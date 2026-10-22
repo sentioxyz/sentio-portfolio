@@ -149,7 +149,7 @@ func presenceTestPinned(chains ...ChainID) map[ChainID]BlockRef {
 }
 
 func presenceScanContext(pinned map[ChainID]BlockRef) context.Context {
-	return withPinnedBlocks(withScan(context.Background(), nil, newIndexerLane(1)), pinned)
+	return withPinnedBlocks(withScan(context.Background(), nil, newIndexerLane(1)), pinned, nil)
 }
 
 func TestPresenceProbeSkipsChainsProvenEmpty(t *testing.T) {
@@ -360,7 +360,7 @@ func TestPrefetchedPresenceIsReusedByTheChainJobs(t *testing.T) {
 }
 
 // A probe's requests report apart from the per-chain pages, whether the engine prefetched it or a
-// chain job computed it inline, and a prefetched probe's lane slot reports as the probe's.
+// chain job computed it inline, and so does the lane slot either takes to send it.
 func TestPresenceProbeReportsApartFromPages(t *testing.T) {
 	chains := []ChainID{Ethereum, BSC, Base, Arbitrum}
 	for _, prefetched := range []bool{true, false} {
@@ -368,18 +368,20 @@ func TestPresenceProbeReportsApartFromPages(t *testing.T) {
 		indexer, _ := newPresenceTestMorpho(t, server)
 		pinned := presenceTestPinned(chains...)
 		recorder := &recordingObserver{}
-		ctx := withPinnedBlocks(withScan(context.Background(), recorder, newIndexerLane(1)), pinned)
+		ctx := withPinnedBlocks(withScan(context.Background(), recorder, newIndexerLane(1)), pinned, nil)
 		if prefetched {
-			indexer.prefetchPresence(ctx, presenceTestAccount)
+			indexer.prefetchPresence(withDeployment(ctx, "morpho-blue", 0), presenceTestAccount)
 		}
 		for _, chainID := range chains {
-			if _, err := indexer.indexedRefs(ctx, pinned[chainID], presenceTestAccount, false, indexStart{}); err != nil {
+			jobCtx := withDeployment(ctx, "morpho-blue", chainID)
+			if _, err := indexer.indexedRefs(jobCtx, pinned[chainID], presenceTestAccount, false, indexStart{}); err != nil {
 				t.Fatalf("prefetched=%t chain %d: %v", prefetched, chainID, err)
 			}
 		}
 
 		recorder.mu.Lock()
 		var probeQueries, pageQueries, probeLaneWaits, probeLaneHolds int
+		pageLaneHolds := make(map[ChainID]int)
 		for _, observation := range recorder.indexers {
 			switch {
 			case observation.Kind == IndexerGraphQL && observation.Presence:
@@ -390,6 +392,8 @@ func TestPresenceProbeReportsApartFromPages(t *testing.T) {
 				probeLaneWaits++
 			case observation.Kind == IndexerLaneHold && observation.Presence:
 				probeLaneHolds++
+			case observation.Kind == IndexerLaneHold:
+				pageLaneHolds[observation.ChainID]++
 			}
 		}
 		recorder.mu.Unlock()
@@ -399,13 +403,13 @@ func TestPresenceProbeReportsApartFromPages(t *testing.T) {
 		if pageQueries != 1 || int64(pageQueries) != int64(server.pages.Load()) {
 			t.Fatalf("prefetched=%t: page queries reported = %d, sent = %d, want 1", prefetched, pageQueries, server.pages.Load())
 		}
-		// Only a prefetched probe takes a slot of its own; an inline one runs on its chain job's.
-		want := 0
-		if prefetched {
-			want = 1
+		// The probe takes a slot of its own either way, and only the chain holding a position takes
+		// one for its page.
+		if probeLaneWaits != 1 || probeLaneHolds != 1 {
+			t.Fatalf("prefetched=%t: probe lane waits = %d, holds = %d, want 1 each", prefetched, probeLaneWaits, probeLaneHolds)
 		}
-		if probeLaneWaits != want || probeLaneHolds != want {
-			t.Fatalf("prefetched=%t: probe lane waits = %d, holds = %d, want %d each", prefetched, probeLaneWaits, probeLaneHolds, want)
+		if len(pageLaneHolds) != 1 || pageLaneHolds[Base] != 1 {
+			t.Fatalf("prefetched=%t: page lane holds by chain = %v, want one, on Base", prefetched, pageLaneHolds)
 		}
 	}
 }
@@ -521,5 +525,58 @@ func TestEngineRegistersPresencePrefetchers(t *testing.T) {
 		if prefetches != want[adapter.Info().ID] {
 			t.Errorf("protocol %q prefetches presence = %v, want %v", adapter.Info().ID, prefetches, want[adapter.Info().ID])
 		}
+	}
+}
+
+// A probe asks only about the chains the scan reads its account on. An account read on too few of
+// them — one attributed through Instadapp, read on Ethereum alone — is never probed, neither ahead
+// of the workers nor inline, and takes no lane slot for it: its chain job reads its own page.
+func TestPresenceProbeAsksOnlyAboutTheChainsAnAccountIsReadOn(t *testing.T) {
+	chains := []ChainID{Ethereum, BSC, Base, Arbitrum}
+	server := &presenceTestServer{t: t, chains: chains}
+	indexer, _ := newPresenceTestMorpho(t, server)
+	pinned := presenceTestPinned(chains...)
+	attributed := common.HexToAddress("0x00000000000000000000000000000000000000d5")
+	accountChains := map[string][]ChainID{
+		strings.ToLower(presenceTestAccount.Hex()): {Ethereum, BSC, Base},
+		strings.ToLower(attributed.Hex()):          {Ethereum},
+	}
+	recorder := &recordingObserver{}
+	ctx := withPinnedBlocks(withScan(context.Background(), recorder, newIndexerLane(1)), pinned, accountChains)
+
+	prefetchCtx := withDeployment(ctx, "morpho-blue", 0)
+	indexer.prefetchPresence(prefetchCtx, presenceTestAccount)
+	indexer.prefetchPresence(prefetchCtx, attributed)
+	for _, chainID := range []ChainID{Ethereum, BSC, Base} {
+		if _, err := indexer.indexedRefs(withDeployment(ctx, "morpho-blue", chainID), pinned[chainID], presenceTestAccount, false, indexStart{}); err != nil {
+			t.Fatalf("chain %d: %v", chainID, err)
+		}
+	}
+	refs, err := indexer.indexedRefs(withDeployment(ctx, "morpho-blue", Ethereum), pinned[Ethereum], attributed, false, indexStart{})
+	if err != nil || len(refs.Vaults) != 0 || len(refs.MarketIDs) != 0 {
+		t.Fatalf("attributed account refs = %+v, %v, want an empty page", refs, err)
+	}
+
+	if server.probes.Load() != 1 {
+		t.Fatalf("probes = %d, want the owner's alone", server.probes.Load())
+	}
+	query := *server.lastProbeQuery.Load()
+	if strings.Contains(query, "cp42161:") || !strings.Contains(query, "cp8453:") ||
+		strings.Contains(query, strings.ToLower(attributed.Hex())) {
+		t.Fatalf("probe query asks about a chain or an account the scan does not read:\n%s", query)
+	}
+	if len(server.pagedChains) != 2 || server.pagedChains[0] != Base || server.pagedChains[1] != Ethereum {
+		t.Fatalf("paged chains = %v, want the owner's Base and the attributed account's Ethereum", server.pagedChains)
+	}
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	probeSlots := 0
+	for _, observation := range recorder.indexers {
+		if observation.Kind == IndexerLaneHold && observation.Presence {
+			probeSlots++
+		}
+	}
+	if probeSlots != 1 {
+		t.Fatalf("probe lane holds = %d, want the owner's probe alone", probeSlots)
 	}
 }

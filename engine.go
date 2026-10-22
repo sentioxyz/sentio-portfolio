@@ -195,14 +195,15 @@ func NewEngineWithConfig(
 // prefetchPresence starts, for every adapter that can answer it in one request, the question of
 // which chains hold anything for each scanned account. The probes run in the background while the
 // workers get through the adapters that need no indexer, so the index-backed adapters — which
-// come late in the adapter order — find their verdicts waiting.
+// come late in the adapter order — find their verdicts waiting. Each protocol's probes run on a
+// context of their own; it returns their cancel functions by protocol ID.
 func (e *Engine) prefetchPresence(
 	ctx context.Context,
 	options ScanOptions,
 	chains map[ChainID]*chainScan,
-) {
+) map[string]context.CancelFunc {
 	if len(chains) < presenceMinChains {
-		return
+		return nil
 	}
 	accounts := make([]common.Address, 0, 1)
 	seen := make(map[common.Address]struct{})
@@ -219,6 +220,7 @@ func (e *Engine) prefetchPresence(
 			accounts = append(accounts, account.Address)
 		}
 	}
+	cancels := make(map[string]context.CancelFunc)
 	for _, adapter := range e.adapters {
 		info := adapter.Info()
 		if !options.includesProtocol(info.ID) {
@@ -228,12 +230,58 @@ func (e *Engine) prefetchPresence(
 		if !ok {
 			continue
 		}
+		probeCtx, cancel := context.WithCancel(ctx)
+		cancels[info.ID] = cancel
 		// The probe's requests report under the protocol they serve; a chain of zero says "all".
-		prefetchCtx := withDeployment(ctx, info.ID, 0)
+		prefetchCtx := withDeployment(probeCtx, info.ID, 0)
 		for _, account := range accounts {
 			prefetcher.prefetchPresence(prefetchCtx, account)
 		}
 	}
+	return cancels
+}
+
+// presenceLifetimes ends each protocol's prefetched presence probes once no deployment of the
+// protocol in the scan is left to use them: each has finished, been skipped as inactive at its pin,
+// or will never be dispatched. A probe nobody will wait for would otherwise go on holding its
+// prefetch slot and its lane slot, and run its queries to the end.
+type presenceLifetimes struct {
+	mu        sync.Mutex
+	remaining map[string]int
+	cancel    map[string]context.CancelFunc
+}
+
+// newPresenceLifetimes tracks the protocols in cancel, each with deployments[protocolID]
+// deployments left, and ends at once the probes of a protocol the scan dispatches nothing for.
+func newPresenceLifetimes(
+	cancel map[string]context.CancelFunc,
+	deployments map[string]int,
+) *presenceLifetimes {
+	lifetimes := &presenceLifetimes{remaining: make(map[string]int, len(cancel)), cancel: cancel}
+	for protocolID, cancelProbes := range cancel {
+		if deployments[protocolID] == 0 {
+			cancelProbes()
+			continue
+		}
+		lifetimes.remaining[protocolID] = deployments[protocolID]
+	}
+	return lifetimes
+}
+
+// done records that one deployment of protocolID will not use the protocol's probes again.
+func (l *presenceLifetimes) done(protocolID string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	remaining, tracked := l.remaining[protocolID]
+	if !tracked {
+		return
+	}
+	if remaining > 1 {
+		l.remaining[protocolID] = remaining - 1
+		return
+	}
+	delete(l.remaining, protocolID)
+	l.cancel[protocolID]()
 }
 
 // Chains returns the supported chains this engine serves, in canonical order.
@@ -423,11 +471,21 @@ func (e *Engine) ScanWithOptions(
 	observation.ChainSetup = time.Since(scanStartedAt)
 	observation.Chains = len(chains)
 	pinned := make(map[ChainID]BlockRef, len(chains))
-	for chainID, chain := range chains {
+	// A presence probe asks only about the chains its account is read on.
+	accountChains := make(map[string][]ChainID)
+	for _, chainID := range SupportedChainIDs {
+		chain := chains[chainID]
+		if chain == nil {
+			continue
+		}
 		pinned[chainID] = chain.block
+		for _, account := range chain.accounts {
+			key := strings.ToLower(account.Address.Hex())
+			accountChains[key] = append(accountChains[key], chainID)
+		}
 	}
-	collectCtx = withPinnedBlocks(collectCtx, pinned)
-	e.prefetchPresence(collectCtx, options, chains)
+	collectCtx = withPinnedBlocks(collectCtx, pinned, accountChains)
+	probeCancels := e.prefetchPresence(collectCtx, options, chains)
 	if options.includesProtocol(walletProtocolID) {
 		discoveryStartedAt := time.Now()
 		configureWalletBalances(collectCtx, e.walletBalanceProvider, address, chains)
@@ -472,6 +530,11 @@ func (e *Engine) ScanWithOptions(
 	sort.SliceStable(deployments, func(left, right int) bool {
 		return deployments[left].Info().ID == walletProtocolID && deployments[right].Info().ID != walletProtocolID
 	})
+	deploymentCounts := make(map[string]int)
+	for _, job := range deployments {
+		deploymentCounts[job.Info().ID]++
+	}
+	probes := newPresenceLifetimes(probeCancels, deploymentCounts)
 	protocolsStartedAt := time.Now()
 	jobs := make(chan deployment)
 	var workers sync.WaitGroup
@@ -482,10 +545,12 @@ func (e *Engine) ScanWithOptions(
 			for job := range jobs {
 				chain := chains[job.chainID]
 				if chain == nil {
+					probes.done(job.Info().ID)
 					continue
 				}
 				info := job.Info()
 				if !job.ActiveAt(job.chainID, chain.block.Number) {
+					probes.done(info.ID)
 					continue
 				}
 				startedAt := time.Now()
@@ -525,6 +590,7 @@ func (e *Engine) ScanWithOptions(
 						break
 					}
 				}
+				probes.done(info.ID)
 				mutex.Lock()
 				if positionErr != nil {
 					scanError := ScanError{
@@ -612,6 +678,10 @@ sendJobs:
 		}
 	}
 	close(jobs)
+	// A deployment never dispatched will not wait for its protocol's probes either.
+	for _, job := range deployments[dispatched:] {
+		probes.done(job.Info().ID)
+	}
 	workers.Wait()
 	observation.Protocols = time.Since(protocolsStartedAt)
 	observation.Deployments = dispatched
