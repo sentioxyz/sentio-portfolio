@@ -348,8 +348,8 @@ func newStatusTestServer(t *testing.T) *statusTestServer {
 	return status
 }
 
-// A caller waiting for a status read that another caller is refreshing gives up when its own
-// context ends, without sending a request, however long the refresh takes.
+// A caller waiting for a status read that another caller started gives up when its own context
+// ends, without sending a request, however long the read takes.
 func TestStatusReadsGiveUpWithTheirContext(t *testing.T) {
 	for _, reader := range []struct {
 		name string
@@ -372,9 +372,8 @@ func TestStatusReadsGiveUpWithTheirContext(t *testing.T) {
 			name: "mETH",
 			new: func(server *statusTestServer) func(context.Context) error {
 				adapter := &MethAdapter{
-					indexer:    SentioIndexerConfig{GraphQLURL: server.url, StatusURL: server.url, ProcessorVersion: "1"},
-					apiKey:     "test",
-					httpClient: server.client,
+					indexer: SentioIndexerConfig{GraphQLURL: server.url, StatusURL: server.url, ProcessorVersion: "1"},
+					api:     &sentioAPIClient{apiKey: "test", httpClient: server.client},
 				}
 				return func(ctx context.Context) error {
 					_, err := adapter.processedBlock(ctx)
@@ -386,11 +385,11 @@ func TestStatusReadsGiveUpWithTheirContext(t *testing.T) {
 		t.Run(reader.name, func(t *testing.T) {
 			server := newStatusTestServer(t)
 			read := reader.new(server)
-			holder := make(chan error, 1)
-			go func() { holder <- read(context.Background()) }()
+			first := make(chan error, 1)
+			go func() { first <- read(context.Background()) }()
 			for deadline := time.Now().Add(time.Second); server.requests.Load() == 0; {
 				if time.Now().After(deadline) {
-					t.Fatal("the holder's status read never arrived")
+					t.Fatal("the first caller's status read never arrived")
 				}
 				time.Sleep(time.Millisecond)
 			}
@@ -403,11 +402,11 @@ func TestStatusReadsGiveUpWithTheirContext(t *testing.T) {
 				t.Fatalf("waiting read = %v after %s, want the deadline at about 50ms", err, time.Since(startedAt))
 			}
 			if server.requests.Load() != 1 {
-				t.Fatalf("status requests = %d, want only the holder's", server.requests.Load())
+				t.Fatalf("status requests = %d, want only the first caller's", server.requests.Load())
 			}
 			close(server.release)
-			if err := <-holder; err == nil {
-				t.Fatal("the holder's read succeeded against a failing status endpoint")
+			if err := <-first; err == nil {
+				t.Fatal("the first caller's read succeeded against a failing status endpoint")
 			}
 		})
 	}

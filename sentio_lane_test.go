@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -303,4 +305,200 @@ func TestScanMemoStartComputesInTheBackground(t *testing.T) {
 	}
 	var nilMemo *scanMemo
 	nilMemo.start("key", func() any { t.Fatalf("a nil memo must not start anything"); return nil })
+}
+
+const (
+	emptyIndexBlock     = uint64(100_000_000)
+	emptyIndexTimestamp = uint64(1_700_000_000)
+)
+
+// emptyIndexFields are the entity fields every index the kernel reads asks for.
+var emptyIndexFields = []string{
+	"morphoMarketPositionRefs", "morphoVaultPositionRefs", "morphoFeeMarkets",
+	"pendlePositionRefs", "pendleTokens",
+	"eulerPositionRefs", "eulerRewardTokens", "eulerVaults",
+	"listaMarketPositionRefs", "listaVaultPositionRefs", "listaFeeMarkets",
+	"portfolioOwnerTokenRefs", "portfolioAccountRequestRefs",
+	"positions", "withdrawalRequests",
+}
+
+// emptyIndexServer stands in for any index the kernel reads, for an account holding nothing: a
+// status read reports every chain processed up to emptyIndexBlock, and every query — a page of
+// any indexer or a presence probe — finds a fresh checkpoint and no rows.
+type emptyIndexServer struct {
+	statuses atomic.Int32
+	queries  atomic.Int32
+}
+
+func (s *emptyIndexServer) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	writer.Header().Set("content-type", "application/json")
+	if request.Method == http.MethodGet {
+		s.statuses.Add(1)
+		_ = json.NewEncoder(writer).Encode(uniswapIndexerTestStatus("1", SupportedChainIDs, emptyIndexBlock))
+		return
+	}
+	s.queries.Add(1)
+	checkpoint := []map[string]any{{
+		"blockNumber": strconv.FormatUint(emptyIndexBlock, 10),
+		"timestampMs": strconv.FormatUint(emptyIndexTimestamp*1_000, 10),
+	}}
+	data := map[string]any{"indexerCheckpoints": checkpoint}
+	for _, field := range emptyIndexFields {
+		data[field] = []any{}
+	}
+	for _, chainID := range SupportedChainIDs {
+		data[presenceAlias("cp", chainID)] = checkpoint
+		data[presenceAlias("f0_", chainID)] = []any{}
+		data[presenceAlias("f1_", chainID)] = []any{}
+	}
+	_ = json.NewEncoder(writer).Encode(map[string]any{"data": data})
+}
+
+// laneOfOneCase is one index-backed read, run the way a chain job runs it.
+type laneOfOneCase struct {
+	name     string
+	chainID  ChainID
+	prefetch func(ctx context.Context)
+	read     func(ctx context.Context) error
+}
+
+// laneOfOneCases builds every index-backed read against server, each with its own client and so
+// its own cold status cache.
+func laneOfOneCases(t *testing.T, server *httptest.Server, account common.Address) []laneOfOneCase {
+	t.Helper()
+	config := SentioIndexerConfig{GraphQLURL: server.URL + "/graphql", StatusURL: server.URL + "/status", ProcessorVersion: "1"}
+	block := func(chainID ChainID) BlockRef {
+		return BlockRef{ChainID: chainID, Number: emptyIndexBlock, Timestamp: emptyIndexTimestamp}
+	}
+	morpho := newMorphoIndexer(config)
+	morphoRPC := newContractStub(t, Ethereum, account)
+	morphoRPC.answer(morphoDeployments[Ethereum].Morpho, morphoCoreABI, "feeRecipient", nil, common.Address{})
+	morphoClient := morphoRPC.dial()
+	lista := newListaIndexer(config)
+	listaRPC := newContractStub(t, BSC, account)
+	listaRPC.answer(listaMoolahDeployments[BSC].Address, listaMoolahABI, "feeRecipient", nil, common.Address{})
+	listaClient := listaRPC.dial()
+	pendle := newPendleIndexer(config)
+	// The generations are separate projects, so each has a status of its own to refresh.
+	uniswapV4Config := config
+	uniswapV4Config.StatusURL += "/v4"
+	uniswap := newUniswapIndexer(config, uniswapV4Config)
+	euler := newEulerIndexer(config)
+	ownerTokens := newOwnerTokenIndexer(config, []ChainID{Ethereum})
+	requests := newAccountRequestIndexer(config, []ChainID{BSC})
+	meth := newMethAdapter(config).(*MethAdapter)
+	contracts := []common.Address{common.HexToAddress("0x00000000000000000000000000000000000000c1")}
+	return []laneOfOneCase{
+		{
+			name: "morpho-blue", chainID: Ethereum,
+			prefetch: func(ctx context.Context) { morpho.prefetchPresence(ctx, account) },
+			read: func(ctx context.Context) error {
+				_, err := morpho.PositionRefs(ctx, morphoClient, block(Ethereum), account, morphoDeployments[Ethereum])
+				return err
+			},
+		},
+		{
+			name: "pendle", chainID: Ethereum,
+			prefetch: func(ctx context.Context) { pendle.prefetchPresence(ctx, account) },
+			read: func(ctx context.Context) error {
+				_, err := pendle.PositionRefs(ctx, nil, block(Ethereum), account)
+				return err
+			},
+		},
+		{
+			name: "uniswap-v3", chainID: Ethereum,
+			prefetch: func(ctx context.Context) { uniswap.prefetchPresence(ctx, uniswapV3, account) },
+			read: func(ctx context.Context) error {
+				_, err := uniswap.indexedNFTs(ctx, uniswapV3, block(Ethereum), account)
+				return err
+			},
+		},
+		{
+			name: "uniswap-v4", chainID: Ethereum,
+			prefetch: func(ctx context.Context) { uniswap.prefetchPresence(ctx, uniswapV4, account) },
+			read: func(ctx context.Context) error {
+				_, err := uniswap.indexedNFTs(ctx, uniswapV4, block(Ethereum), account)
+				return err
+			},
+		},
+		{
+			name: "lista", chainID: BSC,
+			read: func(ctx context.Context) error {
+				_, err := lista.PositionRefs(ctx, listaClient, block(BSC), account, listaMoolahDeployments[BSC])
+				return err
+			},
+		},
+		{
+			name: "euler-v2", chainID: Ethereum,
+			read: func(ctx context.Context) error {
+				_, err := euler.indexedSnapshot(ctx, block(Ethereum), account, indexStart{})
+				return err
+			},
+		},
+		{
+			name: "owner-token", chainID: Ethereum,
+			read: func(ctx context.Context) error {
+				_, err := ownerTokens.PositionRefs(ctx, nil, block(Ethereum), account, contracts)
+				return err
+			},
+		},
+		{
+			name: "account-request", chainID: BSC,
+			read: func(ctx context.Context) error {
+				_, err := requests.IndexedRefs(ctx, block(BSC), account, contracts)
+				return err
+			},
+		},
+		{
+			name: "meth-protocol", chainID: Ethereum,
+			read: func(ctx context.Context) error {
+				_, err := meth.requestIDs(ctx, nil, block(Ethereum), account)
+				return err
+			},
+		},
+	}
+}
+
+// Every index-backed read completes on a lane of one slot, which the read itself holds while it
+// refreshes a cold status cache, and so does a presence probe prefetched ahead of it: nothing on
+// the path waits for a second slot.
+func TestIndexReadsCompleteOnALaneOfOne(t *testing.T) {
+	t.Setenv("PORTFOLIO_SENTIO_API_KEY", "test-key")
+	account := common.HexToAddress("0x00000000000000000000000000000000000000a1")
+	pinned := make(map[ChainID]BlockRef, len(SupportedChainIDs))
+	for _, chainID := range SupportedChainIDs {
+		pinned[chainID] = BlockRef{ChainID: chainID, Number: emptyIndexBlock, Timestamp: emptyIndexTimestamp}
+	}
+	for _, prefetched := range []bool{false, true} {
+		index := &emptyIndexServer{}
+		server := httptest.NewServer(index)
+		t.Cleanup(server.Close)
+		for _, test := range laneOfOneCases(t, server, account) {
+			if prefetched && test.prefetch == nil {
+				continue
+			}
+			t.Run(fmt.Sprintf("%s/prefetched=%t", test.name, prefetched), func(t *testing.T) {
+				lane := newIndexerLane(1)
+				scan := withPinnedBlocks(withScan(context.Background(), nil, lane), pinned)
+				statusesBefore := index.statuses.Load()
+				if prefetched {
+					test.prefetch(withDeployment(scan, test.name, 0))
+				}
+				done := make(chan error, 1)
+				go func() { done <- test.read(withDeployment(scan, test.name, test.chainID)) }()
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Fatal(err)
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatalf("read did not finish on a lane of one: lane = %+v", lane.stats())
+				}
+				if index.statuses.Load() == statusesBefore {
+					t.Fatalf("no status read reached the index, so the cache was not cold")
+				}
+				waitForLaneStats(t, lane, IndexerLaneStats{Capacity: 1})
+			})
+		}
+	}
 }

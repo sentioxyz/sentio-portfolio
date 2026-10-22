@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -277,5 +278,262 @@ func TestSentioAPIRequestsOverlap(t *testing.T) {
 	}
 	if got := arrivals.Load(); got != 2 {
 		t.Fatalf("server saw %d requests, want 2", got)
+	}
+}
+
+// heldStatusServer answers processor status reads for version 42 on Polygon, each only once let
+// through, reporting Polygon processed up to 100 plus the read's number so a caller can tell which
+// read answered it. A failing server answers 404, which the client does not retry. A read whose
+// client gave up before it was let through counts as canceled.
+type heldStatusServer struct {
+	*httptest.Server
+	reads    atomic.Int32
+	canceled atomic.Int32
+	// letThrough lets one held read answer for every value sent, and every read once closed.
+	letThrough chan struct{}
+	closeOnce  sync.Once
+}
+
+func newHeldStatusServer(t *testing.T, failing bool) *heldStatusServer {
+	t.Helper()
+	server := &heldStatusServer{letThrough: make(chan struct{})}
+	server.Server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		read := server.reads.Add(1)
+		select {
+		case <-server.letThrough:
+		case <-request.Context().Done():
+			server.canceled.Add(1)
+			return
+		}
+		if failing {
+			http.NotFound(writer, request)
+			return
+		}
+		writer.Header().Set("content-type", "application/json")
+		_ = json.NewEncoder(writer).Encode(uniswapIndexerTestStatus("42", []ChainID{Polygon}, 100+uint64(read)))
+	}))
+	t.Cleanup(server.Close)
+	// Cleanups run last in, first out: free the held handlers before the server waits for them.
+	t.Cleanup(server.letAllThrough)
+	return server
+}
+
+func (s *heldStatusServer) letAllThrough() {
+	s.closeOnce.Do(func() { close(s.letThrough) })
+}
+
+func (s *heldStatusServer) config() SentioIndexerConfig {
+	return SentioIndexerConfig{GraphQLURL: s.URL + "/graphql", StatusURL: s.URL + "/status", ProcessorVersion: "42"}
+}
+
+// statusAnswer is what one chainStatuses call returned for Polygon.
+type statusAnswer struct {
+	processed uint64
+	err       error
+}
+
+func readPolygonStatus(ctx context.Context, client *sentioAPIClient, config SentioIndexerConfig, force bool) statusAnswer {
+	statuses, err := client.chainStatuses(ctx, config, []ChainID{Polygon}, force)
+	return statusAnswer{processed: statuses[Polygon].ProcessedBlock, err: err}
+}
+
+// waitUntil polls condition, since what it observes happens on other goroutines.
+func waitUntil(t *testing.T, what string, condition func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(2 * time.Second); !condition(); time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting until %s", what)
+		}
+	}
+}
+
+// assertStillWaiting fails if any caller has answered yet.
+func assertStillWaiting(t *testing.T, answers <-chan statusAnswer, what string) {
+	t.Helper()
+	select {
+	case answer := <-answers:
+		t.Fatalf("%s answered %+v before the read it waits for did", what, answer)
+	case <-time.After(30 * time.Millisecond):
+	}
+}
+
+// Callers that find one status stale share one read, and the caller that started it can leave
+// without ending it: the read runs on, answers everyone still waiting, and fills the cache.
+func TestStatusRefreshOutlivesTheCallerThatStartedIt(t *testing.T) {
+	server := newHeldStatusServer(t, false)
+	client := &sentioAPIClient{apiKey: "test-key", httpClient: server.Client()}
+	config := server.config()
+
+	starterCtx, cancelStarter := context.WithCancel(context.Background())
+	starter := make(chan statusAnswer, 1)
+	go func() { starter <- readPolygonStatus(starterCtx, client, config, false) }()
+	waitUntil(t, "the starter's read arrives", func() bool { return server.reads.Load() == 1 })
+	waiters := make(chan statusAnswer, 3)
+	for range cap(waiters) {
+		go func() { waiters <- readPolygonStatus(context.Background(), client, config, false) }()
+	}
+	assertStillWaiting(t, waiters, "a waiter")
+
+	cancelStarter()
+	if answer := <-starter; !errors.Is(answer.err, context.Canceled) {
+		t.Fatalf("starter = %+v, want its own cancellation", answer)
+	}
+	assertStillWaiting(t, waiters, "a waiter")
+	server.letThrough <- struct{}{}
+	for range cap(waiters) {
+		if answer := <-waiters; answer.err != nil || answer.processed != 101 {
+			t.Fatalf("waiter = %+v, want the one read's block 101", answer)
+		}
+	}
+	if server.reads.Load() != 1 || server.canceled.Load() != 0 {
+		t.Fatalf("reads = %d, canceled = %d, want one read that ran to its end", server.reads.Load(), server.canceled.Load())
+	}
+	if answer := readPolygonStatus(context.Background(), client, config, false); answer.err != nil ||
+		answer.processed != 101 || server.reads.Load() != 1 {
+		t.Fatalf("next caller = %+v after %d reads, want the cached block 101", answer, server.reads.Load())
+	}
+}
+
+// A failed read answers everyone who waited on it, so a failing endpoint costs one read rather
+// than one per waiter, and is not cached: the next caller reads again.
+func TestStatusRefreshSharesItsFailureWithoutCachingIt(t *testing.T) {
+	server := newHeldStatusServer(t, true)
+	client := &sentioAPIClient{apiKey: "test-key", httpClient: server.Client()}
+	config := server.config()
+
+	answers := make(chan statusAnswer, 3)
+	for range cap(answers) {
+		go func() { answers <- readPolygonStatus(context.Background(), client, config, false) }()
+	}
+	waitUntil(t, "the read arrives", func() bool { return server.reads.Load() == 1 })
+	assertStillWaiting(t, answers, "a caller")
+	server.letAllThrough()
+	for range cap(answers) {
+		if answer := <-answers; answer.err == nil || !strings.Contains(answer.err.Error(), "HTTP 404") {
+			t.Fatalf("caller = %+v, want the shared read's 404", answer)
+		}
+	}
+	if server.reads.Load() != 1 {
+		t.Fatalf("reads = %d, want the one the callers shared", server.reads.Load())
+	}
+	if answer := readPolygonStatus(context.Background(), client, config, false); answer.err == nil || server.reads.Load() != 2 {
+		t.Fatalf("next caller = %+v after %d reads, want a read of its own", answer, server.reads.Load())
+	}
+}
+
+// The read belongs to no caller, so its own timeout ends it when the endpoint never answers, and
+// it says so rather than passing for any caller's deadline.
+func TestStatusRefreshEndsAtItsOwnTimeout(t *testing.T) {
+	server := newHeldStatusServer(t, false)
+	client := &sentioAPIClient{apiKey: "test-key", httpClient: server.Client(), statusTimeout: 50 * time.Millisecond}
+	startedAt := time.Now()
+	answers := make(chan statusAnswer, 1)
+	go func() { answers <- readPolygonStatus(context.Background(), client, server.config(), false) }()
+	var answer statusAnswer
+	select {
+	case answer = <-answers:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the read outlived its own timeout")
+	}
+	if answer.err == nil || !strings.Contains(answer.err.Error(), "no answer within 50ms") ||
+		errors.Is(answer.err, context.DeadlineExceeded) || time.Since(startedAt) > time.Second {
+		t.Fatalf("read = %+v after %s, want its own timeout at about 50ms", answer, time.Since(startedAt))
+	}
+	waitUntil(t, "the abandoned request ends", func() bool { return server.canceled.Load() == 1 })
+}
+
+// A forced refresh replaces an entry found too old, so a read already in flight when it was asked
+// for cannot answer it: forced callers wait that read out and share the next one.
+func TestForcedStatusRefreshIsAnsweredByALaterRead(t *testing.T) {
+	server := newHeldStatusServer(t, false)
+	client := &sentioAPIClient{apiKey: "test-key", httpClient: server.Client()}
+	config := server.config()
+
+	first := make(chan statusAnswer, 1)
+	go func() { first <- readPolygonStatus(context.Background(), client, config, false) }()
+	waitUntil(t, "the first read arrives", func() bool { return server.reads.Load() == 1 })
+	forced := make(chan statusAnswer, 2)
+	for range cap(forced) {
+		go func() { forced <- readPolygonStatus(context.Background(), client, config, true) }()
+	}
+	assertStillWaiting(t, forced, "a forced caller")
+
+	server.letThrough <- struct{}{}
+	if answer := <-first; answer.err != nil || answer.processed != 101 {
+		t.Fatalf("first caller = %+v, want block 101", answer)
+	}
+	waitUntil(t, "the forced callers' read arrives", func() bool { return server.reads.Load() == 2 })
+	assertStillWaiting(t, forced, "a forced caller")
+	server.letThrough <- struct{}{}
+	for range cap(forced) {
+		if answer := <-forced; answer.err != nil || answer.processed != 102 {
+			t.Fatalf("forced caller = %+v, want the later read's block 102", answer)
+		}
+	}
+	if server.reads.Load() != 2 {
+		t.Fatalf("reads = %d, want the first and one the forced callers shared", server.reads.Load())
+	}
+}
+
+// Each StatusURL@version refreshes on its own: a read that hangs for one indexer holds up no
+// caller of another, as one client serving both Uniswap generations needs.
+func TestStatusRefreshesAreKeyedByEndpointAndVersion(t *testing.T) {
+	hung := newHeldStatusServer(t, false)
+	answering := newHeldStatusServer(t, false)
+	answering.letAllThrough()
+	client := &sentioAPIClient{apiKey: "test-key", httpClient: hung.Client()}
+
+	go readPolygonStatus(context.Background(), client, hung.config(), false)
+	waitUntil(t, "the hung read arrives", func() bool { return hung.reads.Load() == 1 })
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if answer := readPolygonStatus(ctx, client, answering.config(), false); answer.err != nil || answer.processed != 101 {
+		t.Fatalf("other indexer = %+v, want its own read's block 101 while the first hangs", answer)
+	}
+}
+
+// mETH reads its status through the shared client, under the rules every indexer follows: a
+// pinned version still PENDING is runnable, while an error record or a malformed latest block on
+// Ethereum fails the read, and Ethereum must be at PROCESSING_LATEST.
+func TestMethReadsItsStatusLikeEveryIndexer(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		versionState string
+		state        string
+		estimated    string
+		errorRecord  string
+		wantError    string
+	}{
+		{name: "active", versionState: "ACTIVE", state: "PROCESSING_LATEST", estimated: "120"},
+		{name: "pending", versionState: "PENDING", state: "PROCESSING_LATEST", estimated: "120"},
+		{name: "draft", versionState: "DRAFT", state: "PROCESSING_LATEST", estimated: "120", wantError: "0 runnable version"},
+		{name: "catching up", versionState: "ACTIVE", state: "CATCHING_UP", estimated: "120", wantError: "backfill is incomplete for chain 1"},
+		{name: "error record", versionState: "ACTIVE", state: "PROCESSING_LATEST", estimated: "120", errorRecord: "stuck", wantError: "processor chain 1 error: stuck"},
+		{name: "malformed latest", versionState: "ACTIVE", state: "PROCESSING_LATEST", estimated: "soon", wantError: "invalid latest block"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				_, _ = fmt.Fprintf(writer, `{"processors":[{"version":1,"versionState":%q,
+					"processorStatus":{"state":"PROCESSING"},"states":[{"chainId":"1",
+					"processedBlockNumber":"110","estimatedLatestBlockNumber":%q,
+					"status":{"state":%q,"errorRecord":{"message":%q}}}]}]}`,
+					test.versionState, test.estimated, test.state, test.errorRecord)
+			}))
+			defer server.Close()
+			adapter := &MethAdapter{
+				indexer: SentioIndexerConfig{GraphQLURL: server.URL, StatusURL: server.URL, ProcessorVersion: "1"},
+				api:     &sentioAPIClient{apiKey: "test-key", httpClient: server.Client()},
+			}
+			processed, err := adapter.processedBlock(context.Background())
+			if test.wantError == "" {
+				if err != nil || processed != 110 {
+					t.Fatalf("processed = %d, %v, want block 110", processed, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("processed = %d, %v, want an error naming %q", processed, err, test.wantError)
+			}
+		})
 	}
 }
