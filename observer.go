@@ -26,26 +26,29 @@ type Observer interface {
 	ObserveIndexer(IndexerObservation)
 }
 
-// ScanObservation summarizes one scan. The phase durations are wall-clock and sequential, so they
-// add up to roughly Duration; the counts describe what the scan actually did rather than what it
-// was asked for.
+// ScanObservation summarizes one scan. The phase durations are wall-clock. ChainSetup, Protocols
+// and Pricing run one after another, so they add up to roughly Duration; WalletDiscovery runs
+// within Protocols, beside the workers. The counts describe what the scan actually did rather than
+// what it was asked for.
 type ScanObservation struct {
 	Options  ScanOptions
 	Duration time.Duration
 
 	// ChainSetup dials every selected chain, pins its block and resolves attributed accounts.
 	ChainSetup time.Duration
-	// WalletDiscovery is the WalletBalanceProvider call. Zero when the wallet protocol was
-	// excluded.
+	// WalletDiscovery is the WalletBalanceProvider call, made while the workers read the other
+	// protocols. Zero when the wallet protocol was excluded or no chain was pinned.
 	WalletDiscovery time.Duration
-	// Protocols is the adapter fan-out: every (protocol, chain) deployment on the worker pool.
+	// Protocols is the adapter fan-out: every (protocol, chain) deployment, from the start of
+	// wallet discovery and the workers to the end of the last deployment.
 	Protocols time.Duration
 	// Pricing is the PriceProvider round trip plus valuation. Zero when prices were skipped.
 	Pricing time.Duration
 
 	// Chains is how many chains were pinned successfully and therefore scanned.
 	Chains int
-	// Deployments is how many (protocol, chain) pairs were dispatched to the worker pool.
+	// Deployments is how many (protocol, chain) pairs the scan started: on the workers, or for
+	// the wallet, beside them.
 	Deployments int
 	Snapshots   int
 	// Errors is the scan's error list as the Response reports it. It is shared with the

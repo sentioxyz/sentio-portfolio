@@ -167,6 +167,14 @@ empty `Holds`. Only a nil `Holds` falls back to treating `Source.Contract` as
 held when `Source.Method` mentions `balanceOf`, an inference that misses every
 other shape, so new code declares explicitly.
 
+Discovery runs beside the scan workers, not ahead of them: only the wallet's own
+deployments read its answer. Once it is in they all run at once, each on its own
+chain, and never on a worker, so they do not queue behind a slow protocol, and a
+scan stopped at its deadline loses index-backed protocols before it loses the
+wallet. No other deployment may read what discovery fills in, since it runs while
+discovery is still writing; whatever reconciles holdings with positions, such as
+`suppressDuplicateHoldings`, runs once both are done.
+
 ## Sui reads
 
 Sui is read through `SuiReader` (`sui.go`), implemented by `SuiGRPCClient` (`sui_grpc.go`) over
