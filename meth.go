@@ -1,15 +1,11 @@
 package portfolio
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math/big"
 	"net/http"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,12 +16,11 @@ import (
 )
 
 const (
-	methActivationBlock     = 18_290_599
-	methIndexerPageSize     = 500
-	methMaxIndexedRequests  = 4_096
-	methMaxRPCTailBlocks    = 2_048
-	methCheckpointMaxLag    = 7*24*time.Hour + 30*time.Minute
-	methIndexerRetryInitial = 300 * time.Millisecond
+	methActivationBlock    = 18_290_599
+	methIndexerPageSize    = 500
+	methMaxIndexedRequests = 4_096
+	methMaxRPCTailBlocks   = 2_048
+	methCheckpointMaxLag   = 7*24*time.Hour + 30*time.Minute
 )
 
 var (
@@ -74,24 +69,6 @@ var methManagerABI = MustABI(`[
   }
 ]`)
 
-type methIndexerStatus struct {
-	Processors []struct {
-		Version      any    `json:"version"`
-		VersionState string `json:"versionState"`
-		Status       struct {
-			State string `json:"state"`
-		} `json:"processorStatus"`
-		States []struct {
-			ChainID             string `json:"chainId"`
-			ProcessedBlock      string `json:"processedBlockNumber"`
-			EstimatedLatest     string `json:"estimatedLatestBlockNumber"`
-			ProcessingStateData struct {
-				State string `json:"state"`
-			} `json:"status"`
-		} `json:"states"`
-	} `json:"processors"`
-}
-
 type methGraphQLResponse struct {
 	Data struct {
 		Checkpoints []struct {
@@ -116,136 +93,35 @@ type methRPCLog struct {
 
 type MethAdapter struct {
 	adapterBase
-	indexer    SentioIndexerConfig
-	apiKey     string
-	httpClient *http.Client
-	statusGate statusGate
-	statusAt   time.Time
-	processed  uint64
+	indexer SentioIndexerConfig
+	api     *sentioAPIClient
 }
 
 func newMethAdapter(indexer SentioIndexerConfig) Adapter {
-	apiKey := os.Getenv("PORTFOLIO_SENTIO_API_KEY")
-	if apiKey == "" {
-		apiKey = os.Getenv("NEXT_PUBLIC_SENTIO_API_KEY")
-	}
 	return &MethAdapter{
 		adapterBase: adapterBase{info: ProtocolInfo{
 			ID: "meth-protocol", Name: "Mantle mETH", Chains: []ChainID{Ethereum},
 		}},
-		indexer:    indexer,
-		apiKey:     apiKey,
-		httpClient: &http.Client{Timeout: 25 * time.Second, Transport: newSentioTransport()},
+		indexer: indexer,
+		api:     newSentioAPIClient(),
 	}
 }
 
-func (a *MethAdapter) doJSON(
-	ctx context.Context,
-	method string,
-	endpoint string,
-	body any,
-	result any,
-) error {
-	var last error
-	for attempt := 0; attempt < 3; attempt++ {
-		var reader io.Reader
-		if body != nil {
-			payload, err := json.Marshal(body)
-			if err != nil {
-				return err
-			}
-			reader = bytes.NewReader(payload)
-		}
-		request, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
-		if err != nil {
-			return err
-		}
-		request.Header.Set("accept-encoding", "identity")
-		if body != nil {
-			request.Header.Set("content-type", "application/json")
-		}
-		if a.apiKey != "" {
-			request.Header.Set("api-key", a.apiKey)
-		}
-		startedAt := time.Now()
-		response, err := a.httpClient.Do(request)
-		if err == nil {
-			payload, readErr := io.ReadAll(io.LimitReader(response.Body, 4<<20))
-			response.Body.Close()
-			if readErr != nil {
-				err = readErr
-			} else if response.StatusCode != http.StatusOK {
-				err = fmt.Errorf(
-					"HTTP %d: %s",
-					response.StatusCode,
-					strings.TrimSpace(string(payload[:min(len(payload), 300)])),
-				)
-				if response.StatusCode != http.StatusTooManyRequests &&
-					response.StatusCode < http.StatusInternalServerError {
-					observeIndexerRequest(ctx, method, attempt, startedAt, err)
-					return err
-				}
-			} else if decodeErr := json.Unmarshal(payload, result); decodeErr != nil {
-				err = decodeErr
-			} else {
-				observeIndexerRequest(ctx, method, attempt, startedAt, nil)
-				return nil
-			}
-		}
-		observeIndexerRequest(ctx, method, attempt, startedAt, err)
-		last = err
-		if attempt < 2 {
-			timer := time.NewTimer(methIndexerRetryInitial << attempt)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return ctx.Err()
-			case <-timer.C:
-			}
-		}
-	}
-	return fmt.Errorf("request failed after 3 attempts: %w", last)
-}
-
+// processedBlock is how far the withdrawal index has processed Ethereum, read through the shared
+// status cache under the rules every other indexer follows.
 func (a *MethAdapter) processedBlock(ctx context.Context) (uint64, error) {
-	if err := a.indexer.validate(); err != nil {
+	statuses, err := a.api.chainStatuses(ctx, a.indexer, []ChainID{Ethereum}, false)
+	if err != nil {
 		return 0, err
 	}
-	if err := a.statusGate.lock(ctx); err != nil {
-		return 0, err
+	status := statuses[Ethereum]
+	if status.State != "PROCESSING_LATEST" {
+		return 0, fmt.Errorf(
+			"indexer backfill is incomplete for chain %d: state=%s processed=%d estimatedLatest=%d",
+			Ethereum, status.State, status.ProcessedBlock, status.EstimatedLatest,
+		)
 	}
-	defer a.statusGate.unlock()
-	if time.Since(a.statusAt) < 30*time.Second && a.processed > 0 {
-		return a.processed, nil
-	}
-	var payload methIndexerStatus
-	if err := a.doJSON(ctx, http.MethodGet, a.indexer.StatusURL, nil, &payload); err != nil {
-		return 0, fmt.Errorf("processor status: %w", err)
-	}
-	var matches []uint64
-	for _, processor := range payload.Processors {
-		if fmt.Sprint(processor.Version) != a.indexer.ProcessorVersion ||
-			processor.VersionState != "ACTIVE" ||
-			processor.Status.State != "PROCESSING" {
-			continue
-		}
-		for _, state := range processor.States {
-			if state.ChainID != "1" || state.ProcessingStateData.State != "PROCESSING_LATEST" {
-				continue
-			}
-			block, err := strconv.ParseUint(state.ProcessedBlock, 10, 64)
-			if err != nil {
-				return 0, fmt.Errorf("processor returned invalid block %q", state.ProcessedBlock)
-			}
-			matches = append(matches, block)
-		}
-	}
-	if len(matches) != 1 {
-		return 0, fmt.Errorf("processor status returned %d active Ethereum states", len(matches))
-	}
-	a.processed = matches[0]
-	a.statusAt = time.Now()
-	return a.processed, nil
+	return status.ProcessedBlock, nil
 }
 
 const methWalletQuery = `
@@ -284,7 +160,7 @@ func (a *MethAdapter) graphqlPage(
 		return methGraphQLResponse{}, err
 	}
 	var payload methGraphQLResponse
-	err := a.doJSON(
+	err := a.api.doJSON(
 		ctx,
 		http.MethodPost,
 		a.indexer.GraphQLURL,

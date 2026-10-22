@@ -14,9 +14,10 @@ import (
 // concurrent scan.
 const defaultIndexerConcurrency = 4
 
-// indexerLane is the admission control in front of every Sentio indexer request: status reads,
-// position pages and retries alike. It replaced a single mutex, whose serialization was the
-// largest item in a full scan's wall clock.
+// indexerLane is the admission control in front of every Sentio indexer query: position pages,
+// presence probes, SQL statements and their retries alike. Processor status reads take no slot
+// (chainStatuses). It replaced a single mutex, whose serialization was the largest item in a full
+// scan's wall clock.
 type indexerLane struct {
 	slots chan struct{}
 	// waiting counts callers blocked in acquire, for IndexerLaneStats.

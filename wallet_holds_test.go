@@ -199,6 +199,7 @@ func assertHeldExactly(
 }
 
 func TestMethDeclaresTheMETHItConverts(t *testing.T) {
+	t.Setenv("PORTFOLIO_SENTIO_API_KEY", "test-key")
 	block := BlockRef{ChainID: Ethereum, Number: 23_000_000, Timestamp: 1_752_000_000, Fixed: true}
 	shares := big.NewInt(1_709_061_383_420_883_701)
 	stub := newContractStub(t, Ethereum, holdsTestAccount)
@@ -219,7 +220,8 @@ func TestMethDeclaresTheMETHItConverts(t *testing.T) {
 		case "/status":
 			_, _ = fmt.Fprintf(writer, `{"processors":[{"version":1,"versionState":"ACTIVE",`+
 				`"processorStatus":{"state":"PROCESSING"},"states":[{"chainId":"1",`+
-				`"processedBlockNumber":"%d","status":{"state":"PROCESSING_LATEST"}}]}]}`, block.Number)
+				`"processedBlockNumber":"%d","estimatedLatestBlockNumber":"%d",`+
+				`"status":{"state":"PROCESSING_LATEST"}}]}]}`, block.Number, block.Number)
 		case "/graphql":
 			_, _ = fmt.Fprintf(writer, `{"data":{"indexerCheckpoints":[{"blockNumber":"%d",`+
 				`"timestampMs":"%d"}],"withdrawalRequests":[]}}`, block.Number, block.Timestamp*1_000)

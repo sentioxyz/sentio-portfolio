@@ -19,11 +19,15 @@ single processor:
 
 ### Indexer requests
 
-Every indexer request passes through one `indexerLane` per engine (`sentio_lane.go`), sized
-by `EngineConfig.IndexerConcurrency`: the adapters share one API key, so admission is bounded
-per engine, not per protocol. Do not add a second lock or a per-adapter limiter in front of it.
-A SQL statement holds its slot from submission until it finishes, polls included, since the
-statement is what occupies the key's server-side queue.
+Every GraphQL query and SQL statement passes through one `indexerLane` per engine
+(`sentio_lane.go`), sized by `EngineConfig.IndexerConcurrency`: the adapters share one API key,
+so admission is bounded per engine, not per protocol. Do not add a second lock or a per-adapter
+limiter in front of it. A SQL statement holds its slot from submission until it finishes, polls
+included, since the statement is what occupies the key's server-side queue. Processor status
+reads take no slot: they ask the processor status API, which runs none of the key's queries, and
+normally once per indexer per `sentioStatusCacheTTL`. Never make them need one — callers read the
+status cache while holding a slot, so with a lane of one a refresh waiting for another slot
+would deadlock the scan.
 
 `sentioAPIClient` keeps one `http.Client` that is never replaced and never locked, on a transport
 restricted to HTTP/1.1 and offering only http/1.1 through ALPN (`newSentioTransport`; a clone of the
@@ -32,11 +36,15 @@ request stalls only itself, and net/http closes a connection whose request timed
 returning it to the pool, so a retry never lands on it. Do not enable HTTP/2 on that transport
 and do not put a mutex or a client rotation around the request: multiplexing puts every chain of a
 protocol on one connection, and the lock that made rotation safe serialized them all behind one
-request. Besides the lane, the only place indexer requests wait on each other is the status cache,
-whose fetch runs under a one-slot `statusGate` so concurrent chains of one protocol share one status
-read. Waiting at that gate must stay cancelable — a waiter usually holds a lane slot, and a scan's
-collection deadline is only a bound if every wait under it ends with its context — so do not turn
-it back into a `sync.Mutex`.
+request. Besides the lane, the only place indexer requests wait on each other is the status cache.
+A stale entry is refreshed by one read per `StatusURL@version` at a time, shared by every caller
+that needs it while it runs, failure included; a failure is not cached. The read runs on a context
+no caller owns, bounded by `sentioStatusRefreshTimeout`, and each caller waits for it or for its own
+context, whichever ends first, so the caller that happened to start it can leave without failing
+the others. The mutex in front of the cache is held only to read or swap an entry. Keep both
+properties: a waiter usually holds a lane slot, and a scan's collection deadline is only a bound if
+every wait under it ends with its context — so never send the read under that mutex, nor on a
+caller's context. mETH reads its status through the same client.
 
 A scan with `ScanOptions.CollectDeadline` stops reading at that time and reports each chain or
 deployment it did not finish as an `incomplete` error rather than a failure; pricing then runs on

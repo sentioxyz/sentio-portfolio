@@ -21,6 +21,10 @@ const (
 	// sentioResponseLimit bounds the body one request may return.
 	sentioResponseLimit  = 4 << 20
 	sentioStatusCacheTTL = 30 * time.Second
+	// sentioStatusRefreshTimeout bounds one processor status refresh, which belongs to no caller
+	// and so would otherwise end only with its retries: long enough for an attempt that stalls and
+	// a retry, and no longer than the entry it writes stays fresh.
+	sentioStatusRefreshTimeout = 30 * time.Second
 
 	// sentioIdleConnsPerHost is how many idle connections to the indexer one client keeps warm.
 	// The scan workers and the presence prefetcher put at most a handful of requests in flight
@@ -81,36 +85,26 @@ type sentioAPIClient struct {
 	apiKey string
 	// httpClient is shared by every request and never replaced. Its transport speaks HTTP/1.1
 	// only (see newSentioTransport), so requests from the scan workers run concurrently, each on
-	// its own connection, with nothing in front of them but the indexer lane.
+	// its own connection, with nothing in front of them but the indexer lane — or, for a status
+	// read, the one refresh it shares.
 	httpClient *http.Client
 	// sql paces and bounds SQL statements (sentio_sql.go).
-	sql        sentioSQLTiming
-	statusGate statusGate
-	statuses   map[string]sentioStatusCache
+	sql sentioSQLTiming
+	// statusTimeout bounds one status refresh; zero takes sentioStatusRefreshTimeout.
+	statusTimeout time.Duration
+	// statusMu guards statuses and refreshes. It is held only to read or swap an entry, never
+	// across a request, so waiting for a status is waiting on a refresh, which a caller can leave.
+	statusMu  sync.Mutex
+	statuses  map[string]sentioStatusCache
+	refreshes map[string]*statusRefresh
 }
 
-// statusGate serializes processor status reads, so concurrent chains of one protocol share one
-// refresh. Unlike a mutex it lets a caller waiting behind a slow refresh — up to three attempts
-// of the client's timeout — give up when its own context ends; the waiter usually holds an
-// indexer lane slot, and a scan cannot return before its workers do. The zero value is ready to
-// use.
-type statusGate struct {
-	once sync.Once
-	slot chan struct{}
-}
-
-func (g *statusGate) lock(ctx context.Context) error {
-	g.once.Do(func() { g.slot = make(chan struct{}, 1) })
-	select {
-	case g.slot <- struct{}{}:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-func (g *statusGate) unlock() {
-	<-g.slot
+// statusRefresh is one processor status read, shared by every caller that needs the status while
+// it runs. chains and err are set before done closes.
+type statusRefresh struct {
+	done   chan struct{}
+	chains map[ChainID]sentioChainStatus
+	err    error
 }
 
 func newSentioAPIClient() *sentioAPIClient {
@@ -122,6 +116,7 @@ func newSentioAPIClient() *sentioAPIClient {
 		apiKey:     apiKey,
 		httpClient: &http.Client{Timeout: 25 * time.Second, Transport: newSentioTransport()},
 		statuses:   make(map[string]sentioStatusCache),
+		refreshes:  make(map[string]*statusRefresh),
 	}
 }
 
@@ -313,6 +308,16 @@ func validateSentioChainStatuses(
 	return chains, nil
 }
 
+// chainStatuses returns the processor's status for every chain, from an entry younger than
+// sentioStatusCacheTTL unless forceRefresh asks for a newer one, and fails if one of
+// requiredChains is missing or failed.
+//
+// An entry is refreshed by one read per StatusURL@version at a time, which every caller needing it
+// while it runs shares — its failure too, which is not cached. Each caller waits for the read or
+// for its own context, whichever ends first: the read runs on a context of its own, carrying ctx's
+// values but not its cancellation and bounded by statusTimeout, so the caller that happened to
+// start it can leave without failing the others. The read takes no indexer lane slot. Callers ask
+// while holding one, and with a lane of one a read that needed a slot would never get it.
 func (c *sentioAPIClient) chainStatuses(
 	ctx context.Context,
 	config SentioIndexerConfig,
@@ -322,17 +327,88 @@ func (c *sentioAPIClient) chainStatuses(
 	if err := config.validate(); err != nil {
 		return nil, err
 	}
-	if err := c.statusGate.lock(ctx); err != nil {
-		return nil, err
-	}
-	defer c.statusGate.unlock()
-	cacheKey := config.StatusURL + "@" + config.ProcessorVersion
-	if !forceRefresh {
-		if cached, exists := c.statuses[cacheKey]; exists && time.Since(cached.At) < sentioStatusCacheTTL {
+	key := config.StatusURL + "@" + config.ProcessorVersion
+	// A forced refresh replaces an entry found too old for the caller's pin, so a read already in
+	// flight when it was asked for, which may have been sent before that pin, cannot answer it: the
+	// caller waits that read out and shares the next.
+	var tooEarly *statusRefresh
+	for {
+		// A caller already gone starts no read.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		c.statusMu.Lock()
+		if cached, exists := c.statuses[key]; exists && !forceRefresh && time.Since(cached.At) < sentioStatusCacheTTL {
+			c.statusMu.Unlock()
 			return validateSentioChainStatuses(cached.Chains, requiredChains)
 		}
+		refresh := c.refreshes[key]
+		switch {
+		case refresh == nil:
+			refresh = c.startStatusRefresh(ctx, key, config)
+		case forceRefresh && tooEarly == nil:
+			tooEarly = refresh
+		}
+		c.statusMu.Unlock()
+		select {
+		case <-refresh.done:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		if refresh == tooEarly {
+			continue
+		}
+		if refresh.err != nil {
+			return nil, refresh.err
+		}
+		return validateSentioChainStatuses(refresh.chains, requiredChains)
 	}
+}
 
+// startStatusRefresh registers a read of key's status and starts it. The caller holds statusMu.
+func (c *sentioAPIClient) startStatusRefresh(
+	ctx context.Context,
+	key string,
+	config SentioIndexerConfig,
+) *statusRefresh {
+	if c.refreshes == nil {
+		c.refreshes = make(map[string]*statusRefresh)
+	}
+	refresh := &statusRefresh{done: make(chan struct{})}
+	c.refreshes[key] = refresh
+	timeout := c.statusTimeout
+	if timeout <= 0 {
+		timeout = sentioStatusRefreshTimeout
+	}
+	// The read reports under the caller that started it, which is all it keeps of that caller.
+	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	go func() {
+		defer cancel()
+		chains, err := c.readChainStatuses(readCtx, config)
+		if err != nil && readCtx.Err() != nil {
+			// The read's own bound, not any caller's deadline, ended it.
+			err = fmt.Errorf("processor status: no answer within %s", timeout)
+		}
+		c.statusMu.Lock()
+		if err == nil {
+			if c.statuses == nil {
+				c.statuses = make(map[string]sentioStatusCache)
+			}
+			c.statuses[key] = sentioStatusCache{At: time.Now(), Chains: chains}
+		}
+		delete(c.refreshes, key)
+		c.statusMu.Unlock()
+		refresh.chains, refresh.err = chains, err
+		close(refresh.done)
+	}()
+	return refresh
+}
+
+// readChainStatuses sends one status request and parses every chain of the configured version.
+func (c *sentioAPIClient) readChainStatuses(
+	ctx context.Context,
+	config SentioIndexerConfig,
+) (map[ChainID]sentioChainStatus, error) {
 	var payload sentioIndexerStatusResponse
 	if err := c.doJSON(ctx, http.MethodGet, config.StatusURL, nil, &payload); err != nil {
 		return nil, fmt.Errorf("processor status: %w", err)
@@ -387,6 +463,5 @@ func (c *sentioAPIClient) chainStatuses(
 			config.ProcessorVersion,
 		)
 	}
-	c.statuses[cacheKey] = sentioStatusCache{At: time.Now(), Chains: chains}
-	return validateSentioChainStatuses(chains, requiredChains)
+	return chains, nil
 }
