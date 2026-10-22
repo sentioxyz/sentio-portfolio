@@ -249,20 +249,6 @@ func (a *waitingTestAdapter) Positions(ctx context.Context, _ *RPCClient, _ Bloc
 	return nil, nil
 }
 
-// gatedWalletProvider holds wallet discovery, which the engine runs after starting the probes and
-// before dispatching any deployment, until ready closes.
-type gatedWalletProvider struct {
-	ready <-chan struct{}
-}
-
-func (p gatedWalletProvider) WalletBalances(ctx context.Context, _ WalletBalanceRequest) (WalletBalanceResult, error) {
-	select {
-	case <-p.ready:
-	case <-ctx.Done():
-	}
-	return WalletBalanceResult{}, nil
-}
-
 // newPresenceTestEngine scans each chain in rpcs at its pin with adapters, under availability.
 func newPresenceTestEngine(
 	t *testing.T,
@@ -324,6 +310,16 @@ func TestScanEndsAProtocolsProbeOnceNoDeploymentNeedsIt(t *testing.T) {
 				close(bothInFlight)
 			}()
 
+			// The first deployment holds the scan's one worker until both probes are in flight.
+			hold := &waitingTestAdapter{
+				adapterBase: adapterBase{info: ProtocolInfo{ID: "hold", Name: "hold", Chains: []ChainID{BSC}}},
+				wait: func(ctx context.Context) {
+					select {
+					case <-bothInFlight:
+					case <-ctx.Done():
+					}
+				},
+			}
 			ended := newProbingTestAdapter("ended", "endedRefs", index, chains...)
 			ended.positions = func(context.Context, BlockRef, common.Address) {}
 			checked := make(chan struct{})
@@ -348,6 +344,7 @@ func TestScanEndsAProtocolsProbeOnceNoDeploymentNeedsIt(t *testing.T) {
 			needed.positions = func(context.Context, BlockRef, common.Address) { <-checked }
 
 			availability := map[string]chainAvailability{
+				"hold":   {BSC: {availableFromGenesis()}},
 				"ended":  {BSC: {availableFromGenesis()}, Base: {availableFromGenesis()}, Arbitrum: {availableFromGenesis()}},
 				"gate":   {BSC: {availableFromGenesis()}},
 				"needed": {BSC: {availableFromGenesis()}, Base: {availableFromGenesis()}, Arbitrum: {availableFromGenesis()}},
@@ -356,8 +353,10 @@ func TestScanEndsAProtocolsProbeOnceNoDeploymentNeedsIt(t *testing.T) {
 				later := availableFrom(pin + 1)
 				availability["ended"] = chainAvailability{BSC: {later}, Base: {later}, Arbitrum: {later}}
 			}
-			// The deployments are dispatched in adapter order, so the ended protocol's go first.
-			engine := newPresenceTestEngine(t, rpcs, gatedWalletProvider{ready: bothInFlight}, availability, ended, gate, needed)
+			// The deployments are dispatched in adapter order, so the ended protocol's go first
+			// once the hold lets the worker go.
+			engine := newPresenceTestEngine(t, rpcs, nil, availability, hold, ended, gate, needed)
+			engine.scanWorkers = 1
 			startedAt := time.Now()
 			engine.ScanWithOptions(context.Background(), common.HexToAddress("0x00000000000000000000000000000000000000a1"), pinnedScan(rpcs))
 			if problem := <-verdict; problem != "" {

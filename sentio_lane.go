@@ -10,8 +10,8 @@ import (
 // defaultIndexerConcurrency is how many Sentio indexer requests one engine keeps in flight. The
 // index-backed adapters share one API key, so the bound is per engine rather than per protocol:
 // it protects the key's server-side queue while letting the scan's workers query in parallel
-// instead of behind one another. Four covers the three scan workers with one to spare for a
-// concurrent scan.
+// instead of behind one another. Four covers a scan's default three workers with one to spare for
+// a concurrent scan.
 const defaultIndexerConcurrency = 4
 
 // indexerLane is the admission control in front of every Sentio indexer query: position pages,

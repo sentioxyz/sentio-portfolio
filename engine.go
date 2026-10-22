@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -23,12 +24,16 @@ type Engine struct {
 	observer              Observer
 	indexerLane           *indexerLane
 	disabledChains        map[ChainID]struct{}
+	scanWorkers           int
 }
 
 // defaultHeadLagBlocks is how far behind the advertised head a live scan pins itself. Four blocks
 // was enough to remove the failure on every chain measured; see LatestSettledBlock for why the
 // margin is needed at all.
 const defaultHeadLagBlocks = 4
+
+// defaultScanWorkers is how many deployments a scan reads at once.
+const defaultScanWorkers = 3
 
 // EngineConfig contains deployment-specific integrations owned by the host.
 // Public source must not provide defaults for private indexer projects.
@@ -51,6 +56,12 @@ type EngineConfig struct {
 	// leaving out a protocol with no chain left. A scan that names one reports it as a chain
 	// error. Each entry must be in SupportedChainIDs.
 	DisabledChains []ChainID
+	// ScanWorkers bounds the (protocol, chain) deployments one scan reads at once; the wallet's
+	// own deployments run beside them. Each scan has workers of its own, while the indexer lane,
+	// the RPC endpoints and the wallet provider are shared by every scan, so more workers make a
+	// lone scan faster without adding capacity for concurrent ones. Zero selects
+	// defaultScanWorkers.
+	ScanWorkers int
 }
 
 func (c EngineConfig) headLagBlocks() uint64 {
@@ -189,7 +200,16 @@ func NewEngineWithConfig(
 		observer:              config.Observer,
 		indexerLane:           newIndexerLane(config.IndexerConcurrency),
 		disabledChains:        disabledChains,
+		scanWorkers:           config.ScanWorkers,
 	}
+}
+
+// workers is how many deployments a scan reads at once.
+func (e *Engine) workers() int {
+	if e.scanWorkers <= 0 {
+		return defaultScanWorkers
+	}
+	return e.scanWorkers
 }
 
 // prefetchPresence starts, for every adapter that can answer it in one request, the question of
@@ -486,11 +506,6 @@ func (e *Engine) ScanWithOptions(
 	}
 	collectCtx = withPinnedBlocks(collectCtx, pinned, accountChains)
 	probeCancels := e.prefetchPresence(collectCtx, options, chains)
-	if options.includesProtocol(walletProtocolID) {
-		discoveryStartedAt := time.Now()
-		configureWalletBalances(collectCtx, e.walletBalanceProvider, address, chains)
-		observation.WalletDiscovery = time.Since(discoveryStartedAt)
-	}
 	defer func() {
 		for _, chain := range chains {
 			chain.client.Close()
@@ -501,7 +516,11 @@ func (e *Engine) ScanWithOptions(
 		registeredAdapter
 		chainID ChainID
 	}
+	// The wallet's deployments are kept apart: they need wallet discovery's answer, and run beside
+	// the workers rather than on them.
 	deployments := make([]deployment, 0)
+	walletDeployments := make([]deployment, 0, len(chains))
+	deploymentCounts := make(map[string]int)
 	for _, adapter := range e.adapters {
 		info := adapter.Info()
 		if !options.includesProtocol(info.ID) {
@@ -517,150 +536,181 @@ func (e *Engine) ScanWithOptions(
 			if !options.includesChain(chainID) || chains[chainID] == nil {
 				continue
 			}
-			deployments = append(deployments, deployment{
-				registeredAdapter: registration,
-				chainID:           chainID,
-			})
+			job := deployment{registeredAdapter: registration, chainID: chainID}
+			deploymentCounts[info.ID]++
+			if info.ID == walletProtocolID {
+				walletDeployments = append(walletDeployments, job)
+				continue
+			}
+			deployments = append(deployments, job)
 		}
 	}
-	// Wallet holdings go first: they need no indexer slot and take a fraction of a second a chain,
-	// so a scan stopped at its deadline loses slow index-backed protocols before it loses the
-	// wallet. Holdings are reconciled only once every adapter has finished, so the order changes
-	// nothing else.
-	sort.SliceStable(deployments, func(left, right int) bool {
-		return deployments[left].Info().ID == walletProtocolID && deployments[right].Info().ID != walletProtocolID
-	})
-	deploymentCounts := make(map[string]int)
-	for _, job := range deployments {
-		deploymentCounts[job.Info().ID]++
-	}
 	probes := newPresenceLifetimes(probeCancels, deploymentCounts)
+	// read reads one deployment into the response.
+	read := func(job deployment) {
+		chain := chains[job.chainID]
+		if chain == nil {
+			probes.done(job.Info().ID)
+			return
+		}
+		info := job.Info()
+		if !job.ActiveAt(job.chainID, chain.block.Number) {
+			probes.done(info.ID)
+			return
+		}
+		startedAt := time.Now()
+		// Every RPC and indexer request the adapter makes reports under its name.
+		jobCtx := withDeployment(collectCtx, info.ID, job.chainID)
+		groups := make([]Group, 0)
+		var positionErr error
+		for _, account := range chain.accounts {
+			var accountGroups []Group
+			var err error
+			// Only a wallet deployment looks at what discovery found: the other deployments run
+			// while discovery is still filling it in.
+			var providerAccount walletProviderAccount
+			useProvider := false
+			if info.ID == walletProtocolID {
+				providerAccount, useProvider = chain.walletProviderAccounts[account.Address]
+			}
+			if useProvider {
+				accountGroups, err = providerWalletGroups(
+					jobCtx,
+					chain.client,
+					chain.block,
+					job.chainID,
+					account.Address,
+					providerAccount,
+				)
+			} else {
+				accountGroups, err = job.Positions(
+					jobCtx,
+					chain.client,
+					chain.block,
+					account.Address,
+				)
+			}
+			groups = append(groups, attributedGroups(accountGroups, account, address)...)
+			if err != nil {
+				positionErr = errors.Join(positionErr, err)
+				// Wallet holdings are independent per account, so one malformed or failed
+				// account must not discard holdings attributed to the remaining accounts.
+				if info.ID == walletProtocolID {
+					continue
+				}
+				break
+			}
+		}
+		probes.done(info.ID)
+		mutex.Lock()
+		if positionErr != nil {
+			scanError := ScanError{
+				Scope:        "protocol",
+				ChainID:      job.chainID,
+				ProtocolID:   info.ID,
+				ProtocolName: info.Name,
+				Message:      PublicError(positionErr),
+			}
+			// An adapter that fails once collection has stopped was stopped: what the
+			// response lacks is the rest of this deployment, not an error of its own.
+			// Whatever groups it read before are kept, as for any other failure.
+			if collectCtx.Err() != nil {
+				scanError.Scope = incompleteScope
+				scanError.Message = stoppedMessage
+			}
+			response.Errors = append(response.Errors, scanError)
+		}
+		if info.ID == walletProtocolID {
+			// Provider partial failures are independent observations. Keep each one as a
+			// separate scan error instead of errors.Join, whose newline-delimited tail is
+			// intentionally removed by PublicError at the service boundary.
+			for _, providerErr := range chain.walletProviderErrors {
+				response.Errors = append(response.Errors, ScanError{
+					Scope:        "protocol",
+					ChainID:      job.chainID,
+					ProtocolID:   info.ID,
+					ProtocolName: info.Name,
+					Message:      PublicError(providerErr),
+				})
+			}
+			// A coverage note qualifies holdings that were read as asked: the wallet may
+			// lack a token, but every balance it reports is the one at the pin.
+			for _, note := range chain.walletCoverage {
+				response.Errors = append(response.Errors, ScanError{
+					Scope:        "coverage",
+					ChainID:      job.chainID,
+					ProtocolID:   info.ID,
+					ProtocolName: info.Name,
+					Message:      PublicError(note),
+				})
+			}
+		}
+		if len(groups) > 0 {
+			response.Snapshots = append(response.Snapshots, Snapshot{
+				ProtocolID:     info.ID,
+				ProtocolName:   info.Name,
+				ChainID:        job.chainID,
+				Account:        address,
+				Block:          chain.block,
+				Groups:         groups,
+				NetValuePolicy: "floor-zero",
+			})
+		}
+		mutex.Unlock()
+		elapsed := time.Since(startedAt)
+		observer.ObserveProtocol(ProtocolObservation{
+			ProtocolID: info.ID,
+			ChainID:    job.chainID,
+			Duration:   elapsed,
+			Groups:     len(groups),
+			Err:        redactEndpoints(positionErr),
+		})
+		log.Printf(
+			"portfolio protocol=%s chain=%d duration=%s error=%q",
+			info.ID,
+			job.chainID,
+			elapsed.Round(time.Millisecond),
+			PublicError(positionErr),
+		)
+	}
 	protocolsStartedAt := time.Now()
+	// Wallet discovery runs beside the workers rather than ahead of them, since only the wallet's
+	// own deployments read its answer. Once it is in they all run at once, each on its own chain,
+	// apart from the workers, so they never queue behind a slow protocol: a scan stopped at its
+	// deadline loses index-backed protocols before it loses the wallet. What reconciles the
+	// holdings with the protocols' positions waits for both.
+	var wallet sync.WaitGroup
+	var walletUnread []deployment
+	if len(walletDeployments) > 0 {
+		wallet.Add(1)
+		go func() {
+			defer wallet.Done()
+			discoveryStartedAt := time.Now()
+			configureWalletBalances(collectCtx, e.walletBalanceProvider, address, chains)
+			observation.WalletDiscovery = time.Since(discoveryStartedAt)
+			if collectCtx.Err() != nil {
+				walletUnread = walletDeployments
+				return
+			}
+			var reads sync.WaitGroup
+			for _, job := range walletDeployments {
+				reads.Add(1)
+				go func() {
+					defer reads.Done()
+					read(job)
+				}()
+			}
+			reads.Wait()
+		}()
+	}
 	jobs := make(chan deployment)
 	var workers sync.WaitGroup
-	for worker := 0; worker < 3; worker++ {
+	for worker := 0; worker < e.workers(); worker++ {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
 			for job := range jobs {
-				chain := chains[job.chainID]
-				if chain == nil {
-					probes.done(job.Info().ID)
-					continue
-				}
-				info := job.Info()
-				if !job.ActiveAt(job.chainID, chain.block.Number) {
-					probes.done(info.ID)
-					continue
-				}
-				startedAt := time.Now()
-				// Every RPC and indexer request the adapter makes reports under its name.
-				jobCtx := withDeployment(collectCtx, info.ID, job.chainID)
-				groups := make([]Group, 0)
-				var positionErr error
-				for _, account := range chain.accounts {
-					var accountGroups []Group
-					var err error
-					providerAccount, useProvider := chain.walletProviderAccounts[account.Address]
-					if info.ID == walletProtocolID && useProvider {
-						accountGroups, err = providerWalletGroups(
-							jobCtx,
-							chain.client,
-							chain.block,
-							job.chainID,
-							account.Address,
-							providerAccount,
-						)
-					} else {
-						accountGroups, err = job.Positions(
-							jobCtx,
-							chain.client,
-							chain.block,
-							account.Address,
-						)
-					}
-					groups = append(groups, attributedGroups(accountGroups, account, address)...)
-					if err != nil {
-						positionErr = errors.Join(positionErr, err)
-						// Wallet holdings are independent per account, so one malformed or failed
-						// account must not discard holdings attributed to the remaining accounts.
-						if info.ID == walletProtocolID {
-							continue
-						}
-						break
-					}
-				}
-				probes.done(info.ID)
-				mutex.Lock()
-				if positionErr != nil {
-					scanError := ScanError{
-						Scope:        "protocol",
-						ChainID:      job.chainID,
-						ProtocolID:   info.ID,
-						ProtocolName: info.Name,
-						Message:      PublicError(positionErr),
-					}
-					// An adapter that fails once collection has stopped was stopped: what the
-					// response lacks is the rest of this deployment, not an error of its own.
-					// Whatever groups it read before are kept, as for any other failure.
-					if collectCtx.Err() != nil {
-						scanError.Scope = incompleteScope
-						scanError.Message = stoppedMessage
-					}
-					response.Errors = append(response.Errors, scanError)
-				}
-				if info.ID == walletProtocolID {
-					// Provider partial failures are independent observations. Keep each one as a
-					// separate scan error instead of errors.Join, whose newline-delimited tail is
-					// intentionally removed by PublicError at the service boundary.
-					for _, providerErr := range chain.walletProviderErrors {
-						response.Errors = append(response.Errors, ScanError{
-							Scope:        "protocol",
-							ChainID:      job.chainID,
-							ProtocolID:   info.ID,
-							ProtocolName: info.Name,
-							Message:      PublicError(providerErr),
-						})
-					}
-					// A coverage note qualifies holdings that were read as asked: the wallet may
-					// lack a token, but every balance it reports is the one at the pin.
-					for _, note := range chain.walletCoverage {
-						response.Errors = append(response.Errors, ScanError{
-							Scope:        "coverage",
-							ChainID:      job.chainID,
-							ProtocolID:   info.ID,
-							ProtocolName: info.Name,
-							Message:      PublicError(note),
-						})
-					}
-				}
-				if len(groups) > 0 {
-					response.Snapshots = append(response.Snapshots, Snapshot{
-						ProtocolID:     info.ID,
-						ProtocolName:   info.Name,
-						ChainID:        job.chainID,
-						Account:        address,
-						Block:          chain.block,
-						Groups:         groups,
-						NetValuePolicy: "floor-zero",
-					})
-				}
-				mutex.Unlock()
-				elapsed := time.Since(startedAt)
-				observer.ObserveProtocol(ProtocolObservation{
-					ProtocolID: info.ID,
-					ChainID:    job.chainID,
-					Duration:   elapsed,
-					Groups:     len(groups),
-					Err:        redactEndpoints(positionErr),
-				})
-				log.Printf(
-					"portfolio protocol=%s chain=%d duration=%s error=%q",
-					info.ID,
-					job.chainID,
-					elapsed.Round(time.Millisecond),
-					PublicError(positionErr),
-				)
+				read(job)
 			}
 		}()
 	}
@@ -683,11 +733,12 @@ sendJobs:
 		probes.done(job.Info().ID)
 	}
 	workers.Wait()
+	wallet.Wait()
 	observation.Protocols = time.Since(protocolsStartedAt)
-	observation.Deployments = dispatched
+	observation.Deployments = dispatched + len(walletDeployments) - len(walletUnread)
 	// The deployments the scan never reached are what a stopped scan is missing; name each one
 	// that would have run at its chain's pin.
-	for _, job := range deployments[dispatched:] {
+	for _, job := range slices.Concat(deployments[dispatched:], walletUnread) {
 		if !job.ActiveAt(job.chainID, chains[job.chainID].block.Number) {
 			continue
 		}
