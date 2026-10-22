@@ -70,6 +70,7 @@ const morphoWalletQuery = `
 query MorphoWalletPositions(
   $chainId: Int!
   $account: String!
+  $idPrefix: String!
   $marketAfter: ID!
   $vaultAfter: ID!
   $checkpoint: ID!
@@ -85,7 +86,7 @@ query MorphoWalletPositions(
     orderBy: id
     orderDirection: asc
     block: { number: $block }
-    where: { chainId: $chainId, account: $account, id_gt: $marketAfter }
+    where: { chainId: $chainId, account: $account, id_starts_with: $idPrefix, id_gt: $marketAfter }
   ) {
     id
     chainId
@@ -97,7 +98,7 @@ query MorphoWalletPositions(
     orderBy: id
     orderDirection: asc
     block: { number: $block }
-    where: { chainId: $chainId, account: $account, id_gt: $vaultAfter }
+    where: { chainId: $chainId, account: $account, id_starts_with: $idPrefix, id_gt: $vaultAfter }
   ) {
     id
     chainId
@@ -248,6 +249,7 @@ func (i *morphoIndexer) graphqlPage(
 	block uint64,
 	start indexStart,
 ) (morphoGraphQLPage, error) {
+	prefix := morphoRowPrefix(chainID, account)
 	var payload morphoGraphQLResponse
 	err := i.api.doJSON(
 		ctx,
@@ -256,7 +258,7 @@ func (i *morphoIndexer) graphqlPage(
 		map[string]any{
 			"query": morphoWalletQuery,
 			"variables": map[string]any{
-				"chainId": int(chainID), "account": strings.ToLower(account.Hex()),
+				"chainId": int(chainID), "account": strings.ToLower(account.Hex()), "idPrefix": prefix,
 				"marketAfter": marketAfter, "vaultAfter": vaultAfter,
 				"checkpoint": strconv.FormatUint(uint64(chainID), 10),
 				"first":      morphoIndexerPageSize, "block": strconv.FormatUint(block, 10),
@@ -278,7 +280,6 @@ func (i *morphoIndexer) graphqlPage(
 	if err != nil {
 		return morphoGraphQLPage{}, err
 	}
-	prefix := morphoRowPrefix(chainID, account)
 	page := morphoGraphQLPage{CheckpointBlock: checkpointBlock, CheckpointMS: checkpointMS}
 	for _, row := range payload.Data.Markets {
 		if row.ChainID != int(chainID) || !strings.EqualFold(row.Account, account.Hex()) ||
@@ -338,7 +339,7 @@ func validateMorphoCheckpoint(block BlockRef, page morphoGraphQLPage) error {
 func (i *morphoIndexer) presenceProbe(account common.Address) presenceProbe {
 	owner := strings.ToLower(account.Hex())
 	where := func(chainID ChainID) string {
-		return fmt.Sprintf("chainId: %d, account: \"%s\"", chainID, owner)
+		return fmt.Sprintf("chainId: %d, account: \"%s\", id_starts_with: \"%s\"", chainID, owner, morphoRowPrefix(chainID, account))
 	}
 	return presenceProbe{
 		name:           "morpho-blue",

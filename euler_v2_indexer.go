@@ -123,6 +123,7 @@ const eulerWalletQuery = `
 query EulerWalletPositions(
   $chainId: Int!
   $ownerPrefix: String!
+  $idPrefix: String!
   $positionAfter: ID!
   $rewardAfter: ID!
   $vaultAfter: ID!
@@ -139,7 +140,7 @@ query EulerWalletPositions(
     orderBy: id
     orderDirection: asc
     block: { number: $block }
-    where: { chainId: $chainId, ownerPrefix: $ownerPrefix, id_gt: $positionAfter }
+    where: { chainId: $chainId, ownerPrefix: $ownerPrefix, id_starts_with: $idPrefix, id_gt: $positionAfter }
   ) {
     id
     chainId
@@ -153,7 +154,7 @@ query EulerWalletPositions(
     orderBy: id
     orderDirection: asc
     block: { number: $block }
-    where: { chainId: $chainId, ownerPrefix: $ownerPrefix, id_gt: $rewardAfter }
+    where: { chainId: $chainId, ownerPrefix: $ownerPrefix, id_starts_with: $idPrefix, id_gt: $rewardAfter }
   ) {
     id
     chainId
@@ -213,14 +214,14 @@ func eulerOwnerPrefix(account common.Address) string {
 	return strings.ToLower(account.Hex())[:40]
 }
 
+// eulerOwnerRowPrefix starts the ID of every position and reward row of the accounts that share
+// owner's prefix on the chain.
+func eulerOwnerRowPrefix(chainID ChainID, owner common.Address) string {
+	return fmt.Sprintf("%d:%s:", chainID, eulerOwnerPrefix(owner))
+}
+
 func eulerPositionRowID(chainID ChainID, account, vault common.Address) string {
-	return fmt.Sprintf(
-		"%d:%s:%s:%s",
-		chainID,
-		eulerOwnerPrefix(account),
-		strings.ToLower(account.Hex()),
-		strings.ToLower(vault.Hex()),
-	)
+	return eulerOwnerRowPrefix(chainID, account) + strings.ToLower(account.Hex()) + ":" + strings.ToLower(vault.Hex())
 }
 
 func eulerRewardRowID(chainID ChainID, account, vault, reward common.Address) string {
@@ -245,6 +246,7 @@ func (i *eulerIndexer) graphqlPage(
 		"variables": map[string]any{
 			"chainId":       int(chainID),
 			"ownerPrefix":   eulerOwnerPrefix(owner),
+			"idPrefix":      eulerOwnerRowPrefix(chainID, owner),
 			"positionAfter": positionAfter, "rewardAfter": rewardAfter, "vaultAfter": vaultAfter,
 			"checkpoint": strconv.FormatUint(uint64(chainID), 10), "first": eulerIndexerPageSize,
 			"block": strconv.FormatUint(block, 10),

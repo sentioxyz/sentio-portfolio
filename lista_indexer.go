@@ -59,6 +59,7 @@ const listaWalletQuery = `
 query ListaWalletPositions(
   $chainId: Int!
   $account: String!
+  $idPrefix: String!
   $marketAfter: ID!
   $vaultAfter: ID!
   $checkpoint: ID!
@@ -74,7 +75,7 @@ query ListaWalletPositions(
     orderBy: id
     orderDirection: asc
     block: { number: $block }
-    where: { chainId: $chainId, account: $account, id_gt: $marketAfter }
+    where: { chainId: $chainId, account: $account, id_starts_with: $idPrefix, id_gt: $marketAfter }
   ) {
     id
     chainId
@@ -86,7 +87,7 @@ query ListaWalletPositions(
     orderBy: id
     orderDirection: asc
     block: { number: $block }
-    where: { chainId: $chainId, account: $account, id_gt: $vaultAfter }
+    where: { chainId: $chainId, account: $account, id_starts_with: $idPrefix, id_gt: $vaultAfter }
   ) {
     id
     chainId
@@ -138,6 +139,7 @@ func (i *listaIndexer) graphqlPage(
 	block uint64,
 	start indexStart,
 ) (listaGraphQLPage, error) {
+	prefix := listaRowPrefix(chainID, account)
 	var payload listaGraphQLResponse
 	err := i.api.doJSON(
 		ctx,
@@ -146,7 +148,7 @@ func (i *listaIndexer) graphqlPage(
 		map[string]any{
 			"query": listaWalletQuery,
 			"variables": map[string]any{
-				"chainId": int(chainID), "account": strings.ToLower(account.Hex()),
+				"chainId": int(chainID), "account": strings.ToLower(account.Hex()), "idPrefix": prefix,
 				"marketAfter": marketAfter, "vaultAfter": vaultAfter,
 				"checkpoint": strconv.FormatUint(uint64(chainID), 10),
 				"first":      listaIndexerPageSize, "block": strconv.FormatUint(block, 10),
@@ -168,7 +170,6 @@ func (i *listaIndexer) graphqlPage(
 	if err != nil {
 		return listaGraphQLPage{}, err
 	}
-	prefix := listaRowPrefix(chainID, account)
 	page := listaGraphQLPage{CheckpointBlock: checkpointBlock, CheckpointMS: checkpointMS}
 	for _, row := range payload.Data.Markets {
 		if row.ChainID != int(chainID) || !strings.EqualFold(row.Account, account.Hex()) ||
