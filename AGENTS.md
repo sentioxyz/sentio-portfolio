@@ -25,8 +25,8 @@ so admission is bounded per engine, not per protocol. Do not add a second lock o
 limiter in front of it. A SQL statement holds its slot from submission until it finishes, polls
 included, since the statement is what occupies the key's server-side queue. Processor status
 reads take no slot: they ask the processor status API, which runs none of the key's queries, and
-normally once per indexer per `sentioStatusCacheTTL`. Never make them need one — callers read the
-status cache while holding a slot, so with a lane of one a refresh waiting for another slot
+normally once per indexer per `sentioStatusCacheTTL`. Never make them need one — most callers read
+the status cache while holding a slot, so with a lane of one a refresh waiting for another slot
 would deadlock the scan.
 
 `sentioAPIClient` keeps one `http.Client` that is never replaced and never locked, on a transport
@@ -68,6 +68,16 @@ adapter that adds a probe must implement `prefetchPresence` so its cost stays of
 path. A proof established at an earlier indexed block still holds — the chain job reports that
 block as its indexed block so the RPC tail starts there — except for an indexer with no RPC
 tail, which may only use a proof at the very block it would query.
+
+A probe asks only about the chains the scan reads its account on, so an account attributed
+through Instadapp, read on Ethereum alone, is never probed, ahead of the workers or inline. The
+engine ends a protocol's prefetched probes once no deployment of the protocol in the scan is left
+to use them — each finished, skipped as inactive at its pin, or never dispatched — instead of
+leaving a probe nobody waits for to hold its slots and run its queries to the end. A chain job of
+a probing indexer reads its status and checks the proof before it takes a lane slot, and takes
+one only for its pages, so a chain the probe proved empty takes none; the probe takes a slot of
+its own, only to send. Never ask for the proof while holding a slot: the call may compute the
+probe itself, and with a lane of one the probe would never get its slot.
 
 ### Indexer checkpoints
 

@@ -16,6 +16,10 @@ type scanScope struct {
 	// pinned holds the block every chain in this scan was pinned to. It is set once chain setup
 	// finishes and read by the indexer presence probe, which needs every chain's block at once.
 	pinned map[ChainID]BlockRef
+	// accountChains lists the chains the scan reads each account on, keyed by the lowercase hex
+	// the presence probe keys on: an account attributed through Instadapp is read on Ethereum
+	// alone. Nil reads every account on every pinned chain.
+	accountChains map[string][]ChainID
 	// memo caches per-scan results shared by the (protocol, chain) jobs of one scan.
 	memo *scanMemo
 	// prefetchSlots bounds how many presence probes the scan runs ahead of its workers at once,
@@ -57,14 +61,34 @@ func withObserver(ctx context.Context, observer Observer) context.Context {
 	return context.WithValue(ctx, scanScopeKey{}, scanScope{observer: observer})
 }
 
-// withPinnedBlocks records the blocks chain setup pinned. Chains that failed to pin are absent.
-func withPinnedBlocks(ctx context.Context, pinned map[ChainID]BlockRef) context.Context {
+// withPinnedBlocks records the blocks chain setup pinned and the chains it reads each account on.
+// Chains that failed to pin are absent from both.
+func withPinnedBlocks(
+	ctx context.Context,
+	pinned map[ChainID]BlockRef,
+	accountChains map[string][]ChainID,
+) context.Context {
 	scope, ok := ctx.Value(scanScopeKey{}).(scanScope)
 	if !ok {
 		return ctx
 	}
 	scope.pinned = pinned
+	scope.accountChains = accountChains
 	return context.WithValue(ctx, scanScopeKey{}, scope)
+}
+
+// pinnedFor returns the pinned blocks of the chains the scan reads account on.
+func (s scanScope) pinnedFor(account string) map[ChainID]BlockRef {
+	if s.accountChains == nil {
+		return s.pinned
+	}
+	pinned := make(map[ChainID]BlockRef, len(s.accountChains[account]))
+	for _, chainID := range s.accountChains[account] {
+		if block, exists := s.pinned[chainID]; exists {
+			pinned[chainID] = block
+		}
+	}
+	return pinned
 }
 
 // withDeployment narrows the scope to one adapter on one chain for the duration of its run.

@@ -62,7 +62,8 @@ type presenceResult struct {
 
 // presencePrefetcher is implemented by adapters whose indexer can answer, in one request, which
 // chains hold anything for an account. The engine calls it as the protocol phase starts, so the
-// probe runs while the workers are still on adapters that need no indexer at all.
+// probe runs while the workers are still on adapters that need no indexer at all, and cancels ctx
+// once no deployment of the protocol in the scan is left to use the verdict.
 type presencePrefetcher interface {
 	prefetchPresence(ctx context.Context, account common.Address)
 }
@@ -76,12 +77,16 @@ func presenceKey(probe presenceProbe, account string) string {
 // that query would have seen. It reports false whenever there is nothing to prove it with — no
 // scan scope, too few chains, a failed probe — so the caller always has the full per-chain flow
 // to fall back on. account keys the memo: a scan asks about its root address and each attributed
-// account separately.
+// account separately, each only on the chains the scan reads it on.
 //
 // A proof established at an earlier query block still holds, because emptiness at a block is a
 // fact about that block. The caller must then treat proof.QueryBlock as its indexed block, so the
 // RPC tail covers everything after it. A proof from a later block than the caller would query is
 // not one it can use.
+//
+// Callers ask before taking a lane slot. A probe computed here takes a slot of its own to send,
+// and the other chain jobs of the scan wait for it: one that held a slot meanwhile could starve
+// it, and with a lane of one deadlock the scan.
 func (c *sentioAPIClient) chainProvenEmpty(
 	ctx context.Context,
 	probe presenceProbe,
@@ -94,7 +99,7 @@ func (c *sentioAPIClient) chainProvenEmpty(
 		return presenceProof{}, false
 	}
 	result, _ := scope.memo.once(ctx, presenceKey(probe, account), func() any {
-		return c.presence(withPresence(ctx), probe, scope.pinned, statuses, account)
+		return c.presence(withPresence(ctx), probe, scope.pinnedFor(account), statuses, account)
 	}).(presenceResult)
 	proof, proven := result.proofs[block.ChainID]
 	if !proven || proof.QueryBlock > min(block.Number, statuses[block.ChainID].ProcessedBlock) {
@@ -114,12 +119,24 @@ func (c *sentioAPIClient) awaitPresence(ctx context.Context, probe presenceProbe
 	scope.memo.await(ctx, presenceKey(probe, account))
 }
 
-// prefetchPresence starts the probe for account in the background, taking a prefetch slot and
-// then a lane slot, so that by the time a worker reaches the indexer's first chain the verdict is
-// ready or nearly so. It is a no-op outside a scan and when the probe was already started.
+// prefetchPresence starts the probe for account in the background, taking a prefetch slot, so
+// that by the time a worker reaches the indexer's first chain the verdict is ready or nearly so.
+// It is a no-op outside a scan, when the probe was already started, and for an account the scan
+// reads on too few of the probe's chains to probe at all — one attributed through Instadapp, read
+// on Ethereum alone.
 func (c *sentioAPIClient) prefetchPresence(ctx context.Context, probe presenceProbe, account string) {
 	scope := scopeFrom(ctx)
 	if scope.memo == nil || len(scope.pinned) == 0 {
+		return
+	}
+	pinned := scope.pinnedFor(account)
+	probed := 0
+	for _, chainID := range probe.requiredChains {
+		if _, isPinned := pinned[chainID]; isPinned {
+			probed++
+		}
+	}
+	if probed < presenceMinChains {
 		return
 	}
 	ctx = withPresence(ctx)
@@ -132,21 +149,17 @@ func (c *sentioAPIClient) prefetchPresence(ctx context.Context, probe presencePr
 				return presenceResult{}
 			}
 		}
-		release, err := lockSentioLane(ctx)
-		if err != nil {
-			return presenceResult{}
-		}
-		defer release()
 		statuses, err := c.chainStatuses(ctx, probe.config, nil, false)
 		if err != nil {
 			return presenceResult{}
 		}
-		return c.presence(ctx, probe, scope.pinned, statuses, account)
+		return c.presence(ctx, probe, pinned, statuses, account)
 	})
 }
 
-// presence decides which chains are worth probing and runs the probe. It expects the caller to
-// hold a lane slot.
+// presence decides which chains are worth probing and, when enough of them are, sends the probe on
+// a lane slot of its own, so a probe with too few chains to ask about takes no slot at all. The
+// caller must not hold a slot while it waits for this one.
 func (c *sentioAPIClient) presence(
 	ctx context.Context,
 	probe presenceProbe,
@@ -158,6 +171,11 @@ func (c *sentioAPIClient) presence(
 	if len(targets) < presenceMinChains {
 		return presenceResult{}
 	}
+	release, err := lockSentioLane(ctx)
+	if err != nil {
+		return presenceResult{}
+	}
+	defer release()
 	return c.runPresenceProbe(ctx, probe, targets, account)
 }
 

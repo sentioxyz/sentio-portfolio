@@ -402,6 +402,13 @@ func (i *morphoIndexer) indexedRefs(
 			return mergeMorphoRefs(result, nil, nil)
 		}
 	}
+	// Only the pages take a lane slot: the status read needs none, and a chain the probe proved
+	// empty sends nothing.
+	release, err := lockSentioLane(ctx)
+	if err != nil {
+		return morphoPositionRefs{}, err
+	}
+	defer release()
 	prefix := morphoRowPrefix(block.ChainID, account)
 	marketAfter := prefix
 	vaultAfter := prefix
@@ -891,20 +898,13 @@ func (i *morphoIndexer) PositionRefs(
 		return morphoPositionRefs{}, fmt.Errorf("Morpho fee recipient at pinned block: %w", err)
 	}
 	includeCurrentFeeMarkets := feeRecipient != (common.Address{}) && feeRecipient == account
-	indexed, err := func() (morphoPositionRefs, error) {
-		if !includeCurrentFeeMarkets {
-			i.api.awaitPresence(ctx, i.presenceProbe(account), strings.ToLower(account.Hex()))
-		}
-		release, err := lockSentioLane(ctx)
-		if err != nil {
-			return morphoPositionRefs{}, err
-		}
-		defer release()
-		return i.indexedRefs(
-			ctx, block, account, includeCurrentFeeMarkets,
-			indexStart{client: client, block: deployment.Window.ActivationBlock},
-		)
-	}()
+	if !includeCurrentFeeMarkets {
+		i.api.awaitPresence(ctx, i.presenceProbe(account), strings.ToLower(account.Hex()))
+	}
+	indexed, err := i.indexedRefs(
+		ctx, block, account, includeCurrentFeeMarkets,
+		indexStart{client: client, block: deployment.Window.ActivationBlock},
+	)
 	if err != nil {
 		return morphoPositionRefs{}, fmt.Errorf("Morpho index query: %w", err)
 	}

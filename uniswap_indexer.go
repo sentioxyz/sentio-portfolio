@@ -346,11 +346,6 @@ func (i *uniswapIndexer) indexedNFTs(
 	}
 
 	i.api.awaitPresence(ctx, i.presenceProbe(definition, account), strings.ToLower(account.Hex()))
-	release, err := lockSentioLane(ctx)
-	if err != nil {
-		return uniswapIndexedNFTs{}, err
-	}
-	defer release()
 	statuses, err := i.chainStatuses(ctx, definition, block.ChainID)
 	if err != nil {
 		return uniswapIndexedNFTs{}, err
@@ -377,6 +372,13 @@ func (i *uniswapIndexer) indexedNFTs(
 	if empty && proof.QueryBlock == min(block.Number, status.ProcessedBlock) {
 		return uniswapIndexedNFTs{CheckpointBlock: proof.Checkpoint, NFTs: make([]uniswapIndexedNFT, 0)}, nil
 	}
+	// Only the pages take a lane slot: the status read needs none, and a chain the probe proved
+	// empty sends nothing.
+	release, err := lockSentioLane(ctx)
+	if err != nil {
+		return uniswapIndexedNFTs{}, err
+	}
+	defer release()
 
 	prefix := fmt.Sprintf("%d:%s:", block.ChainID, strings.ToLower(account.Hex()))
 	after := prefix
