@@ -44,6 +44,7 @@ const pendleWalletQuery = `
 query PendleWalletPositions(
   $chainId: Int!
   $account: String!
+  $idPrefix: String!
   $after: ID!
   $checkpoint: ID!
   $first: Int!
@@ -58,7 +59,7 @@ query PendleWalletPositions(
     orderBy: id
     orderDirection: asc
     block: { number: $block }
-    where: { chainId: $chainId, account: $account, id_gt: $after }
+    where: { chainId: $chainId, account: $account, id_starts_with: $idPrefix, id_gt: $after }
   ) {
     id
     chainId
@@ -191,6 +192,7 @@ func (i *pendleIndexer) graphqlPage(
 	block uint64,
 	start indexStart,
 ) (pendleWalletPage, error) {
+	prefix := pendleRefRowPrefix(chainID, account)
 	var payload pendleWalletResponse
 	err := i.api.doJSON(
 		ctx,
@@ -199,7 +201,7 @@ func (i *pendleIndexer) graphqlPage(
 		map[string]any{
 			"query": pendleWalletQuery,
 			"variables": map[string]any{
-				"chainId": int(chainID), "account": strings.ToLower(account.Hex()),
+				"chainId": int(chainID), "account": strings.ToLower(account.Hex()), "idPrefix": prefix,
 				"after":      after,
 				"checkpoint": strconv.FormatUint(uint64(chainID), 10),
 				"first":      pendleIndexerPageSize, "block": strconv.FormatUint(block, 10),
@@ -221,7 +223,6 @@ func (i *pendleIndexer) graphqlPage(
 	if err != nil {
 		return pendleWalletPage{}, err
 	}
-	prefix := pendleRefRowPrefix(chainID, account)
 	page := pendleWalletPage{CheckpointBlock: checkpointBlock, CheckpointMS: checkpointMS}
 	for _, row := range payload.Data.Refs {
 		if row.ChainID != int(chainID) || !strings.EqualFold(row.Account, account.Hex()) ||
@@ -448,7 +449,7 @@ func (i *pendleIndexer) presenceProbe(account common.Address) presenceProbe {
 		fields: []presenceField{{
 			entity: "pendlePositionRefs",
 			where: func(chainID ChainID) string {
-				return fmt.Sprintf("chainId: %d, account: \"%s\"", chainID, owner)
+				return fmt.Sprintf("chainId: %d, account: \"%s\", id_starts_with: \"%s\"", chainID, owner, pendleRefRowPrefix(chainID, account))
 			},
 		}},
 		maxRPCTail:     pendleMaxRPCTailBlocks,

@@ -145,6 +145,7 @@ go_test(
         "five_chain_support_test.go",
         "fluid_test.go",
         "head_lag_test.go",
+        "indexer_id_prefix_test.go",
         "lista_test.go",
         "makerdao_test.go",
         "maple_test.go",

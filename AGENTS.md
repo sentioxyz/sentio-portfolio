@@ -53,6 +53,16 @@ by its context adds one `incomplete` error about no chain, kept apart from per-t
 errors: a token the provider refuses is unquotable, a token it never reached is not. Any new wait
 on the scan path must select on its context for that to hold.
 
+An indexer query keyed by an account also bounds `id` by the account's row prefix
+(`id_starts_with`), on its pages and in its presence probe alike. A time-travel query narrows the
+rows the GraphQL server reads only through `id`: filtered on `account` or `ownerPrefix` alone,
+every query reads the whole table — seconds of CPU per query on tables of tens of millions of
+rows — to return a handful of them, and an `id_gt` cursor alone still reads everything that sorts
+after it. The refs read by account have IDs that begin with `<chain>:<account>:`
+(`<chain>:<ownerPrefix>:` for Euler), and a row without that prefix is already rejected, so the
+bound drops nothing. An index whose IDs do not carry the account, such as owner-token refs keyed
+by contract and token, cannot be bounded this way.
+
 An adapter whose protocol spans several chains should answer "which chains hold anything for
 this account" with one request rather than one per chain: `sentio_presence.go` aliases a
 time-travel query per chain, at that chain's own indexed block, and the per-chain flow skips

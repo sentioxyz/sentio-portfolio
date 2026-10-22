@@ -3,6 +3,7 @@ package portfolio
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -110,6 +111,12 @@ func (s *presenceTestServer) ServeHTTP(writer http.ResponseWriter, request *http
 	s.pages.Add(1)
 	chainID := ChainID(body.Variables["chainId"].(float64))
 	s.pagedChains = append(s.pagedChains, chainID)
+	// Fee-market pages are keyed by chain alone; account pages carry the account's row prefix.
+	if account, isAccountPage := body.Variables["account"]; isAccountPage {
+		if prefix := fmt.Sprintf("%d:%s:", chainID, account); body.Variables["idPrefix"] != prefix {
+			s.t.Errorf("page idPrefix = %v, want %q", body.Variables["idPrefix"], prefix)
+		}
+	}
 	vaults := []map[string]any{}
 	if chainID == Base && body.Variables["account"] == owner {
 		vaults = append(vaults, s.vaultRow(chainID))
@@ -184,7 +191,7 @@ func TestPresenceProbeSkipsChainsProvenEmpty(t *testing.T) {
 	query := *server.lastProbeQuery.Load()
 	for _, want := range []string{
 		`cp1: indexerCheckpoints(first: 2, block: { number: 1000 }, where: { id: "1" })`,
-		`f0_8453: morphoMarketPositionRefs(first: 1, orderBy: id, orderDirection: asc, block: { number: 1000 }, where: { chainId: 8453, account: "` + strings.ToLower(presenceTestAccount.Hex()) + `" }) { id }`,
+		`f0_8453: morphoMarketPositionRefs(first: 1, orderBy: id, orderDirection: asc, block: { number: 1000 }, where: { chainId: 8453, account: "` + strings.ToLower(presenceTestAccount.Hex()) + `", id_starts_with: "` + morphoRowPrefix(Base, presenceTestAccount) + `" }) { id }`,
 		`f1_42161: morphoVaultPositionRefs(`,
 	} {
 		if !strings.Contains(query, want) {
