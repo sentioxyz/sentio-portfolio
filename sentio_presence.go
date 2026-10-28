@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 )
@@ -34,18 +33,15 @@ type presenceField struct {
 // indexed block, and the per-chain flow then skips the chains the probe proved empty.
 //
 // The proof is exact rather than heuristic: a chain is skipped only when every field returned no
-// row at the very block the per-chain query would have used, and its checkpoint passed the same
-// validation, so the skipped query could only ever have returned the same nothing. Everything
-// after the indexed block — the RPC tail up to the pinned block — runs unchanged.
+// row at the block the per-chain query would have used, and its checkpoint passed the same
+// validation without a lag note, so the skipped query could only ever have returned the same
+// nothing.
 type presenceProbe struct {
 	// name keys the memo and labels the operation; one per indexer.
 	name           string
 	config         SentioIndexerConfig
 	requiredChains []ChainID
 	fields         []presenceField
-	maxRPCTail     uint64
-	liveMaxLag     time.Duration
-	backfillMaxLag time.Duration
 }
 
 // presenceProof is what the probe established for one chain: no rows for the account as of
@@ -79,10 +75,10 @@ func presenceKey(probe presenceProbe, account string) string {
 // to fall back on. account keys the memo: a scan asks about its root address and each attributed
 // account separately, each only on the chains the scan reads it on.
 //
-// A proof established at an earlier query block still holds, because emptiness at a block is a
-// fact about that block. The caller must then treat proof.QueryBlock as its indexed block, so the
-// RPC tail covers everything after it. A proof from a later block than the caller would query is
-// not one it can use.
+// A proof established at an earlier query block than the caller's still holds: emptiness at a
+// block is a fact about that block, and the proof's checkpoint trails the pin by no more than
+// indexMaxLag, as a page the caller accepted without a note would. The caller then reports
+// proof.QueryBlock as its indexed block. At a fixed pin the proof must be at the pin itself.
 //
 // Callers ask before taking a lane slot. A probe computed here takes a slot of its own to send,
 // and the other chain jobs of the scan wait for it: one that held a slot meanwhile could starve
@@ -102,7 +98,7 @@ func (c *sentioAPIClient) chainProvenEmpty(
 		return c.presence(withPresence(ctx), probe, scope.pinnedFor(account), statuses, account)
 	}).(presenceResult)
 	proof, proven := result.proofs[block.ChainID]
-	if !proven || proof.QueryBlock > min(block.Number, statuses[block.ChainID].ProcessedBlock) {
+	if !proven || proof.QueryBlock > block.Number || (block.Fixed && proof.QueryBlock != block.Number) {
 		return presenceProof{}, false
 	}
 	return proof, true
@@ -186,8 +182,8 @@ type presenceTarget struct {
 }
 
 // presenceTargets selects the chains the probe can speak for: pinned in this scan, configured for
-// the indexer, and within the indexer's RPC tail bound. A chain outside that bound fails in its
-// own per-chain flow, and the probe must not pre-empt that error.
+// the indexer, and with a status the per-chain flow accepts (indexQueryBlock). A chain whose
+// status it rejects fails in its own per-chain flow, and the probe must not pre-empt that error.
 func presenceTargets(
 	probe presenceProbe,
 	pinned map[ChainID]BlockRef,
@@ -200,7 +196,7 @@ func presenceTargets(
 		if !isPinned || !hasStatus || status.err != nil || status.State != "PROCESSING_LATEST" {
 			continue
 		}
-		if block.Number > status.ProcessedBlock && block.Number-status.ProcessedBlock > probe.maxRPCTail {
+		if block.Fixed && status.ProcessedBlock < block.Number {
 			continue
 		}
 		targets[chainID] = presenceTarget{block: block, queryBlock: min(block.Number, status.ProcessedBlock)}
@@ -299,8 +295,11 @@ func presenceChainEmpty(
 	if err != nil {
 		return 0, false
 	}
-	if checkpointBlock > target.queryBlock ||
-		validatePresenceCheckpoint(probe, target.block, checkpointBlock, checkpointMS) != nil {
+	// A chain whose page would carry a lag note runs that page, so the scan reports the lag.
+	if checkpointBlock > target.queryBlock {
+		return 0, false
+	}
+	if note, err := checkIndexCheckpoint(target.block, checkpointBlock, checkpointMS); err != nil || note != nil {
 		return 0, false
 	}
 	for index := range probe.fields {
@@ -311,33 +310,4 @@ func presenceChainEmpty(
 		}
 	}
 	return checkpointBlock, true
-}
-
-// validatePresenceCheckpoint applies the freshness rule every indexer applies to its own pages,
-// so a chain the probe skips is one the per-chain query would have accepted too.
-func validatePresenceCheckpoint(
-	probe presenceProbe,
-	block BlockRef,
-	checkpointBlock uint64,
-	checkpointMS uint64,
-) error {
-	if checkpointBlock > block.Number {
-		return fmt.Errorf("indexer checkpoint %d is ahead of pinned block %d", checkpointBlock, block.Number)
-	}
-	checkpointSeconds := checkpointMS / 1_000
-	if checkpointSeconds > block.Timestamp+60 {
-		return fmt.Errorf("indexer checkpoint timestamp is ahead of pinned block")
-	}
-	if block.Timestamp <= checkpointSeconds {
-		return nil
-	}
-	lag := time.Duration(block.Timestamp-checkpointSeconds) * time.Second
-	maximumLag := probe.liveMaxLag
-	if block.Fixed {
-		maximumLag = probe.backfillMaxLag
-	}
-	if lag > maximumLag {
-		return fmt.Errorf("indexer checkpoint is stale by %s", lag)
-	}
-	return nil
 }

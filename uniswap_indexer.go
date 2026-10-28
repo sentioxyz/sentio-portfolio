@@ -7,16 +7,11 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 )
 
-const (
-	uniswapIndexerPageSize  = 500
-	uniswapCheckpointMaxLag = 15 * time.Minute
-	uniswapBackfillMaxLag   = 7*24*time.Hour + 30*time.Minute
-)
+const uniswapIndexerPageSize = 500
 
 type uniswapGeneration string
 
@@ -49,6 +44,8 @@ type uniswapIndexedNFT struct {
 type uniswapIndexedNFTs struct {
 	CheckpointBlock uint64
 	NFTs            []uniswapIndexedNFT
+	// Lag notes a live read that trails its pin by more than indexMaxLag.
+	Lag *indexLagNote
 }
 
 type uniswapIndexer struct {
@@ -84,17 +81,18 @@ func (i *uniswapIndexer) chainStatuses(
 	ctx context.Context,
 	definition uniswapIndexerDefinition,
 	chainID ChainID,
+	forceRefresh bool,
 ) (map[ChainID]sentioChainStatus, error) {
 	chains, err := uniswapIndexerChains(definition.version)
 	if err != nil {
 		return nil, err
 	}
-	return i.api.chainStatusesForScan(ctx, i.configs[definition.version], chains, chainID, false)
+	return i.api.chainStatusesForScan(ctx, i.configs[definition.version], chains, chainID, forceRefresh)
 }
 
 // presenceProbe asks every chain of one Uniswap generation at once whether the account holds any
-// live position NFT, so a scan queries only the chains where it does. Uniswap has no RPC tail:
-// the pinned-block query is the whole answer, so a chain the probe proves empty is done.
+// live position NFT, so a scan queries only the chains where it does. A chain the probe proves
+// empty is done.
 func (i *uniswapIndexer) presenceProbe(
 	definition uniswapIndexerDefinition,
 	account common.Address,
@@ -111,9 +109,6 @@ func (i *uniswapIndexer) presenceProbe(
 				return fmt.Sprintf("id_starts_with: \"%d:%s:\", balance_not: 0", chainID, owner)
 			},
 		}},
-		maxRPCTail:     ^uint64(0),
-		liveMaxLag:     uniswapCheckpointMaxLag,
-		backfillMaxLag: uniswapBackfillMaxLag,
 	}
 }
 
@@ -301,31 +296,6 @@ func (i *uniswapIndexer) graphqlPage(
 	return page, nil
 }
 
-func validateUniswapCheckpoint(block BlockRef, page uniswapGraphQLPage) error {
-	if page.CheckpointBlock > block.Number {
-		return fmt.Errorf(
-			"indexer checkpoint %d is ahead of pinned block %d",
-			page.CheckpointBlock,
-			block.Number,
-		)
-	}
-	checkpointSeconds := page.CheckpointMS / 1_000
-	if checkpointSeconds > block.Timestamp+60 {
-		return fmt.Errorf("indexer checkpoint timestamp is ahead of pinned block")
-	}
-	if block.Timestamp > checkpointSeconds {
-		lag := time.Duration(block.Timestamp-checkpointSeconds) * time.Second
-		maximumLag := uniswapCheckpointMaxLag
-		if block.Fixed {
-			maximumLag = uniswapBackfillMaxLag
-		}
-		if lag > maximumLag {
-			return fmt.Errorf("indexer checkpoint is stale by %s", lag)
-		}
-	}
-	return nil
-}
-
 func (i *uniswapIndexer) prefetchPresence(ctx context.Context, version uniswapGeneration, account common.Address) {
 	definition, exists := uniswapIndexerDefinitions[version]
 	if !exists {
@@ -346,30 +316,17 @@ func (i *uniswapIndexer) indexedNFTs(
 	}
 
 	i.api.awaitPresence(ctx, i.presenceProbe(definition, account), strings.ToLower(account.Hex()))
-	statuses, err := i.chainStatuses(ctx, definition, block.ChainID)
+	statuses, _, err := indexQueryBlock(block, func(forceRefresh bool) (map[ChainID]sentioChainStatus, error) {
+		return i.chainStatuses(ctx, definition, block.ChainID, forceRefresh)
+	})
 	if err != nil {
 		return uniswapIndexedNFTs{}, err
 	}
-	status, exists := statuses[block.ChainID]
-	if !exists {
-		return uniswapIndexedNFTs{}, fmt.Errorf("processor status omitted chain %d", block.ChainID)
-	}
-	if status.State != "PROCESSING_LATEST" {
-		return uniswapIndexedNFTs{}, fmt.Errorf(
-			"indexer backfill is incomplete for chain %d: state=%s processed=%d estimatedLatest=%d",
-			block.ChainID,
-			status.State,
-			status.ProcessedBlock,
-			status.EstimatedLatest,
-		)
-	}
 
-	// Uniswap has no RPC tail to cover the blocks after a proof, so only a proof at the very block
-	// this query would read can stand in for it.
 	proof, empty := i.api.chainProvenEmpty(
 		ctx, i.presenceProbe(definition, account), block, strings.ToLower(account.Hex()), statuses,
 	)
-	if empty && proof.QueryBlock == min(block.Number, status.ProcessedBlock) {
+	if empty {
 		return uniswapIndexedNFTs{CheckpointBlock: proof.Checkpoint, NFTs: make([]uniswapIndexedNFT, 0)}, nil
 	}
 	// Only the pages take a lane slot: the status read needs none, and a chain the probe proved
@@ -386,6 +343,7 @@ func (i *uniswapIndexer) indexedNFTs(
 	result := make([]uniswapIndexedNFT, 0)
 	var checkpointBlock uint64
 	var checkpointMS uint64
+	var lag *indexLagNote
 	firstRequest := true
 	for len(result) <= definition.maxIndexedNFTs {
 		first := min(uniswapIndexerPageSize, definition.maxIndexedNFTs+1-len(result))
@@ -403,10 +361,12 @@ func (i *uniswapIndexer) indexedNFTs(
 		if err != nil {
 			return uniswapIndexedNFTs{}, fmt.Errorf("Uniswap %s index query: %w", version, err)
 		}
-		if err := validateUniswapCheckpoint(block, page); err != nil {
+		note, err := checkIndexCheckpoint(block, page.CheckpointBlock, page.CheckpointMS)
+		if err != nil {
 			return uniswapIndexedNFTs{}, fmt.Errorf("Uniswap %s: %w", version, err)
 		}
 		if checkpointBlock == 0 {
+			lag = note
 			checkpointBlock = page.CheckpointBlock
 			checkpointMS = page.CheckpointMS
 			queryBlock = checkpointBlock
@@ -435,7 +395,7 @@ func (i *uniswapIndexer) indexedNFTs(
 		}
 		firstRequest = false
 		if len(page.Positions) < first {
-			return uniswapIndexedNFTs{CheckpointBlock: checkpointBlock, NFTs: result}, nil
+			return uniswapIndexedNFTs{CheckpointBlock: checkpointBlock, NFTs: result, Lag: lag}, nil
 		}
 	}
 	return uniswapIndexedNFTs{}, fmt.Errorf(

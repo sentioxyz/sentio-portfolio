@@ -84,6 +84,7 @@ func TestPendleActivationBlockIsTheOldestGeneration(t *testing.T) {
 
 type stubPendleIndexer struct {
 	refs          []pendlePositionRef
+	lag           *indexLagNote
 	markets       map[common.Address][]common.Address
 	err           error
 	called        bool
@@ -96,9 +97,9 @@ func (s *stubPendleIndexer) PositionRefs(
 	*RPCClient,
 	BlockRef,
 	common.Address,
-) ([]pendlePositionRef, error) {
+) ([]pendlePositionRef, *indexLagNote, error) {
 	s.called = true
-	return s.refs, s.err
+	return s.refs, s.lag, s.err
 }
 
 func (s *stubPendleIndexer) MarketsForPT(
@@ -216,44 +217,6 @@ func TestPendleRowIdentitiesAreLowercaseAndStable(t *testing.T) {
 	}
 }
 
-func TestPendleMergeRefsPrefersTheIndexedRegistration(t *testing.T) {
-	token := common.HexToAddress("0x1111111111111111111111111111111111111111")
-	other := common.HexToAddress("0x2222222222222222222222222222222222222222")
-	indexed := []pendlePositionRef{{Token: token, Kind: pendlePT, Expiry: 42, CreatedBlock: 7}}
-	// The tail resolves a kind from the chain but knows no creation block; when both sources
-	// carry the same token the indexed registration is the richer one and must win.
-	tail := []pendlePositionRef{
-		{Token: token, Kind: pendlePT},
-		{Token: other, Kind: pendleLP},
-	}
-	merged, err := mergePendleRefs(indexed, tail)
-	if err != nil {
-		t.Fatalf("merge: %v", err)
-	}
-	if len(merged) != 2 {
-		t.Fatalf("merged refs = %d, want 2", len(merged))
-	}
-	if merged[0].Token != token || merged[0].CreatedBlock != 7 || merged[0].Expiry != 42 {
-		t.Fatalf("indexed registration was overwritten by the tail: %+v", merged[0])
-	}
-	if merged[1].Token != other || merged[1].Kind != pendleLP {
-		t.Fatalf("tail-only ref was dropped: %+v", merged[1])
-	}
-}
-
-func TestPendleMergeRefsRejectsUnboundedAccounts(t *testing.T) {
-	refs := make([]pendlePositionRef, 0, pendleMaxPositionRefs+1)
-	for index := 0; index <= pendleMaxPositionRefs; index++ {
-		address := common.BigToAddress(common.Big1)
-		address[0] = byte(index >> 8)
-		address[1] = byte(index)
-		refs = append(refs, pendlePositionRef{Token: address, Kind: pendlePT})
-	}
-	if _, err := mergePendleRefs(refs, nil); err == nil {
-		t.Fatal("merge accepted more refs than the account bound allows")
-	}
-}
-
 // The window boundary is inclusive: a factory must be skipped at one block before it has code
 // and consulted at the block it was deployed in. An eth_call against an address with no code
 // returns empty data, which fails strict decoding and drops the whole protocol for that scan.
@@ -274,37 +237,6 @@ func TestPendleFactoryWindowsAreInclusiveAtTheirActivationBlock(t *testing.T) {
 						chainID, address, window.ActivationBlock)
 				}
 			}
-		}
-	}
-}
-
-// Tail classification is the only place the kernel calls a factory directly, so it carries the
-// window gate. With every generation still undeployed it must build no calls at all — proved
-// here by passing a nil client, which would panic if a call were attempted.
-func TestPendleClassifyTailIsInertBeforeAnyFactoryExists(t *testing.T) {
-	candidates := []common.Address{
-		common.HexToAddress("0xdc169abe56461a2e0c034da431ac2a3ebf596094"),
-		common.HexToAddress("0x9c560ebaf78e596cbcc27411d633a74d628dd7dc"),
-	}
-	for chainID, chain := range pendleChainConfigs {
-		block := BlockRef{ChainID: chainID, Number: chain.ActivationBlock - 1, Fixed: true}
-		refs, err := pendleClassifyTail(context.Background(), nil, block, candidates, chain)
-		if err != nil {
-			t.Errorf("chain %d classification before deployment: %v", chainID, err)
-		}
-		if len(refs) != 0 {
-			t.Errorf("chain %d classified %d tokens before any factory existed", chainID, len(refs))
-		}
-	}
-}
-
-// No candidates means no calls, on any chain and at any block.
-func TestPendleClassifyTailWithoutCandidatesNeverDials(t *testing.T) {
-	for chainID, chain := range pendleChainConfigs {
-		block := BlockRef{ChainID: chainID, Number: chain.ActivationBlock + 1_000, Fixed: true}
-		refs, err := pendleClassifyTail(context.Background(), nil, block, nil, chain)
-		if err != nil || len(refs) != 0 {
-			t.Fatalf("chain %d: refs=%d err=%v", chainID, len(refs), err)
 		}
 	}
 }

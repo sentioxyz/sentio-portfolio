@@ -92,7 +92,6 @@ go_library(
     ],
     embedsrcs = [
         "beefy-vaults.json",
-        "euler_v2_vaults.json",
         "lista-markets.json",
         "stakewise-vaults.json",
         "vesper-pools.json",
@@ -146,6 +145,7 @@ go_test(
         "five_chain_support_test.go",
         "fluid_test.go",
         "head_lag_test.go",
+        "index_lag_test.go",
         "indexer_id_prefix_test.go",
         "lista_test.go",
         "makerdao_test.go",
@@ -161,7 +161,6 @@ go_test(
         "sui_objects_grpc_test.go",
         "navi_topology_test.go",
         "observer_test.go",
-        "owner_token_indexer_test.go",
         "pendle_live_test.go",
         "pendle_test.go",
         "pricing_test.go",

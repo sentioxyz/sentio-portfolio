@@ -145,38 +145,6 @@ func TestAsterEarnAssets(t *testing.T) {
 	}
 }
 
-func TestERC1155BatchTailDecodingAndOwnerTransition(t *testing.T) {
-	eventInputs := erc1155TransferABI.Events["TransferBatch"].Inputs.NonIndexed()
-	data, err := eventInputs.Pack(
-		[]*big.Int{big.NewInt(8_941), big.NewInt(8_942)},
-		[]*big.Int{big.NewInt(1), big.NewInt(1)},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	values, err := eventInputs.Unpack(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ids, ok := values[0].([]*big.Int)
-	if !ok || len(ids) != 2 || ids[0].Cmp(big.NewInt(8_941)) != 0 {
-		t.Fatalf("decoded ERC1155 IDs = %#v", values[0])
-	}
-
-	owner := common.HexToAddress("0x1111111111111111111111111111111111111111")
-	other := common.HexToAddress("0x2222222222222222222222222222222222222222")
-	refs := map[string]ownerTokenRef{}
-	applyOwnerTokenTransfer(refs, etherfiMembershipNFT, ids[0], other, owner, owner)
-	key := ownerTokenRefKey(etherfiMembershipNFT, ids[0])
-	if _, exists := refs[key]; !exists {
-		t.Fatal("transfer to owner did not add the ERC1155 token ID")
-	}
-	applyOwnerTokenTransfer(refs, etherfiMembershipNFT, ids[0], owner, other, owner)
-	if _, exists := refs[key]; exists {
-		t.Fatal("transfer from owner did not remove the ERC1155 token ID")
-	}
-}
-
 func TestAccountIndexesFilterQueriesByContract(t *testing.T) {
 	if !strings.Contains(ownerTokenWalletQuery, "contract_in: $contracts") {
 		t.Fatal("owner-token query is not contract-scoped")

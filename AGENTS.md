@@ -67,17 +67,16 @@ An adapter whose protocol spans several chains should answer "which chains hold 
 this account" with one request rather than one per chain: `sentio_presence.go` aliases a
 time-travel query per chain, at that chain's own indexed block, and the per-chain flow skips
 only chains the probe proved empty. The proof must stay exact — same block, same checkpoint
-validation, same where clause or a superset of it — and the RPC tail after the indexed block
-must keep running for skipped chains. Refs are deleted when positions close, so never decide
-presence from the latest state of the index.
+validation, same where clause or a superset of it — and a chain whose page would carry a lag
+note is not proven, so its page runs and the scan reports the lag. Refs are deleted when
+positions close, so never decide presence from the latest state of the index.
 
 The probe costs one request that the GraphQL server executes alias by alias, so it is slower
 than a single-chain page. The engine therefore runs it ahead of the workers
 (`presencePrefetcher`, started right after chain setup) rather than on the first chain job; an
 adapter that adds a probe must implement `prefetchPresence` so its cost stays off the critical
-path. A proof established at an earlier indexed block still holds — the chain job reports that
-block as its indexed block so the RPC tail starts there — except for an indexer with no RPC
-tail, which may only use a proof at the very block it would query.
+path. A proof established at an earlier indexed block still holds, and the chain job reports
+that block as its indexed block; at a fixed pin the proof must be at the pin itself.
 
 A probe asks only about the chains the scan reads its account on, so an account attributed
 through Instadapp, read on Ethereum alone, is never probed, ahead of the workers or inline. The
@@ -91,15 +90,36 @@ probe itself, and with a lane of one the probe would never get its slot.
 
 ### Indexer checkpoints
 
+An index decides which positions an adapter reads, never what they are worth: every quantity is
+read at the pin. Nothing tops an index read up from the chain — do not add an RPC tail of
+`eth_getLogs` after the indexed block — so a read answers as of the block its processor had
+reached. `indexQueryBlock` (`sentio_checkpoint.go`) applies the status rules: the chain must be
+at `PROCESSING_LATEST`; a live read queries `min(pin, processed)` wherever the processor is; a
+read at a fixed pin needs the processor at or past the pin and otherwise fails as a `protocol`
+error, so a host that keeps historical scans retries it rather than storing a short answer.
+
 An index read is certified by the index's `IndexerCheckpoint` row for the chain, read by the
-same time-travel query at the query block and validated against the pin: not ahead of it, and no
-staler than the live or backfill lag. Processors write that row on a time interval, a week long
-while they backfill, and the driver fires the interval on weekly boundaries rather than at the
-processor's start block, so the first row lands up to seven days after the index starts. A query
-block before it finds no checkpoint, although the chain status proves the processor has passed
-it. `indexStart` (`sentio_checkpoint.go`) then stands the start block in as the checkpoint, with
-that block's time, and the usual validation decides: the stand-in passes only within the lag of
-the start, and a checkpoint still missing after that fails as a stale one.
+same time-travel query at the query block and validated by `checkIndexCheckpoint` against the
+pin: never ahead of it; at a fixed pin no older than the backfill lag; on a live read any age,
+but past `indexMaxLag` (an hour) the read returns an `indexLagNote` with what it read. Adapters
+join that note into their result, and the engine reports it as a `coverage` note on the
+protocol and chain rather than a failure. Keep every lag rule in that one function and its
+constants; do not reintroduce per-indexer lag constants.
+
+Since the index lags the pin, the refs it lists may have been settled after the indexed block.
+An adapter must read a ref the account no longer holds at the pin as nothing, never as a
+disagreement with the index: a request the protocol deleted on claim reads empty, an NFT
+burned on redemption reverts `ownerOf`, an NFT transferred away has another owner. Keep
+failing on what cannot come from lag, such as a live request with another owner.
+
+Processors write the checkpoint row on a time interval, every ten minutes once live and a week
+long while they backfill, and the driver fires the interval on weekly boundaries rather than at
+the processor's start block, so the first row lands up to seven days after the index starts. A
+query block before it finds no checkpoint, although the chain status proves the processor has
+passed it. `indexStart` (`sentio_checkpoint.go`) then stands the start block in as the
+checkpoint, with that block's time, and the usual validation decides: at a fixed pin the
+stand-in passes only within the backfill lag of the start, and a checkpoint still missing after
+that fails as a stale one.
 
 The start block an adapter passes must be the block the processor's checkpoint binding starts
 at on that chain, which is also the adapter's own activation for the index. An index that started

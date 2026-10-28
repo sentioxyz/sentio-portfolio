@@ -7,25 +7,17 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 )
 
 const (
 	pendleIndexerPageSize = 500
 	// pendleMarketLookupBatch bounds the PTs named in one market lookup. An account holding
 	// hundreds of PTs would otherwise build a single query longer than the endpoint accepts.
-	pendleMarketLookupBatch     = 100
-	pendleMaxPositionRefs       = 4_096
-	pendleMaxTailContracts      = 256
-	pendleMaxRPCTailBlocks      = 2_048
-	pendleIndexerLiveMaxLag     = 15 * time.Minute
-	pendleIndexerBackfillMaxLag = 7*24*time.Hour + 30*time.Minute
+	pendleMarketLookupBatch = 100
+	pendleMaxPositionRefs   = 4_096
 )
-
-var pendleTransferTopic = crypto.Keccak256Hash([]byte("Transfer(address,address,uint256)"))
 
 type pendleIndexer struct {
 	api            *sentioAPIClient
@@ -412,30 +404,11 @@ func (i *pendleIndexer) MarketsForPT(
 	return markets, nil
 }
 
-func validatePendleCheckpoint(block BlockRef, page pendleWalletPage) error {
-	if page.CheckpointBlock > block.Number {
-		return fmt.Errorf("indexer checkpoint %d is ahead of pinned block %d", page.CheckpointBlock, block.Number)
-	}
-	checkpointSeconds := page.CheckpointMS / 1_000
-	if checkpointSeconds > block.Timestamp+60 {
-		return fmt.Errorf("indexer checkpoint timestamp is ahead of pinned block")
-	}
-	if block.Timestamp > checkpointSeconds {
-		lag := time.Duration(block.Timestamp-checkpointSeconds) * time.Second
-		maximumLag := pendleIndexerLiveMaxLag
-		if block.Fixed {
-			maximumLag = pendleIndexerBackfillMaxLag
-		}
-		if lag > maximumLag {
-			return fmt.Errorf("indexer checkpoint is stale by %s", lag)
-		}
-	}
-	return nil
-}
-
 type pendleIndexedSnapshot struct {
 	Block uint64
 	Refs  []pendlePositionRef
+	// Lag notes a live read that trails its pin by more than indexMaxLag.
+	Lag *indexLagNote
 }
 
 // presenceProbe asks every Pendle chain at once whether the account holds any PT, YT or LP
@@ -452,9 +425,6 @@ func (i *pendleIndexer) presenceProbe(account common.Address) presenceProbe {
 				return fmt.Sprintf("chainId: %d, account: \"%s\", id_starts_with: \"%s\"", chainID, owner, pendleRefRowPrefix(chainID, account))
 			},
 		}},
-		maxRPCTail:     pendleMaxRPCTailBlocks,
-		liveMaxLag:     pendleIndexerLiveMaxLag,
-		backfillMaxLag: pendleIndexerBackfillMaxLag,
 	}
 }
 
@@ -468,34 +438,14 @@ func (i *pendleIndexer) indexedRefs(
 	account common.Address,
 	start indexStart,
 ) (pendleIndexedSnapshot, error) {
-	statuses, err := i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, false)
+	statuses, queryBlock, err := indexQueryBlock(block, func(forceRefresh bool) (map[ChainID]sentioChainStatus, error) {
+		return i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, forceRefresh)
+	})
 	if err != nil {
 		return pendleIndexedSnapshot{}, err
 	}
-	status := statuses[block.ChainID]
-	if status.State != "PROCESSING_LATEST" {
-		return pendleIndexedSnapshot{}, fmt.Errorf(
-			"indexer backfill is incomplete for chain %d: state=%s processed=%d estimatedLatest=%d",
-			block.ChainID, status.State, status.ProcessedBlock, status.EstimatedLatest,
-		)
-	}
-	if block.Number > status.ProcessedBlock && block.Number-status.ProcessedBlock > pendleMaxRPCTailBlocks {
-		statuses, err = i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, true)
-		if err != nil {
-			return pendleIndexedSnapshot{}, err
-		}
-		status = statuses[block.ChainID]
-	}
-	if status.State != "PROCESSING_LATEST" ||
-		(block.Number > status.ProcessedBlock && block.Number-status.ProcessedBlock > pendleMaxRPCTailBlocks) {
-		return pendleIndexedSnapshot{}, fmt.Errorf(
-			"indexer RPC tail exceeds %d blocks for chain %d: processed=%d target=%d",
-			pendleMaxRPCTailBlocks, block.ChainID, status.ProcessedBlock, block.Number,
-		)
-	}
-	queryBlock := min(block.Number, status.ProcessedBlock)
 	if proof, empty := i.api.chainProvenEmpty(ctx, i.presenceProbe(account), block, strings.ToLower(account.Hex()), statuses); empty {
-		// The proof may predate this status read; the RPC tail then starts where it holds.
+		// The proof may predate this status read; it is the block the answer holds at.
 		return pendleIndexedSnapshot{Block: proof.QueryBlock, Refs: make([]pendlePositionRef, 0)}, nil
 	}
 	// Only the pages and the token lookup take a lane slot: the status read needs none, and a
@@ -509,6 +459,7 @@ func (i *pendleIndexer) indexedRefs(
 	tokens := make([]common.Address, 0)
 	kinds := make([]pendleTokenKind, 0)
 	var checkpointBlock, checkpointMS uint64
+	var lag *indexLagNote
 	firstPage := true
 	for {
 		page, pageErr := i.graphqlPage(ctx, block.ChainID, account, after, queryBlock, start)
@@ -516,9 +467,11 @@ func (i *pendleIndexer) indexedRefs(
 			return pendleIndexedSnapshot{}, pageErr
 		}
 		if firstPage {
-			if validationErr := validatePendleCheckpoint(block, page); validationErr != nil {
+			note, validationErr := checkIndexCheckpoint(block, page.CheckpointBlock, page.CheckpointMS)
+			if validationErr != nil {
 				return pendleIndexedSnapshot{}, validationErr
 			}
+			lag = note
 			checkpointBlock, checkpointMS = page.CheckpointBlock, page.CheckpointMS
 			firstPage = false
 		} else if page.CheckpointBlock != checkpointBlock || page.CheckpointMS != checkpointMS {
@@ -560,278 +513,25 @@ func (i *pendleIndexer) indexedRefs(
 		}
 		refs = append(refs, ref)
 	}
-	return pendleIndexedSnapshot{Block: queryBlock, Refs: refs}, nil
+	return pendleIndexedSnapshot{Block: queryBlock, Refs: refs, Lag: lag}, nil
 }
 
-// pendleTailCandidates collects the contracts that moved a balance to or from the account since
-// the indexer checkpoint. Most are unrelated ERC20s; classification against the factories is
-// what keeps them out.
-func pendleTailCandidates(
-	ctx context.Context,
-	client *RPCClient,
-	fromBlock uint64,
-	toBlock uint64,
-	account common.Address,
-) ([]common.Address, error) {
-	if fromBlock > toBlock {
-		return nil, nil
-	}
-	accountTopic := common.BytesToHash(common.LeftPadBytes(account.Bytes(), 32))
-	filters := [][][]common.Hash{
-		{{pendleTransferTopic}, {accountTopic}},
-		{{pendleTransferTopic}, nil, {accountTopic}},
-	}
-	seen := make(map[common.Address]struct{})
-	for _, topics := range filters {
-		logs, err := client.Logs(ctx, fromBlock, toBlock, nil, topics)
-		if err != nil {
-			return nil, fmt.Errorf("Pendle transfer RPC tail: %w", err)
-		}
-		for _, log := range logs {
-			seen[log.Address] = struct{}{}
-			if len(seen) > pendleMaxTailContracts {
-				return nil, fmt.Errorf(
-					"RPC tail contains more than %d transfer contracts", pendleMaxTailContracts,
-				)
-			}
-		}
-	}
-	result := make([]common.Address, 0, len(seen))
-	for address := range seen {
-		result = append(result, address)
-	}
-	sort.Slice(result, func(left, right int) bool {
-		return strings.ToLower(result[left].Hex()) < strings.ToLower(result[right].Hex())
-	})
-	return result, nil
-}
-
-// pendleClassifyTail decides which tail candidates are really Pendle tokens. PT, YT and market
-// contracts all name their creator through factory(), which narrows the field to the configured
-// generations in one call each; the factory is then asked to confirm, because a contract can
-// claim any creator it likes but cannot make a real factory vouch for it. That confirmation is
-// also what keeps a fork's tokens out.
-func pendleClassifyTail(
-	ctx context.Context,
-	client *RPCClient,
-	block BlockRef,
-	candidates []common.Address,
-	chain pendleChainConfig,
-) ([]pendlePositionRef, error) {
-	if len(candidates) == 0 {
-		return nil, nil
-	}
-	yieldFactories := make(map[common.Address]struct{}, len(chain.Generations))
-	marketFactories := make(map[common.Address]struct{}, len(chain.Generations))
-	for _, generation := range chain.Generations {
-		if generation.YieldContractFactoryWindow.ActiveAt(block.Number) {
-			yieldFactories[generation.YieldContractFactory] = struct{}{}
-		}
-		if generation.MarketFactoryWindow.ActiveAt(block.Number) {
-			marketFactories[generation.MarketFactory] = struct{}{}
-		}
-	}
-	if len(yieldFactories) == 0 && len(marketFactories) == 0 {
-		return nil, nil
-	}
-	// An unrelated ERC20 has no factory() at all, so the call reverts and the candidate drops.
-	claims := make([]ContractCall, len(candidates))
-	for index, candidate := range candidates {
-		claims[index] = ContractCall{
-			Contract: candidate, ABI: pendleTokenFactoryABI, Method: "factory",
-		}
-	}
-	claimRows, err := client.ParallelCallsAllowFailure(ctx, block, claims)
-	if err != nil {
-		return nil, fmt.Errorf("Pendle factory claims: %w", err)
-	}
-	type probe struct {
-		candidate common.Address
-		kind      pendleTokenKind
-	}
-	calls := make([]ContractCall, 0, len(candidates)*2)
-	probes := make([]probe, 0, cap(calls))
-	for index, row := range claimRows {
-		if row.Error != nil {
-			continue
-		}
-		claimed, decodeErr := AddressAt(row.Values, 0)
-		if decodeErr != nil {
-			continue
-		}
-		candidate := candidates[index]
-		if _, isYieldFactory := yieldFactories[claimed]; isYieldFactory {
-			calls = append(calls,
-				ContractCall{
-					Contract: claimed, ABI: pendleYieldContractFactoryABI,
-					Method: "isPT", Args: []any{candidate},
-				},
-				ContractCall{
-					Contract: claimed, ABI: pendleYieldContractFactoryABI,
-					Method: "isYT", Args: []any{candidate},
-				},
-			)
-			probes = append(probes, probe{candidate, pendlePT}, probe{candidate, pendleYT})
-			continue
-		}
-		if _, isMarketFactory := marketFactories[claimed]; isMarketFactory {
-			calls = append(calls, ContractCall{
-				Contract: claimed, ABI: pendleMarketFactoryABI,
-				Method: "isValidMarket", Args: []any{candidate},
-			})
-			probes = append(probes, probe{candidate, pendleLP})
-		}
-	}
-	if len(calls) == 0 {
-		return nil, nil
-	}
-	rows, err := client.ParallelCalls(ctx, block, calls)
-	if err != nil {
-		return nil, fmt.Errorf("Pendle factory classification: %w", err)
-	}
-	owned := make(map[common.Address]pendleTokenKind)
-	for index, row := range rows {
-		claimed, decodeErr := BoolAt(row, 0)
-		if decodeErr != nil {
-			return nil, fmt.Errorf("Pendle factory classification: %w", decodeErr)
-		}
-		if !claimed {
-			continue
-		}
-		if existing, seen := owned[probes[index].candidate]; seen && existing != probes[index].kind {
-			return nil, fmt.Errorf(
-				"Pendle factories disagree on the kind of token %s", probes[index].candidate,
-			)
-		}
-		owned[probes[index].candidate] = probes[index].kind
-	}
-	classified := make([]common.Address, 0, len(owned))
-	for candidate := range owned {
-		classified = append(classified, candidate)
-	}
-	sort.Slice(classified, func(left, right int) bool {
-		return strings.ToLower(classified[left].Hex()) < strings.ToLower(classified[right].Hex())
-	})
-	return pendleResolveTailRefs(ctx, client, block, classified, owned)
-}
-
-// pendleResolveTailRefs reads the maturity a tail token belongs to. A market reports its own
-// triple through readTokens; PT and YT both expose SY() and expiry(), and only a YT names its
-// sibling through PT().
-func pendleResolveTailRefs(
-	ctx context.Context,
-	client *RPCClient,
-	block BlockRef,
-	classified []common.Address,
-	kinds map[common.Address]pendleTokenKind,
-) ([]pendlePositionRef, error) {
-	refs := make([]pendlePositionRef, 0, len(classified))
-	for _, token := range classified {
-		kind := kinds[token]
-		ref := pendlePositionRef{Token: token, Kind: kind}
-		if kind == pendleLP {
-			values, err := client.Call(ctx, block, token, pendleMarketABI, "readTokens")
-			if err != nil {
-				return nil, fmt.Errorf("Pendle market %s tokens: %w", token, err)
-			}
-			sy, decodeErr := AddressAt(values, 0)
-			if decodeErr != nil {
-				return nil, fmt.Errorf("Pendle market %s tokens: %w", token, decodeErr)
-			}
-			principal, decodeErr := AddressAt(values, 1)
-			if decodeErr != nil {
-				return nil, fmt.Errorf("Pendle market %s tokens: %w", token, decodeErr)
-			}
-			ref.SY, ref.PT = sy, principal
-			refs = append(refs, ref)
-			continue
-		}
-		calls := []ContractCall{
-			{Contract: token, ABI: pendlePrincipalTokenABI, Method: "SY"},
-			{Contract: token, ABI: pendlePrincipalTokenABI, Method: "expiry"},
-		}
-		if kind == pendleYT {
-			calls = append(calls, ContractCall{
-				Contract: token, ABI: pendleYieldTokenABI, Method: "PT",
-			})
-		}
-		rows, err := client.ParallelCalls(ctx, block, calls)
-		if err != nil {
-			return nil, fmt.Errorf("Pendle token %s maturity: %w", token, err)
-		}
-		sy, decodeErr := AddressAt(rows[0], 0)
-		if decodeErr != nil {
-			return nil, fmt.Errorf("Pendle token %s SY: %w", token, decodeErr)
-		}
-		expiry, decodeErr := BigIntAt(rows[1], 0)
-		if decodeErr != nil {
-			return nil, fmt.Errorf("Pendle token %s expiry: %w", token, decodeErr)
-		}
-		if !expiry.IsUint64() {
-			return nil, fmt.Errorf("Pendle token %s reported an out-of-range expiry", token)
-		}
-		ref.SY, ref.Expiry, ref.PT = sy, expiry.Uint64(), token
-		if kind == pendleYT {
-			principal, principalErr := AddressAt(rows[2], 0)
-			if principalErr != nil {
-				return nil, fmt.Errorf("Pendle YT %s principal: %w", token, principalErr)
-			}
-			ref.PT = principal
-		}
-		refs = append(refs, ref)
-	}
-	return refs, nil
-}
-
-func mergePendleRefs(indexed []pendlePositionRef, tail []pendlePositionRef) ([]pendlePositionRef, error) {
-	merged := make(map[common.Address]pendlePositionRef, len(indexed)+len(tail))
-	for _, ref := range indexed {
-		merged[ref.Token] = ref
-	}
-	for _, ref := range tail {
-		if _, exists := merged[ref.Token]; exists {
-			continue
-		}
-		merged[ref.Token] = ref
-	}
-	if len(merged) > pendleMaxPositionRefs {
-		return nil, fmt.Errorf("Pendle position identifiers exceed account bounds")
-	}
-	refs := make([]pendlePositionRef, 0, len(merged))
-	for _, ref := range merged {
-		refs = append(refs, ref)
-	}
-	sort.Slice(refs, func(left, right int) bool {
-		return strings.ToLower(refs[left].Token.Hex()) < strings.ToLower(refs[right].Token.Hex())
-	})
-	return refs, nil
-}
-
+// PositionRefs returns the account's position refs on block's chain, with a lag note when the
+// index trails a live pin by more than indexMaxLag.
 func (i *pendleIndexer) PositionRefs(
 	ctx context.Context,
 	client *RPCClient,
 	block BlockRef,
 	account common.Address,
-) ([]pendlePositionRef, error) {
+) ([]pendlePositionRef, *indexLagNote, error) {
 	chain, supported := pendleChainConfigs[block.ChainID]
 	if !supported {
-		return nil, fmt.Errorf("Pendle is not configured on chain %d", block.ChainID)
+		return nil, nil, fmt.Errorf("Pendle is not configured on chain %d", block.ChainID)
 	}
 	i.api.awaitPresence(ctx, i.presenceProbe(account), strings.ToLower(account.Hex()))
 	indexed, err := i.indexedRefs(ctx, block, account, indexStart{client: client, block: chain.ActivationBlock})
 	if err != nil {
-		return nil, fmt.Errorf("Pendle index query: %w", err)
+		return nil, nil, fmt.Errorf("Pendle index query: %w", err)
 	}
-	if indexed.Block >= block.Number {
-		return indexed.Refs, nil
-	}
-	candidates, err := pendleTailCandidates(ctx, client, indexed.Block+1, block.Number, account)
-	if err != nil {
-		return nil, err
-	}
-	tail, err := pendleClassifyTail(ctx, client, block, candidates, chain)
-	if err != nil {
-		return nil, err
-	}
-	return mergePendleRefs(indexed.Refs, tail)
+	return indexed.Refs, indexed.Lag, nil
 }

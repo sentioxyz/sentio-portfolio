@@ -2,6 +2,7 @@ package portfolio
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"sort"
@@ -9,7 +10,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 )
 
 const asterAsBNBMinterActivation = 44_582_599
@@ -44,15 +44,6 @@ var (
       {"type":"function","name":"asUSDF","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
       {"type":"function","name":"exchangePrice","stateMutability":"view","inputs":[],"outputs":[{"type":"uint256"}]}
     ]`)
-	asterMintQueuedTopic        = crypto.Keccak256Hash([]byte("TokenMintReqQueued(uint256,address,uint256)"))
-	asterMintProcessedTopic     = crypto.Keccak256Hash([]byte("TokenMintReqProcessed(uint256,address,uint256,uint256)"))
-	asterMintCancelledTopic     = crypto.Keccak256Hash([]byte("TokenMintReqCancelled(uint256,address,uint256)"))
-	asterWithdrawRequestedTopic = crypto.Keccak256Hash([]byte(
-		"RequestWithdraw(address,address,uint256,uint256,bool)",
-	))
-	asterWithdrawClaimedTopic = crypto.Keccak256Hash([]byte(
-		"ClaimWithdraw(address,address,address,uint256,uint256,uint256)",
-	))
 	asterBTCWithdrawalABI = MustABI(`[
       {
         "type":"function","name":"requestWithdraws","stateMutability":"view",
@@ -277,79 +268,12 @@ func newAsterAdapter(config SentioIndexerConfig) Adapter {
 	}
 }
 
-func (a *AsterAdapter) withdrawalRequestRefs(
-	ctx context.Context,
-	client *RPCClient,
-	block BlockRef,
-	account common.Address,
-	contracts []common.Address,
-) ([]accountRequestRef, error) {
-	snapshot, err := a.indexer.IndexedRefs(ctx, block, account, contracts)
-	if err != nil {
-		return nil, fmt.Errorf("withdrawal request index: %w", err)
-	}
-	refs := make(map[string]accountRequestRef, len(snapshot.Refs))
-	allowed := make(map[common.Address]struct{}, len(contracts))
-	for _, contract := range contracts {
-		allowed[contract] = struct{}{}
-	}
-	for _, ref := range snapshot.Refs {
-		refs[accountRequestRefKey(ref)] = ref
-	}
-	if snapshot.Block < block.Number {
-		ownerTopic := common.BytesToHash(account.Bytes())
-		logs, logsErr := client.Logs(
-			ctx, snapshot.Block+1, block.Number, contracts,
-			[][]common.Hash{{asterWithdrawRequestedTopic, asterWithdrawClaimedTopic}, {ownerTopic}},
-		)
-		if logsErr != nil {
-			return nil, fmt.Errorf("withdrawal request RPC tail: %w", logsErr)
-		}
-		sortRPCLogs(logs)
-		for _, event := range logs {
-			if _, exists := allowed[event.Address]; !exists || len(event.Topics) < 3 ||
-				addressFromIndexedTopic(event.Topics[1]) != account {
-				return nil, fmt.Errorf("withdrawal request RPC tail returned malformed event")
-			}
-			var requestBytes []byte
-			switch event.Topics[0] {
-			case asterWithdrawRequestedTopic:
-				if len(event.Topics) != 3 || len(event.Data) < 64 {
-					return nil, fmt.Errorf("withdrawal request RPC tail returned malformed RequestWithdraw")
-				}
-				requestBytes = event.Data[32:64]
-				key := new(big.Int).SetBytes(requestBytes).String()
-				ref := accountRequestRef{Contract: event.Address, Key: key}
-				refs[accountRequestRefKey(ref)] = ref
-			case asterWithdrawClaimedTopic:
-				if len(event.Topics) != 4 || len(event.Data) < 96 {
-					return nil, fmt.Errorf("withdrawal request RPC tail returned malformed ClaimWithdraw")
-				}
-				requestBytes = event.Data[64:96]
-				key := new(big.Int).SetBytes(requestBytes).String()
-				ref := accountRequestRef{Contract: event.Address, Key: key}
-				delete(refs, accountRequestRefKey(ref))
-			default:
-				return nil, fmt.Errorf("withdrawal request RPC tail returned unexpected event")
-			}
-		}
-	}
-	result := make([]accountRequestRef, 0, len(refs))
-	for _, ref := range refs {
-		result = append(result, ref)
-	}
-	sort.Slice(result, func(left, right int) bool {
-		return accountRequestRefKey(result[left]) < accountRequestRefKey(result[right])
-	})
-	return result, nil
-}
-
 func (a *AsterAdapter) readWithdrawalRequests(
 	ctx context.Context,
 	client *RPCClient,
 	block BlockRef,
 	account common.Address,
-) ([]Group, error) {
+) ([]Group, *indexLagNote, error) {
 	active := make([]asterWithdrawalContract, 0, len(a.withdrawals))
 	contracts := make([]common.Address, 0, len(a.withdrawals))
 	byAddress := make(map[common.Address]asterWithdrawalContract, len(a.withdrawals))
@@ -362,12 +286,24 @@ func (a *AsterAdapter) readWithdrawalRequests(
 		byAddress[withdrawal.Address] = withdrawal
 	}
 	if len(active) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
-	refs, err := a.withdrawalRequestRefs(ctx, client, block, account, contracts)
+	snapshot, err := a.indexer.IndexedRefs(ctx, block, account, contracts)
 	if err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf("withdrawal request index: %w", err)
 	}
+	groups, err := a.withdrawalGroups(ctx, client, block, account, byAddress, snapshot.Refs)
+	return groups, snapshot.Lag, err
+}
+
+func (a *AsterAdapter) withdrawalGroups(
+	ctx context.Context,
+	client *RPCClient,
+	block BlockRef,
+	account common.Address,
+	byAddress map[common.Address]asterWithdrawalContract,
+	refs []accountRequestRef,
+) ([]Group, error) {
 	groups := make([]Group, 0, len(refs))
 	for _, ref := range refs {
 		withdrawal, exists := byAddress[ref.Contract]
@@ -385,6 +321,10 @@ func (a *AsterAdapter) readWithdrawalRequests(
 			return nil, fmt.Errorf("%s withdrawal %s: %w", withdrawal.Receipt.Symbol, requestID, callErr)
 		}
 		receiptAddress, decodeErr := AddressAt(row, 0)
+		// A request claimed after the indexed block is deleted, and reads empty at the pin.
+		if decodeErr == nil && receiptAddress == (common.Address{}) {
+			continue
+		}
 		if decodeErr != nil || receiptAddress != withdrawal.Receipt.Address {
 			return nil, fmt.Errorf("%s withdrawal %s returned an unexpected receipt token", withdrawal.Receipt.Symbol, requestID)
 		}
@@ -461,72 +401,30 @@ func (a *AsterAdapter) readWithdrawalRequests(
 	return groups, nil
 }
 
-func (a *AsterAdapter) mintRequestRefs(
-	ctx context.Context,
-	client *RPCClient,
-	block BlockRef,
-	account common.Address,
-) ([]accountRequestRef, error) {
-	snapshot, err := a.indexer.IndexedRefs(
-		ctx, block, account, []common.Address{asterAsBNBMinter},
-	)
-	if err != nil {
-		return nil, fmt.Errorf("mint request index: %w", err)
-	}
-	refs := make(map[string]accountRequestRef, len(snapshot.Refs))
-	for _, ref := range snapshot.Refs {
-		refs[ref.Key] = ref
-	}
-	if snapshot.Block < block.Number {
-		ownerTopic := common.BytesToHash(account.Bytes())
-		logs, logsErr := client.Logs(
-			ctx, snapshot.Block+1, block.Number, []common.Address{asterAsBNBMinter},
-			[][]common.Hash{{asterMintQueuedTopic, asterMintProcessedTopic, asterMintCancelledTopic}, nil, {ownerTopic}},
-		)
-		if logsErr != nil {
-			return nil, fmt.Errorf("mint request RPC tail: %w", logsErr)
-		}
-		sortRPCLogs(logs)
-		for _, event := range logs {
-			if len(event.Topics) != 3 || addressFromIndexedTopic(event.Topics[2]) != account {
-				return nil, fmt.Errorf("mint request RPC tail returned malformed event")
-			}
-			key := new(big.Int).SetBytes(event.Topics[1].Bytes()).String()
-			switch event.Topics[0] {
-			case asterMintQueuedTopic:
-				refs[key] = accountRequestRef{Contract: asterAsBNBMinter, Key: key}
-			case asterMintProcessedTopic, asterMintCancelledTopic:
-				delete(refs, key)
-			default:
-				return nil, fmt.Errorf("mint request RPC tail returned unexpected event")
-			}
-		}
-	}
-	result := make([]accountRequestRef, 0, len(refs))
-	for _, ref := range refs {
-		result = append(result, ref)
-	}
-	sort.Slice(result, func(left, right int) bool {
-		leftID, _ := new(big.Int).SetString(result[left].Key, 10)
-		rightID, _ := new(big.Int).SetString(result[right].Key, 10)
-		return leftID.Cmp(rightID) < 0
-	})
-	return result, nil
-}
-
 func (a *AsterAdapter) readMintRequests(
 	ctx context.Context,
 	client *RPCClient,
 	block BlockRef,
 	account common.Address,
-) ([]Group, error) {
+) ([]Group, *indexLagNote, error) {
 	if block.ChainID != BSC || block.Number < asterAsBNBMinterActivation {
-		return nil, nil
+		return nil, nil, nil
 	}
-	refs, err := a.mintRequestRefs(ctx, client, block, account)
+	snapshot, err := a.indexer.IndexedRefs(ctx, block, account, []common.Address{asterAsBNBMinter})
 	if err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf("mint request index: %w", err)
 	}
+	groups, err := a.mintGroups(ctx, client, block, account, snapshot.Refs)
+	return groups, snapshot.Lag, err
+}
+
+func (a *AsterAdapter) mintGroups(
+	ctx context.Context,
+	client *RPCClient,
+	block BlockRef,
+	account common.Address,
+	refs []accountRequestRef,
+) ([]Group, error) {
 	if len(refs) == 0 {
 		return nil, nil
 	}
@@ -554,7 +452,6 @@ func (a *AsterAdapter) readMintRequests(
 	if err != nil {
 		return nil, fmt.Errorf("asBNB mint request token metadata: %w", err)
 	}
-	calls := make([]ContractCall, 0, len(refs))
 	ids := make([]*big.Int, 0, len(refs))
 	for _, ref := range refs {
 		id, valid := new(big.Int).SetString(ref.Key, 10)
@@ -562,6 +459,10 @@ func (a *AsterAdapter) readMintRequests(
 			return nil, fmt.Errorf("asBNB mint request has invalid index")
 		}
 		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(left, right int) bool { return ids[left].Cmp(ids[right]) < 0 })
+	calls := make([]ContractCall, 0, len(ids))
+	for _, id := range ids {
 		calls = append(calls, ContractCall{
 			Contract: asterAsBNBMinter, ABI: asterMinterABI,
 			Method: "tokenMintReqQueue", Args: []any{id},
@@ -580,6 +481,10 @@ func (a *AsterAdapter) readMintRequests(
 		amount, decodeErr := BigIntAt(row, 1)
 		if decodeErr != nil {
 			return nil, fmt.Errorf("asBNB mint request %s amount: %w", ids[index], decodeErr)
+		}
+		// A request processed or cancelled after the indexed block is deleted, and reads empty.
+		if requestOwner == (common.Address{}) && amount.Sign() == 0 {
+			continue
 		}
 		if requestOwner != account || amount.Sign() <= 0 {
 			return nil, fmt.Errorf("asBNB mint request %s does not match the pinned index", ids[index])
@@ -608,14 +513,14 @@ func (a *AsterAdapter) Positions(
 	if err != nil {
 		return nil, err
 	}
-	requests, err := a.readMintRequests(ctx, client, block, account)
+	requests, mintLag, err := a.readMintRequests(ctx, client, block, account)
 	if err != nil {
-		return groups, err
+		return groups, errors.Join(err, mintLag.err())
 	}
 	groups = append(groups, requests...)
-	withdrawals, err := a.readWithdrawalRequests(ctx, client, block, account)
+	withdrawals, withdrawalLag, err := a.readWithdrawalRequests(ctx, client, block, account)
 	if err != nil {
-		return groups, err
+		return groups, errors.Join(err, mintLag.err(), withdrawalLag.err())
 	}
-	return append(groups, withdrawals...), nil
+	return append(groups, withdrawals...), errors.Join(mintLag.err(), withdrawalLag.err())
 }

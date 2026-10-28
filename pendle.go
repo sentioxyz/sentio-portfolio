@@ -3,6 +3,7 @@ package portfolio
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -14,26 +15,11 @@ import (
 )
 
 var (
-	// isPT/isYT/isValidMarket are the only enumeration surface Pendle exposes: they answer
-	// "does this factory own that token" but cannot list what a factory has created. That is
-	// why the token universe comes from the indexer and only tail candidates are classified here.
-	pendleYieldContractFactoryABI = MustABI(`[
-      {"type":"function","name":"isPT","stateMutability":"view","inputs":[{"name":"token","type":"address"}],"outputs":[{"type":"bool"}]},
-      {"type":"function","name":"isYT","stateMutability":"view","inputs":[{"name":"token","type":"address"}],"outputs":[{"type":"bool"}]}
-    ]`)
-	pendleMarketFactoryABI = MustABI(`[
-      {"type":"function","name":"isValidMarket","stateMutability":"view","inputs":[{"name":"market","type":"address"}],"outputs":[{"type":"bool"}]}
-    ]`)
 	pendlePrincipalTokenABI = MustABI(`[
       {"type":"function","name":"balanceOf","stateMutability":"view","inputs":[{"name":"account","type":"address"}],"outputs":[{"type":"uint256"}]},
       {"type":"function","name":"expiry","stateMutability":"view","inputs":[],"outputs":[{"type":"uint256"}]},
       {"type":"function","name":"SY","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
       {"type":"function","name":"YT","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]}
-    ]`)
-	// PT, YT and market contracts all expose factory(); an unrelated ERC20 does not, so the
-	// call reverting is itself the first filter.
-	pendleTokenFactoryABI = MustABI(`[
-      {"type":"function","name":"factory","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]}
     ]`)
 	pendleYieldTokenABI = MustABI(`[
       {"type":"function","name":"PT","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
@@ -305,7 +291,7 @@ type pendlePositionIndexer interface {
 		*RPCClient,
 		BlockRef,
 		common.Address,
-	) ([]pendlePositionRef, error)
+	) ([]pendlePositionRef, *indexLagNote, error)
 	// MarketsForPT groups the markets the index recorded for each of the given PTs. A PT names
 	// no market on-chain, and Pendle allows more than one, so this is the only way to reach the
 	// market whose implied rate discounts it.
@@ -363,18 +349,19 @@ func (a *PendleAdapter) Positions(
 	if !supported || block.Number < chain.ActivationBlock {
 		return nil, nil
 	}
-	refs, err := a.indexer.PositionRefs(ctx, client, block, account)
+	refs, lag, err := a.indexer.PositionRefs(ctx, client, block, account)
 	if err != nil {
 		return nil, fmt.Errorf("position enumeration: %w", err)
 	}
 	held, err := a.heldRefs(ctx, client, block, account, refs)
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(err, lag.err())
 	}
 	if len(held) == 0 {
-		return nil, nil
+		return nil, lag.err()
 	}
-	return a.buildGroups(ctx, client, block, held)
+	groups, err := a.buildGroups(ctx, client, block, held)
+	return groups, errors.Join(err, lag.err())
 }
 
 type pendleHolding struct {

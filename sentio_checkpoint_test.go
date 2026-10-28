@@ -117,8 +117,8 @@ func TestMorphoIndexStartStandsInForTheFirstCheckpoint(t *testing.T) {
 		accepted bool
 	}{
 		{name: "three days in", sinceRun: 3 * 24 * time.Hour, accepted: true},
-		{name: "at the backfill lag", sinceRun: morphoBackfillMaxLag, accepted: true},
-		{name: "past the backfill lag", sinceRun: morphoBackfillMaxLag + time.Second},
+		{name: "at the backfill lag", sinceRun: indexBackfillMaxLag, accepted: true},
+		{name: "past the backfill lag", sinceRun: indexBackfillMaxLag + time.Second},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			pin := BlockRef{

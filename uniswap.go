@@ -543,12 +543,14 @@ func (a *UniswapV3Adapter) Positions(
 	client *RPCClient,
 	block BlockRef,
 	account common.Address,
-) ([]Group, error) {
+) (groups []Group, err error) {
 	deployment, exists := uniswapV3Deployments[block.ChainID]
 	if !exists || !deployment.Window.ActiveAt(block.Number) {
 		return nil, nil
 	}
 	indexed, err := a.indexer.indexedNFTs(ctx, uniswapV3, block, account)
+	// However the read ends, a lagging index qualifies it.
+	defer func() { err = errors.Join(err, indexed.Lag.err()) }()
 	enumerated := false
 	if err != nil {
 		if ctx.Err() != nil {
@@ -685,7 +687,7 @@ func (a *UniswapV3Adapter) Positions(
 	if err != nil {
 		return nil, fmt.Errorf("token metadata: %w", err)
 	}
-	groups := make([]Group, 0, len(detailed))
+	groups = make([]Group, 0, len(detailed))
 	for _, position := range detailed {
 		principal0, principal1, mathErr := uniswapAmountsForLiquidity(
 			position.SqrtPrice,
@@ -831,7 +833,7 @@ func (a *UniswapV4Adapter) Positions(
 	client *RPCClient,
 	block BlockRef,
 	account common.Address,
-) ([]Group, error) {
+) (groups []Group, err error) {
 	deployment, exists := uniswapV4Deployments[block.ChainID]
 	if !exists || !deployment.Window.ActiveAt(block.Number) {
 		return nil, nil
@@ -840,6 +842,8 @@ func (a *UniswapV4Adapter) Positions(
 	if err != nil {
 		return nil, err
 	}
+	// However the read ends, a lagging index qualifies it.
+	defer func() { err = errors.Join(err, indexed.Lag.err()) }()
 	ownerCalls := make([]ContractCall, len(indexed.NFTs))
 	for index, nft := range indexed.NFTs {
 		if nft.Manager != deployment.Manager {
@@ -991,7 +995,7 @@ func (a *UniswapV4Adapter) Positions(
 	if err != nil {
 		return nil, fmt.Errorf("token metadata: %w", err)
 	}
-	groups := make([]Group, 0, len(positions))
+	groups = make([]Group, 0, len(positions))
 	for _, position := range positions {
 		principal0, principal1, mathErr := uniswapAmountsForLiquidity(
 			position.SqrtPrice,

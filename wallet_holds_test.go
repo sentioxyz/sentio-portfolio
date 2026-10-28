@@ -30,6 +30,7 @@ type contractStub struct {
 	chainID ChainID
 	account common.Address
 	results map[contractStubCall]hexutil.Bytes
+	reverts map[contractStubCall]struct{}
 
 	mu       sync.Mutex
 	balances map[common.Address]*big.Int
@@ -46,6 +47,7 @@ func newContractStub(t *testing.T, chainID ChainID, account common.Address) *con
 		chainID:  chainID,
 		account:  account,
 		results:  make(map[contractStubCall]hexutil.Bytes),
+		reverts:  make(map[contractStubCall]struct{}),
 		balances: make(map[common.Address]*big.Int),
 	}
 }
@@ -68,6 +70,16 @@ func (s *contractStub) answer(
 		s.t.Fatalf("encode %s result: %v", method, err)
 	}
 	s.results[contractStubCall{contract: contract, data: hexutil.Encode(data)}] = result
+}
+
+// revert makes contract revert when it is called with method(args...).
+func (s *contractStub) revert(contract common.Address, contractABI abi.ABI, method string, args ...any) {
+	s.t.Helper()
+	data, err := contractABI.Pack(method, args...)
+	if err != nil {
+		s.t.Fatalf("encode %s call: %v", method, err)
+	}
+	s.reverts[contractStubCall{contract: contract, data: hexutil.Encode(data)}] = struct{}{}
 }
 
 // balance makes token report amount as the account's balance.
@@ -136,6 +148,9 @@ func (s *contractStub) respond(call rpcTestRequest) map[string]any {
 				s.recordBalanceRead(input.To, input.Data, result)
 				response["result"] = result
 				return response
+			}
+			if _, reverts := s.reverts[key]; reverts {
+				break
 			}
 		}
 		s.t.Errorf("unexpected eth_call %s", call.Params)

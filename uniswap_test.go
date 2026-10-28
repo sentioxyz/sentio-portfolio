@@ -4,7 +4,6 @@ import (
 	"errors"
 	"math/big"
 	"testing"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 )
@@ -154,22 +153,6 @@ func TestEngineRegistersUniswapV3AndV4(t *testing.T) {
 		if !found[protocol] {
 			t.Errorf("%s is not registered", protocol)
 		}
-	}
-}
-
-func TestUniswapCheckpointUsesSeparateRealtimeAndBackfillBounds(t *testing.T) {
-	page := uniswapGraphQLPage{
-		CheckpointBlock: 99,
-		CheckpointMS:    uint64((1_000_000 - int64(16*time.Hour/time.Second)) * 1_000),
-	}
-	latest := BlockRef{ChainID: Ethereum, Number: 100, Timestamp: 1_000_000}
-	if err := validateUniswapCheckpoint(latest, page); err == nil {
-		t.Fatal("latest block accepted a 16-hour-old checkpoint")
-	}
-	fixed := latest
-	fixed.Fixed = true
-	if err := validateUniswapCheckpoint(fixed, page); err != nil {
-		t.Fatalf("fixed block rejected a valid backfill checkpoint: %v", err)
 	}
 }
 

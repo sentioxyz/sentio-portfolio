@@ -8,40 +8,13 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 )
 
 const (
-	ownerTokenPageSize        = 500
-	ownerTokenMaxRefs         = 4_096
-	ownerTokenMaxRPCTailBlock = 2_048
-	ownerTokenLiveMaxLag      = 15 * time.Minute
-	ownerTokenBackfillMaxLag  = 7*24*time.Hour + 30*time.Minute
-)
-
-var (
-	erc721TransferTopic        = crypto.Keccak256Hash([]byte("Transfer(address,address,uint256)"))
-	erc1155TransferSingleTopic = crypto.Keccak256Hash([]byte("TransferSingle(address,address,address,uint256,uint256)"))
-	erc1155TransferBatchTopic  = crypto.Keccak256Hash([]byte("TransferBatch(address,address,address,uint256[],uint256[])"))
-	erc1155TransferABI         = MustABI(`[
-      {"type":"event","name":"TransferBatch","anonymous":false,"inputs":[
-        {"name":"operator","type":"address","indexed":true},
-        {"name":"from","type":"address","indexed":true},
-        {"name":"to","type":"address","indexed":true},
-        {"name":"ids","type":"uint256[]","indexed":false},
-        {"name":"values","type":"uint256[]","indexed":false}
-      ]}
-    ]`)
-)
-
-type ownerTokenStandard uint8
-
-const (
-	ownerTokenERC721 ownerTokenStandard = iota
-	ownerTokenERC1155
+	ownerTokenPageSize = 500
+	ownerTokenMaxRefs  = 4_096
 )
 
 type ownerTokenRef struct {
@@ -189,28 +162,6 @@ func (i *ownerTokenIndexer) graphqlPage(
 	return page, nil
 }
 
-func validateOwnerTokenCheckpoint(block BlockRef, page ownerTokenGraphQLPage) error {
-	if page.CheckpointBlock > block.Number {
-		return fmt.Errorf("indexer checkpoint %d is ahead of pinned block %d", page.CheckpointBlock, block.Number)
-	}
-	checkpointSeconds := page.CheckpointMS / 1_000
-	if checkpointSeconds > block.Timestamp+60 {
-		return fmt.Errorf("indexer checkpoint timestamp is ahead of pinned block")
-	}
-	if block.Timestamp <= checkpointSeconds {
-		return nil
-	}
-	lag := time.Duration(block.Timestamp-checkpointSeconds) * time.Second
-	maximumLag := ownerTokenLiveMaxLag
-	if block.Fixed {
-		maximumLag = ownerTokenBackfillMaxLag
-	}
-	if lag > maximumLag {
-		return fmt.Errorf("indexer checkpoint is stale by %s", lag)
-	}
-	return nil
-}
-
 func ownerTokenRefKey(contract common.Address, tokenID *big.Int) string {
 	return strings.ToLower(contract.Hex()) + ":" + tokenID.String()
 }
@@ -224,147 +175,58 @@ func sortedAllowedAddresses(allowed map[common.Address]struct{}) []string {
 	return addresses
 }
 
-func addressFromIndexedTopic(topic common.Hash) common.Address {
-	return common.BytesToAddress(topic.Bytes()[12:])
-}
-
+// PositionRefs returns the tokens of contracts the index records owner holding on block's chain,
+// with a lag note when the index trails a live pin by more than indexMaxLag. A token the owner
+// gave up after the indexed block is still among them, so callers check ownership at the pin.
 func (i *ownerTokenIndexer) PositionRefs(
 	ctx context.Context,
-	client *RPCClient,
 	block BlockRef,
 	owner common.Address,
 	contracts []common.Address,
-) ([]ownerTokenRef, error) {
-	return i.positionRefs(ctx, client, block, owner, contracts, ownerTokenERC721)
-}
-
-func (i *ownerTokenIndexer) PositionRefsERC1155(
-	ctx context.Context,
-	client *RPCClient,
-	block BlockRef,
-	owner common.Address,
-	contracts []common.Address,
-) ([]ownerTokenRef, error) {
-	return i.positionRefs(ctx, client, block, owner, contracts, ownerTokenERC1155)
-}
-
-func (i *ownerTokenIndexer) positionRefs(
-	ctx context.Context,
-	client *RPCClient,
-	block BlockRef,
-	owner common.Address,
-	contracts []common.Address,
-	standard ownerTokenStandard,
-) ([]ownerTokenRef, error) {
+) ([]ownerTokenRef, *indexLagNote, error) {
 	if len(contracts) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	release, err := lockSentioLane(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer release()
-	statuses, err := i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, false)
+	_, indexedBlock, err := indexQueryBlock(block, func(forceRefresh bool) (map[ChainID]sentioChainStatus, error) {
+		return i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, forceRefresh)
+	})
 	if err != nil {
-		return nil, err
-	}
-	status, exists := statuses[block.ChainID]
-	if !exists {
-		return nil, fmt.Errorf("indexer status omitted chain %d", block.ChainID)
-	}
-	if status.State != "PROCESSING_LATEST" {
-		return nil, fmt.Errorf(
-			"indexer backfill is incomplete for chain %d: state=%s processed=%d estimatedLatest=%d",
-			block.ChainID, status.State, status.ProcessedBlock, status.EstimatedLatest,
-		)
-	}
-	indexedBlock := min(block.Number, status.ProcessedBlock)
-	if block.Number-indexedBlock > ownerTokenMaxRPCTailBlock {
-		statuses, err = i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, true)
-		if err != nil {
-			return nil, err
-		}
-		status, exists = statuses[block.ChainID]
-		if !exists {
-			return nil, fmt.Errorf("indexer status omitted chain %d", block.ChainID)
-		}
-		indexedBlock = min(block.Number, status.ProcessedBlock)
-		if status.State != "PROCESSING_LATEST" || block.Number-indexedBlock > ownerTokenMaxRPCTailBlock {
-			return nil, fmt.Errorf(
-				"indexer RPC tail exceeds %d blocks for chain %d",
-				ownerTokenMaxRPCTailBlock,
-				block.ChainID,
-			)
-		}
+		return nil, nil, err
 	}
 	allowed := make(map[common.Address]struct{}, len(contracts))
 	for _, contract := range contracts {
 		allowed[contract] = struct{}{}
 	}
 	refsByKey := make(map[string]ownerTokenRef)
+	var lag *indexLagNote
 	after := ""
 	for {
 		page, pageErr := i.graphqlPage(ctx, block.ChainID, owner, after, indexedBlock, allowed)
 		if pageErr != nil {
-			return nil, pageErr
+			return nil, nil, pageErr
 		}
-		if err := validateOwnerTokenCheckpoint(block, page); err != nil {
-			return nil, err
+		if lag, err = checkIndexCheckpoint(block, page.CheckpointBlock, page.CheckpointMS); err != nil {
+			return nil, nil, err
 		}
 		for _, ref := range page.Refs {
 			refsByKey[ownerTokenRefKey(ref.Contract, ref.TokenID)] = ref
 		}
 		if len(refsByKey) > ownerTokenMaxRefs {
-			return nil, fmt.Errorf("indexer returned more than %d owner-token rows", ownerTokenMaxRefs)
+			return nil, nil, fmt.Errorf("indexer returned more than %d owner-token rows", ownerTokenMaxRefs)
 		}
 		if len(page.RowIDs) < ownerTokenPageSize {
 			break
 		}
 		next := page.RowIDs[len(page.RowIDs)-1]
 		if next <= after {
-			return nil, fmt.Errorf("indexer pagination did not advance")
+			return nil, nil, fmt.Errorf("indexer pagination did not advance")
 		}
 		after = next
-	}
-	// The RPC tail needs no indexer slot; hand it back before reading logs.
-	release()
-	if indexedBlock < block.Number {
-		topics := []common.Hash{erc721TransferTopic}
-		if standard == ownerTokenERC1155 {
-			topics = []common.Hash{erc1155TransferSingleTopic, erc1155TransferBatchTopic}
-		}
-		logs, logsErr := client.Logs(
-			ctx,
-			indexedBlock+1,
-			block.Number,
-			contracts,
-			[][]common.Hash{topics},
-		)
-		if logsErr != nil {
-			return nil, fmt.Errorf("read owner-token RPC tail: %w", logsErr)
-		}
-		sortRPCLogs(logs)
-		for _, event := range logs {
-			if _, exists := allowed[event.Address]; !exists {
-				return nil, fmt.Errorf("owner-token RPC tail returned unexpected contract")
-			}
-			if standard == ownerTokenERC721 {
-				if len(event.Topics) != 4 || event.Topics[0] != erc721TransferTopic {
-					return nil, fmt.Errorf("owner-token RPC tail returned malformed ERC721 Transfer event")
-				}
-				from := addressFromIndexedTopic(event.Topics[1])
-				to := addressFromIndexedTopic(event.Topics[2])
-				tokenID := new(big.Int).SetBytes(event.Topics[3].Bytes())
-				applyOwnerTokenTransfer(refsByKey, event.Address, tokenID, from, to, owner)
-				continue
-			}
-			if err := applyERC1155TailLog(refsByKey, event, owner); err != nil {
-				return nil, err
-			}
-		}
-	}
-	if len(refsByKey) > ownerTokenMaxRefs {
-		return nil, fmt.Errorf("owner-token result contains more than %d rows", ownerTokenMaxRefs)
 	}
 	refs := make([]ownerTokenRef, 0, len(refsByKey))
 	for _, ref := range refsByKey {
@@ -376,80 +238,5 @@ func (i *ownerTokenIndexer) positionRefs(
 		}
 		return refs[left].TokenID.Cmp(refs[right].TokenID) < 0
 	})
-	return refs, nil
-}
-
-// applyERC1155TailLog folds one ERC-1155 transfer from the RPC tail into refs.
-//
-// The tokens read through this path are non-fungible, so a transfer that moves ownership moves
-// exactly one unit. A zero-unit transfer is nonetheless legal and appears in real history —
-// Ether.fi's membership NFT emits them — and it changes no owner, so it is skipped. Failing on
-// one would drop every position on the account rather than ignore an event that says nothing.
-// Above one unit the token is not the non-fungible this indexer assumes, and the scan fails.
-func applyERC1155TailLog(
-	refs map[string]ownerTokenRef,
-	event rpcLog,
-	owner common.Address,
-) error {
-	if len(event.Topics) != 4 {
-		return fmt.Errorf("owner-token RPC tail returned malformed ERC1155 Transfer event")
-	}
-	from := addressFromIndexedTopic(event.Topics[2])
-	to := addressFromIndexedTopic(event.Topics[3])
-	switch event.Topics[0] {
-	case erc1155TransferSingleTopic:
-		if len(event.Data) != 64 {
-			return fmt.Errorf("owner-token RPC tail returned malformed TransferSingle data")
-		}
-		tokenID := new(big.Int).SetBytes(event.Data[:32])
-		value := new(big.Int).SetBytes(event.Data[32:])
-		if value.Cmp(big.NewInt(1)) > 0 {
-			return fmt.Errorf("owner-token RPC tail returned a non-unique TransferSingle value")
-		}
-		if value.Sign() == 0 {
-			return nil
-		}
-		applyOwnerTokenTransfer(refs, event.Address, tokenID, from, to, owner)
-	case erc1155TransferBatchTopic:
-		values, decodeErr := erc1155TransferABI.Events["TransferBatch"].Inputs.NonIndexed().Unpack(event.Data)
-		if decodeErr != nil || len(values) != 2 {
-			return fmt.Errorf("owner-token RPC tail returned malformed TransferBatch data")
-		}
-		ids, idsOK := values[0].([]*big.Int)
-		amounts, amountsOK := values[1].([]*big.Int)
-		if !idsOK || !amountsOK || len(ids) != len(amounts) {
-			return fmt.Errorf("owner-token RPC tail returned malformed TransferBatch arrays")
-		}
-		for index, tokenID := range ids {
-			amount := amounts[index]
-			if tokenID == nil || tokenID.Sign() < 0 || amount == nil || amount.Sign() < 0 ||
-				amount.Cmp(big.NewInt(1)) > 0 {
-				return fmt.Errorf("owner-token RPC tail returned invalid TransferBatch item")
-			}
-			if amount.Sign() == 0 {
-				continue
-			}
-			applyOwnerTokenTransfer(refs, event.Address, tokenID, from, to, owner)
-		}
-	default:
-		return fmt.Errorf("owner-token RPC tail returned unexpected ERC1155 event")
-	}
-	return nil
-}
-
-func applyOwnerTokenTransfer(
-	refs map[string]ownerTokenRef,
-	contract common.Address,
-	tokenID *big.Int,
-	from common.Address,
-	to common.Address,
-	owner common.Address,
-) {
-	key := ownerTokenRefKey(contract, tokenID)
-	if from == owner && to != owner {
-		delete(refs, key)
-	}
-	if to == owner {
-		refs[key] = ownerTokenRef{Contract: contract, TokenID: new(big.Int).Set(tokenID)}
-	}
+	return refs, lag, nil
 }

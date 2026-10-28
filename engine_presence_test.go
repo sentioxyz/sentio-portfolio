@@ -204,9 +204,6 @@ func newProbingTestAdapter(id, entity string, index *probeTestIndex, chains ...C
 			fields: []presenceField{{entity: entity, where: func(chainID ChainID) string {
 				return fmt.Sprintf("chainId: %d", chainID)
 			}}},
-			maxRPCTail:     ^uint64(0),
-			liveMaxLag:     time.Hour,
-			backfillMaxLag: time.Hour,
 		},
 	}
 }

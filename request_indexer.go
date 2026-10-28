@@ -7,17 +7,13 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 )
 
 const (
-	accountRequestPageSize       = 500
-	accountRequestMaxRefs        = 4_096
-	accountRequestMaxRPCTail     = 2_048
-	accountRequestLiveMaxLag     = 15 * time.Minute
-	accountRequestBackfillMaxLag = 7*24*time.Hour + 30*time.Minute
+	accountRequestPageSize = 500
+	accountRequestMaxRefs  = 4_096
 )
 
 type accountRequestRef struct {
@@ -25,9 +21,13 @@ type accountRequestRef struct {
 	Key      string
 }
 
+// accountRequestSnapshot is the requests the index records open for an account as of Block. A
+// request settled after Block is still among them, so callers skip one that reads empty at the pin.
 type accountRequestSnapshot struct {
 	Block uint64
 	Refs  []accountRequestRef
+	// Lag notes a live read that trails its pin by more than indexMaxLag.
+	Lag *indexLagNote
 }
 
 type accountRequestIndexer struct {
@@ -190,28 +190,6 @@ func (i *accountRequestIndexer) graphqlPage(
 	return snapshot, rowIDs, checkpointMS, nil
 }
 
-func validateAccountRequestCheckpoint(block BlockRef, indexedBlock, checkpointMS uint64) error {
-	if indexedBlock > block.Number {
-		return fmt.Errorf("indexer checkpoint %d is ahead of pinned block %d", indexedBlock, block.Number)
-	}
-	checkpointSeconds := checkpointMS / 1_000
-	if checkpointSeconds > block.Timestamp+60 {
-		return fmt.Errorf("indexer checkpoint timestamp is ahead of pinned block")
-	}
-	if block.Timestamp <= checkpointSeconds {
-		return nil
-	}
-	lag := time.Duration(block.Timestamp-checkpointSeconds) * time.Second
-	maximumLag := accountRequestLiveMaxLag
-	if block.Fixed {
-		maximumLag = accountRequestBackfillMaxLag
-	}
-	if lag > maximumLag {
-		return fmt.Errorf("indexer checkpoint is stale by %s", lag)
-	}
-	return nil
-}
-
 func accountRequestRefKey(ref accountRequestRef) string {
 	return strings.ToLower(ref.Contract.Hex()) + ":" + ref.Key
 }
@@ -234,38 +212,14 @@ func (i *accountRequestIndexer) IndexedRefs(
 		return accountRequestSnapshot{}, err
 	}
 	defer release()
-	statuses, err := i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, false)
+	_, indexedBlock, err := indexQueryBlock(block, func(forceRefresh bool) (map[ChainID]sentioChainStatus, error) {
+		return i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, forceRefresh)
+	})
 	if err != nil {
 		return accountRequestSnapshot{}, err
 	}
-	status, exists := statuses[block.ChainID]
-	if !exists {
-		return accountRequestSnapshot{}, fmt.Errorf("indexer status omitted chain %d", block.ChainID)
-	}
-	if status.State != "PROCESSING_LATEST" {
-		return accountRequestSnapshot{}, fmt.Errorf(
-			"indexer backfill is incomplete for chain %d: state=%s processed=%d estimatedLatest=%d",
-			block.ChainID, status.State, status.ProcessedBlock, status.EstimatedLatest,
-		)
-	}
-	indexedBlock := min(block.Number, status.ProcessedBlock)
-	if block.Number-indexedBlock > accountRequestMaxRPCTail {
-		statuses, err = i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, true)
-		if err != nil {
-			return accountRequestSnapshot{}, err
-		}
-		status, exists = statuses[block.ChainID]
-		if !exists {
-			return accountRequestSnapshot{}, fmt.Errorf("indexer status omitted chain %d", block.ChainID)
-		}
-		indexedBlock = min(block.Number, status.ProcessedBlock)
-		if status.State != "PROCESSING_LATEST" || block.Number-indexedBlock > accountRequestMaxRPCTail {
-			return accountRequestSnapshot{}, fmt.Errorf(
-				"indexer RPC tail exceeds %d blocks for chain %d", accountRequestMaxRPCTail, block.ChainID,
-			)
-		}
-	}
 	refs := make(map[string]accountRequestRef)
+	var lag *indexLagNote
 	after := ""
 	for {
 		page, rowIDs, checkpointMS, pageErr := i.graphqlPage(
@@ -279,7 +233,7 @@ func (i *accountRequestIndexer) IndexedRefs(
 				"indexer checkpoint %d is ahead of query block %d", page.Block, indexedBlock,
 			)
 		}
-		if err := validateAccountRequestCheckpoint(block, page.Block, checkpointMS); err != nil {
+		if lag, err = checkIndexCheckpoint(block, page.Block, checkpointMS); err != nil {
 			return accountRequestSnapshot{}, err
 		}
 		for _, ref := range page.Refs {
@@ -299,7 +253,7 @@ func (i *accountRequestIndexer) IndexedRefs(
 		}
 		after = next
 	}
-	result := accountRequestSnapshot{Block: indexedBlock, Refs: make([]accountRequestRef, 0, len(refs))}
+	result := accountRequestSnapshot{Block: indexedBlock, Refs: make([]accountRequestRef, 0, len(refs)), Lag: lag}
 	for _, ref := range refs {
 		result.Refs = append(result.Refs, ref)
 	}

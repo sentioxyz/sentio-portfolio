@@ -35,7 +35,7 @@ type presenceTestServer struct {
 	pages          atomic.Int32
 	pagedChains    []ChainID
 	probeErrors    bool
-	staleChains    map[ChainID]bool
+	laggingChains  map[ChainID]bool
 	lastProbeQuery atomic.Pointer[string]
 	// processed overrides the processed block the status reports; zero means presenceTestBlock.
 	processed atomic.Uint64
@@ -50,8 +50,8 @@ func (s *presenceTestServer) processedBlock() uint64 {
 
 func (s *presenceTestServer) checkpoint(chainID ChainID) map[string]any {
 	timestamp := presenceTestTimestamp * 1_000
-	if s.staleChains[chainID] {
-		timestamp = (presenceTestTimestamp - 3_600) * 1_000
+	if s.laggingChains[chainID] {
+		timestamp = (presenceTestTimestamp - 2*3_600) * 1_000
 	}
 	return map[string]any{
 		"blockNumber": strconv.FormatUint(presenceTestBlock, 10),
@@ -277,59 +277,53 @@ func TestPresenceProbeFallsBackWhenItCannotProveAnything(t *testing.T) {
 	}
 }
 
-func TestPresenceProbeDoesNotSkipAStaleChain(t *testing.T) {
+// A chain whose page would carry a lag note is not proven empty, so its own page runs and the
+// scan reports the lag rather than skipping the chain in silence.
+func TestPresenceProbeDoesNotSkipALaggingChain(t *testing.T) {
 	chains := []ChainID{Ethereum, BSC, Base}
-	server := &presenceTestServer{t: t, chains: chains, staleChains: map[ChainID]bool{BSC: true}}
+	server := &presenceTestServer{t: t, chains: chains, laggingChains: map[ChainID]bool{BSC: true}}
 	indexer, _ := newPresenceTestMorpho(t, server)
 	pinned := presenceTestPinned(chains...)
 	ctx := presenceScanContext(pinned)
-	if _, err := indexer.indexedRefs(ctx, pinned[Ethereum], presenceTestAccount, false, indexStart{}); err != nil {
+	refs, err := indexer.indexedRefs(ctx, pinned[Ethereum], presenceTestAccount, false, indexStart{})
+	if err != nil || refs.Lag != nil {
+		t.Fatalf("proven chain: lag = %v err = %v, want neither", refs.Lag, err)
+	}
+	refs, err = indexer.indexedRefs(ctx, pinned[BSC], presenceTestAccount, false, indexStart{})
+	if err != nil {
 		t.Fatal(err)
 	}
-	// The stale chain's page fails the same freshness check the probe applied, exactly as before.
-	if _, err := indexer.indexedRefs(ctx, pinned[BSC], presenceTestAccount, false, indexStart{}); err == nil ||
-		!strings.Contains(err.Error(), "stale") {
-		t.Fatalf("stale chain error = %v, want the checkpoint staleness error", err)
+	if refs.Lag == nil || refs.Lag.lag != 2*time.Hour {
+		t.Fatalf("lagging chain note = %v, want two hours of lag", refs.Lag)
 	}
 	if server.probes.Load() != 1 || len(server.pagedChains) != 1 || server.pagedChains[0] != BSC {
-		t.Fatalf("probes = %d paged = %v, want the stale chain to reach its own page", server.probes.Load(), server.pagedChains)
+		t.Fatalf("probes = %d paged = %v, want the lagging chain to reach its own page", server.probes.Load(), server.pagedChains)
 	}
 }
 
 func TestPresenceTargetsExcludeChainsThePerChainFlowWouldReject(t *testing.T) {
-	probe := presenceProbe{requiredChains: []ChainID{Ethereum, BSC, Base, Arbitrum}, maxRPCTail: 10}
-	pinned := presenceTestPinned(Ethereum, BSC, Base)
-	pinned[Base] = BlockRef{ChainID: Base, Number: presenceTestBlock + 100}
+	probe := presenceProbe{requiredChains: []ChainID{Ethereum, BSC, Base, Arbitrum, Optimism}}
+	pinned := presenceTestPinned(Ethereum, BSC, Base, Arbitrum)
+	// A fixed pin the processor has not reached fails its own per-chain read; a live one is read
+	// wherever the processor is.
+	pinned[Base] = BlockRef{ChainID: Base, Number: presenceTestBlock + 100, Fixed: true}
+	pinned[Arbitrum] = BlockRef{ChainID: Arbitrum, Number: presenceTestBlock + 100}
 	statuses := map[ChainID]sentioChainStatus{
 		Ethereum: {State: "PROCESSING_LATEST", ProcessedBlock: presenceTestBlock + 5},
 		BSC:      {State: "CATCHING_UP", ProcessedBlock: presenceTestBlock},
 		Base:     {State: "PROCESSING_LATEST", ProcessedBlock: presenceTestBlock},
 		Arbitrum: {State: "PROCESSING_LATEST", ProcessedBlock: presenceTestBlock},
+		Optimism: {State: "PROCESSING_LATEST", ProcessedBlock: presenceTestBlock},
 	}
 	targets := presenceTargets(probe, pinned, statuses)
-	if len(targets) != 1 {
-		t.Fatalf("targets = %+v, want only Ethereum", targets)
+	if len(targets) != 2 {
+		t.Fatalf("targets = %+v, want Ethereum and Arbitrum", targets)
 	}
 	if target := targets[Ethereum]; target.queryBlock != presenceTestBlock {
 		t.Fatalf("Ethereum query block = %d, want the pinned block %d", target.queryBlock, presenceTestBlock)
 	}
-}
-
-func TestValidatePresenceCheckpointMatchesPageRules(t *testing.T) {
-	probe := presenceProbe{liveMaxLag: 15 * time.Minute, backfillMaxLag: 7 * 24 * time.Hour}
-	block := BlockRef{Number: 100, Timestamp: presenceTestTimestamp}
-	if err := validatePresenceCheckpoint(probe, block, 100, presenceTestTimestamp*1_000); err != nil {
-		t.Fatalf("fresh checkpoint rejected: %v", err)
-	}
-	if err := validatePresenceCheckpoint(probe, block, 101, presenceTestTimestamp*1_000); err == nil {
-		t.Fatalf("checkpoint ahead of the pinned block accepted")
-	}
-	if err := validatePresenceCheckpoint(probe, block, 100, (presenceTestTimestamp-1_800)*1_000); err == nil {
-		t.Fatalf("checkpoint 30 minutes stale accepted on a live scan")
-	}
-	fixed := BlockRef{Number: 100, Timestamp: presenceTestTimestamp, Fixed: true}
-	if err := validatePresenceCheckpoint(probe, fixed, 100, (presenceTestTimestamp-1_800)*1_000); err != nil {
-		t.Fatalf("checkpoint 30 minutes stale rejected on a fixed-block scan: %v", err)
+	if target := targets[Arbitrum]; target.queryBlock != presenceTestBlock {
+		t.Fatalf("Arbitrum query block = %d, want the processed block %d", target.queryBlock, presenceTestBlock)
 	}
 }
 
@@ -422,8 +416,8 @@ func TestPresenceProbeReportsApartFromPages(t *testing.T) {
 }
 
 // A proof established while the index stood at block N still holds after the index advances: the
-// chain job then reports N as its indexed block so the RPC tail starts right after the proof.
-func TestPresenceProofFromAnEarlierIndexedBlockStartsTheTailThere(t *testing.T) {
+// chain job then reports N as its indexed block.
+func TestPresenceProofFromAnEarlierIndexedBlockStillHolds(t *testing.T) {
 	chains := []ChainID{Ethereum, BSC, Base}
 	server := &presenceTestServer{t: t, chains: chains}
 	indexer, _ := newPresenceTestMorpho(t, server)
@@ -453,12 +447,13 @@ func TestPresenceProofFromAnEarlierIndexedBlockStartsTheTailThere(t *testing.T) 
 	}
 }
 
-// Uniswap has no RPC tail, so a proof from an earlier indexed block cannot stand in for the page.
+// A proof from an earlier indexed block stands in for Uniswap's page as it does for every other
+// indexer: nothing tops any of them up from the chain, and the proof passed the same lag rule.
 //
 // The scan context carries a lane of one slot, so this also guards the ordering that keeps a
 // prefetch from deadlocking: the chain job waits for the probe before it takes the slot the probe
 // needs.
-func TestUniswapPresenceRequiresAProofAtTheQueryBlock(t *testing.T) {
+func TestUniswapPresenceReusesAProofFromAnEarlierIndexedBlock(t *testing.T) {
 	chains := deploymentChains(uniswapV4Deployments)
 	var probes, pages atomic.Int32
 	processed := atomic.Uint64{}
@@ -511,8 +506,8 @@ func TestUniswapPresenceRequiresAProofAtTheQueryBlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pages.Load() != 1 || second.CheckpointBlock != presenceTestBlock+10 {
-		t.Fatalf("drifted chain = %+v pages=%d, want the page to run at the new indexed block", second, pages.Load())
+	if len(second.NFTs) != 0 || second.CheckpointBlock != presenceTestBlock || pages.Load() != 0 {
+		t.Fatalf("drifted chain = %+v pages=%d, want the earlier proof to stand in for the page", second, pages.Load())
 	}
 	if probes.Load() != 1 {
 		t.Fatalf("probes = %d, want the single prefetched probe", probes.Load())

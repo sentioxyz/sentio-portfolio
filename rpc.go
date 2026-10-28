@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
@@ -34,15 +33,6 @@ type rpcLog struct {
 	Data        hexutil.Bytes  `json:"data"`
 	BlockNumber hexutil.Uint64 `json:"blockNumber"`
 	LogIndex    hexutil.Uint64 `json:"logIndex"`
-}
-
-func sortRPCLogs(logs []rpcLog) {
-	sort.Slice(logs, func(left, right int) bool {
-		if logs[left].BlockNumber != logs[right].BlockNumber {
-			return logs[left].BlockNumber < logs[right].BlockNumber
-		}
-		return logs[left].LogIndex < logs[right].LogIndex
-	})
 }
 
 type RPCClient struct {

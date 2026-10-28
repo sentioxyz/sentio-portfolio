@@ -2,6 +2,7 @@ package portfolio
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 
@@ -152,20 +153,33 @@ func (a *EtherfiAdapter) Positions(
 	if vaultErr != nil {
 		return groups, fmt.Errorf("vault positions: %w", vaultErr)
 	}
-	memberships, membershipErr := a.readMemberships(ctx, client, block, account)
+	memberships, membershipLag, membershipErr := a.readMemberships(ctx, client, block, account)
 	groups = append(groups, memberships...)
 	if membershipErr != nil {
-		return groups, membershipErr
+		return groups, errors.Join(membershipErr, membershipLag.err())
 	}
 	if block.ChainID != Ethereum || block.Number < etherfiWithdrawalActivationBlock {
-		return groups, nil
+		return groups, membershipLag.err()
 	}
-	refs, err := a.indexer.PositionRefs(ctx, client, block, account, a.withdraws[block.ChainID])
+	refs, withdrawalLag, err := a.indexer.PositionRefs(ctx, block, account, a.withdraws[block.ChainID])
 	if err != nil {
-		return groups, fmt.Errorf("withdrawal enumeration: %w", err)
+		return groups, errors.Join(fmt.Errorf("withdrawal enumeration: %w", err), membershipLag.err())
 	}
+	withdrawals, err := a.withdrawalGroups(ctx, client, block, account, refs)
+	return append(groups, withdrawals...), errors.Join(err, membershipLag.err(), withdrawalLag.err())
+}
+
+// withdrawalGroups values the withdrawal request NFTs the index lists for account.
+func (a *EtherfiAdapter) withdrawalGroups(
+	ctx context.Context,
+	client *RPCClient,
+	block BlockRef,
+	account common.Address,
+	refs []ownerTokenRef,
+) ([]Group, error) {
+	groups := make([]Group, 0, len(refs))
 	if len(refs) == 0 {
-		return groups, nil
+		return nil, nil
 	}
 	headerCalls := make([]ContractCall, 0, len(refs)*3)
 	for _, ref := range refs {
@@ -175,7 +189,7 @@ func (a *EtherfiAdapter) Positions(
 			ContractCall{Contract: ref.Contract, ABI: etherfiWithdrawalABI, Method: "isFinalized", Args: []any{ref.TokenID}},
 		)
 	}
-	rows, err := client.ParallelCalls(ctx, block, headerCalls)
+	rows, err := client.ParallelCallsAllowFailure(ctx, block, headerCalls)
 	if err != nil {
 		return groups, fmt.Errorf("withdrawal state: %w", err)
 	}
@@ -191,30 +205,43 @@ func (a *EtherfiAdapter) Positions(
 	}
 	states := make([]withdrawalState, 0, len(refs))
 	for index, ref := range refs {
-		owner, decodeErr := AddressAt(rows[index*3], 0)
+		// The index lists the requests the account held as of its checkpoint. One claimed since
+		// was burned with its NFT, and one transferred since is no longer the account's.
+		if rows[index*3].Error != nil {
+			if executionReverted(rows[index*3].Error) {
+				continue
+			}
+			return groups, fmt.Errorf("withdrawal %s owner: %w", ref.TokenID, rows[index*3].Error)
+		}
+		owner, decodeErr := AddressAt(rows[index*3].Values, 0)
 		if decodeErr != nil {
 			return groups, fmt.Errorf("withdrawal %s owner: %w", ref.TokenID, decodeErr)
 		}
 		if owner != account {
-			return groups, fmt.Errorf("withdrawal %s ownership changed at pinned block", ref.TokenID)
+			continue
 		}
-		amount, decodeErr := BigIntAt(rows[index*3+1], 0)
+		for _, row := range rows[index*3+1 : index*3+3] {
+			if row.Error != nil {
+				return groups, fmt.Errorf("withdrawal %s state: %w", ref.TokenID, row.Error)
+			}
+		}
+		amount, decodeErr := BigIntAt(rows[index*3+1].Values, 0)
 		if decodeErr != nil {
 			return groups, fmt.Errorf("withdrawal %s amount: %w", ref.TokenID, decodeErr)
 		}
-		shares, decodeErr := BigIntAt(rows[index*3+1], 1)
+		shares, decodeErr := BigIntAt(rows[index*3+1].Values, 1)
 		if decodeErr != nil {
 			return groups, fmt.Errorf("withdrawal %s shares: %w", ref.TokenID, decodeErr)
 		}
-		valid, decodeErr := BoolAt(rows[index*3+1], 2)
+		valid, decodeErr := BoolAt(rows[index*3+1].Values, 2)
 		if decodeErr != nil {
 			return groups, fmt.Errorf("withdrawal %s validity: %w", ref.TokenID, decodeErr)
 		}
-		feeGwei, decodeErr := BigIntAt(rows[index*3+1], 3)
+		feeGwei, decodeErr := BigIntAt(rows[index*3+1].Values, 3)
 		if decodeErr != nil {
 			return groups, fmt.Errorf("withdrawal %s fee: %w", ref.TokenID, decodeErr)
 		}
-		finalized, decodeErr := BoolAt(rows[index*3+2], 0)
+		finalized, decodeErr := BoolAt(rows[index*3+2].Values, 0)
 		if decodeErr != nil {
 			return groups, fmt.Errorf("withdrawal %s finalization: %w", ref.TokenID, decodeErr)
 		}
