@@ -236,6 +236,50 @@ func TestPendleReturnsTheIndexLagWithItsGroups(t *testing.T) {
 	}
 }
 
+// Morpho and Lista carry the note on their indexers' results rather than in a return value, so
+// nothing but these tests makes their adapters pass it on. An account with no positions is the
+// case that matters most: the position the lagging index missed is the one it has.
+func TestMorphoReturnsTheIndexLagWithItsGroups(t *testing.T) {
+	note := &indexLagNote{checkpoint: 900, lag: 2 * time.Hour}
+	adapter := newMorphoAdapterWithIndexer(fixedMorphoLiveIndexer{refs: morphoPositionRefs{IndexerBlock: 900, Lag: note}})
+	block := BlockRef{ChainID: Ethereum, Number: morphoDeployments[Ethereum].Window.ActivationBlock + 1}
+	groups, err := adapter.Positions(context.Background(), nil, block, presenceTestAccount)
+	if len(groups) != 0 || !errors.Is(err, note) {
+		t.Fatalf("groups = %d err = %v, want no groups and the lag note", len(groups), err)
+	}
+}
+
+func TestListaReturnsTheIndexLagWithItsGroups(t *testing.T) {
+	note := &indexLagNote{checkpoint: 900, lag: 2 * time.Hour}
+	adapter := newListaAdapterWithIndexer(fixedListaLiveIndexer{refs: listaPositionRefs{IndexerBlock: 900, Lag: note}})
+	block := BlockRef{ChainID: Ethereum, Number: listaMoolahDeployments[Ethereum].ActivationBlock + 1}
+	if block.ChainID == adapter.cdp.ChainID {
+		t.Fatal("the test needs a chain without the Lista CDP, which is not index-backed")
+	}
+	groups, err := adapter.Positions(context.Background(), nil, block, presenceTestAccount)
+	if len(groups) != 0 || !errors.Is(err, note) {
+		t.Fatalf("groups = %d err = %v, want no groups and the lag note", len(groups), err)
+	}
+}
+
+func TestEulerReturnsTheIndexLagWithItsGroups(t *testing.T) {
+	note := &indexLagNote{checkpoint: 900, lag: 2 * time.Hour}
+	adapter := newEulerV2AdapterWithIndexer(laggingEulerIndexer{lag: note})
+	block := BlockRef{ChainID: Ethereum, Number: eulerV2ChainConfigs[Ethereum].ActivationBlock + 1}
+	groups, err := adapter.Positions(context.Background(), nil, block, presenceTestAccount)
+	if len(groups) != 0 || !errors.Is(err, note) {
+		t.Fatalf("groups = %d err = %v, want no groups and the lag note", len(groups), err)
+	}
+}
+
+type laggingEulerIndexer struct{ lag *indexLagNote }
+
+func (i laggingEulerIndexer) PositionRefs(
+	context.Context, *RPCClient, BlockRef, common.Address,
+) ([]eulerPositionRef, *indexLagNote, error) {
+	return nil, i.lag, nil
+}
+
 // Without an RPC tail, an index read lists what the account held as of its checkpoint. A request
 // settled since, or an NFT burned or transferred since, must read as nothing at the pin rather
 // than fail the protocol as a disagreement with the index.
