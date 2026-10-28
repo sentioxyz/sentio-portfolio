@@ -2,6 +2,7 @@ package portfolio
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"sort"
@@ -567,7 +568,7 @@ func (a *MorphoAdapter) Positions(
 	client *RPCClient,
 	block BlockRef,
 	account common.Address,
-) ([]Group, error) {
+) (groups []Group, err error) {
 	deployment, exists := morphoDeployments[block.ChainID]
 	if !exists || !deployment.Window.ActiveAt(block.Number) {
 		return nil, nil
@@ -576,6 +577,8 @@ func (a *MorphoAdapter) Positions(
 	if err != nil {
 		return nil, err
 	}
+	// However the read ends, a lagging index qualifies it.
+	defer func() { err = errors.Join(err, refs.Lag.err()) }()
 	core, err := readMorphoCorePositions(
 		ctx, client, block, account, deployment, refs.MarketIDs,
 	)
@@ -591,7 +594,7 @@ func (a *MorphoAdapter) Positions(
 		return nil, err
 	}
 	drafts := append(coreDrafts, vaults...)
-	groups, err := attachMorphoTokenMetadata(ctx, client, block, drafts)
+	groups, err = attachMorphoTokenMetadata(ctx, client, block, drafts)
 	if err != nil {
 		return nil, fmt.Errorf("token metadata: %w", err)
 	}
