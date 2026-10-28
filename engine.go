@@ -563,6 +563,7 @@ func (e *Engine) ScanWithOptions(
 		jobCtx := withDeployment(collectCtx, info.ID, job.chainID)
 		groups := make([]Group, 0)
 		var positionErr error
+		var coverageNotes []error
 		for _, account := range chain.accounts {
 			var accountGroups []Group
 			var err error
@@ -591,6 +592,9 @@ func (e *Engine) ScanWithOptions(
 				)
 			}
 			groups = append(groups, attributedGroups(accountGroups, account, address)...)
+			// A coverage note qualifies groups read as asked, so it stops nothing.
+			notes, err := splitCoverageNotes(err)
+			coverageNotes = append(coverageNotes, notes...)
 			if err != nil {
 				positionErr = errors.Join(positionErr, err)
 				// Wallet holdings are independent per account, so one malformed or failed
@@ -619,6 +623,22 @@ func (e *Engine) ScanWithOptions(
 				scanError.Message = stoppedMessage
 			}
 			response.Errors = append(response.Errors, scanError)
+		}
+		// Every account of the deployment can carry the same note; report each once.
+		noted := make(map[string]struct{}, len(coverageNotes))
+		for _, note := range coverageNotes {
+			message := PublicError(note)
+			if _, seen := noted[message]; seen {
+				continue
+			}
+			noted[message] = struct{}{}
+			response.Errors = append(response.Errors, ScanError{
+				Scope:        "coverage",
+				ChainID:      job.chainID,
+				ProtocolID:   info.ID,
+				ProtocolName: info.Name,
+				Message:      message,
+			})
 		}
 		if info.ID == walletProtocolID {
 			// Provider partial failures are independent observations. Keep each one as a

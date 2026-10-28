@@ -25,16 +25,25 @@ func (a *EtherfiAdapter) readMemberships(
 	client *RPCClient,
 	block BlockRef,
 	account common.Address,
-) ([]Group, error) {
+) ([]Group, *indexLagNote, error) {
 	if block.ChainID != Ethereum || block.Number < etherfiMembershipActivationBlock {
-		return nil, nil
+		return nil, nil, nil
 	}
-	refs, err := a.indexer.PositionRefsERC1155(
-		ctx, client, block, account, []common.Address{etherfiMembershipNFT},
-	)
+	refs, lag, err := a.indexer.PositionRefs(ctx, block, account, []common.Address{etherfiMembershipNFT})
 	if err != nil {
-		return nil, fmt.Errorf("membership enumeration: %w", err)
+		return nil, nil, fmt.Errorf("membership enumeration: %w", err)
 	}
+	groups, err := a.membershipGroups(ctx, client, block, account, refs)
+	return groups, lag, err
+}
+
+func (a *EtherfiAdapter) membershipGroups(
+	ctx context.Context,
+	client *RPCClient,
+	block BlockRef,
+	account common.Address,
+	refs []ownerTokenRef,
+) ([]Group, error) {
 	if len(refs) == 0 {
 		return nil, nil
 	}
@@ -61,17 +70,28 @@ func (a *EtherfiAdapter) readMemberships(
 			},
 		)
 	}
-	rows, err := client.ParallelCalls(ctx, block, calls)
+	rows, err := client.ParallelCallsAllowFailure(ctx, block, calls)
 	if err != nil {
 		return nil, fmt.Errorf("membership state: %w", err)
 	}
 	groups := make([]Group, 0, len(refs))
 	for index, ref := range refs {
-		balance, decodeErr := BigIntAt(rows[index*2], 0)
-		if decodeErr != nil || balance.Cmp(big.NewInt(1)) != 0 {
+		if rows[index*2].Error != nil {
+			return groups, fmt.Errorf("membership %s balance: %w", ref.TokenID, rows[index*2].Error)
+		}
+		balance, decodeErr := BigIntAt(rows[index*2].Values, 0)
+		if decodeErr != nil || balance.Cmp(big.NewInt(1)) > 0 {
 			return groups, fmt.Errorf("membership %s does not match the pinned index", ref.TokenID)
 		}
-		amount, decodeErr := BigIntAt(rows[index*2+1], 0)
+		// The index lists the memberships the account held as of its checkpoint; one it has
+		// unwrapped or transferred since holds nothing for it now.
+		if balance.Sign() == 0 {
+			continue
+		}
+		if rows[index*2+1].Error != nil {
+			return groups, fmt.Errorf("membership %s value: %w", ref.TokenID, rows[index*2+1].Error)
+		}
+		amount, decodeErr := BigIntAt(rows[index*2+1].Values, 0)
 		if decodeErr != nil {
 			return groups, fmt.Errorf("membership %s value: %w", ref.TokenID, decodeErr)
 		}

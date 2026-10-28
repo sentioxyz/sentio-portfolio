@@ -50,6 +50,15 @@ Indexer-backed adapters receive their deployment-specific GraphQL/status
 endpoints and processor versions through `EngineConfig`. Public source must not
 contain project names or owner namespaces.
 
+An indexer only decides which positions an adapter reads; every quantity is
+still read at the pinned block. Nothing tops an index up from chain logs, so a
+live scan reads it wherever its processor has got to. When the index trails the
+pin by more than an hour, the scan still returns what it read, with a `coverage`
+note on that protocol and chain: a position opened after the indexed block may
+be missing. A scan pinned to fixed blocks needs every index past its pin and
+reports a `protocol` error otherwise, so a host that keeps historical scans
+retries it instead of storing a short answer.
+
 Uniswap V3 keeps the indexer as its fast discovery path. If that path is
 unavailable, its [enumerable position manager](https://github.com/Uniswap/v3-periphery/blob/main/contracts/interfaces/INonfungiblePositionManager.sol)
 can independently discover the wallet's complete NFT inventory at the settled

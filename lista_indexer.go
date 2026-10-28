@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 )
@@ -17,19 +16,14 @@ const (
 	listaIndexerPageSize   = 500
 	listaMaxIndexedMarkets = 4_096
 	listaMaxIndexedVaults  = 4_096
-	listaMaxRPCTailBlocks  = 2_048
-	listaCheckpointMaxLag  = 15 * time.Minute
-	listaBackfillMaxLag    = 7*24*time.Hour + 30*time.Minute
 )
-
-var listaVaultFactoryABI = MustABI(`[
-  {"type":"function","name":"isMoolahVault","stateMutability":"view","inputs":[{"name":"candidate","type":"address"}],"outputs":[{"type":"bool"}]}
-]`)
 
 type listaPositionRefs struct {
 	IndexerBlock uint64
 	MarketIDs    []common.Hash
 	Vaults       []common.Address
+	// Lag notes a live read that trails its pin by more than indexMaxLag.
+	Lag *indexLagNote
 }
 
 type listaPositionIndexer interface {
@@ -287,27 +281,6 @@ func (i *listaIndexer) graphqlFeeMarketPage(
 	return page, nil
 }
 
-func validateListaCheckpoint(block BlockRef, page listaGraphQLPage) error {
-	if page.CheckpointBlock > block.Number {
-		return fmt.Errorf("indexer checkpoint %d is ahead of pinned block %d", page.CheckpointBlock, block.Number)
-	}
-	checkpointSeconds := page.CheckpointMS / 1_000
-	if checkpointSeconds > block.Timestamp+60 {
-		return fmt.Errorf("indexer checkpoint timestamp is ahead of pinned block")
-	}
-	if block.Timestamp > checkpointSeconds {
-		lag := time.Duration(block.Timestamp-checkpointSeconds) * time.Second
-		maximumLag := listaCheckpointMaxLag
-		if block.Fixed {
-			maximumLag = listaBackfillMaxLag
-		}
-		if lag > maximumLag {
-			return fmt.Errorf("indexer checkpoint is stale by %s", lag)
-		}
-	}
-	return nil
-}
-
 func (i *listaIndexer) indexedRefs(
 	ctx context.Context,
 	block BlockRef,
@@ -315,32 +288,12 @@ func (i *listaIndexer) indexedRefs(
 	includeFeeMarkets bool,
 	start indexStart,
 ) (listaPositionRefs, error) {
-	statuses, err := i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, false)
+	_, queryBlock, err := indexQueryBlock(block, func(forceRefresh bool) (map[ChainID]sentioChainStatus, error) {
+		return i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, forceRefresh)
+	})
 	if err != nil {
 		return listaPositionRefs{}, err
 	}
-	status := statuses[block.ChainID]
-	if status.State != "PROCESSING_LATEST" {
-		return listaPositionRefs{}, fmt.Errorf(
-			"indexer backfill is incomplete for chain %d: state=%s processed=%d estimatedLatest=%d",
-			block.ChainID, status.State, status.ProcessedBlock, status.EstimatedLatest,
-		)
-	}
-	if block.Number > status.ProcessedBlock && block.Number-status.ProcessedBlock > listaMaxRPCTailBlocks {
-		statuses, err = i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, true)
-		if err != nil {
-			return listaPositionRefs{}, err
-		}
-		status = statuses[block.ChainID]
-	}
-	if status.State != "PROCESSING_LATEST" ||
-		(block.Number > status.ProcessedBlock && block.Number-status.ProcessedBlock > listaMaxRPCTailBlocks) {
-		return listaPositionRefs{}, fmt.Errorf(
-			"indexer RPC tail exceeds %d blocks for chain %d: processed=%d target=%d",
-			listaMaxRPCTailBlocks, block.ChainID, status.ProcessedBlock, block.Number,
-		)
-	}
-	queryBlock := min(block.Number, status.ProcessedBlock)
 	prefix := listaRowPrefix(block.ChainID, account)
 	marketAfter := prefix
 	vaultAfter := prefix
@@ -358,7 +311,7 @@ func (i *listaIndexer) indexedRefs(
 			return listaPositionRefs{}, pageErr
 		}
 		if firstPage {
-			if err := validateListaCheckpoint(block, page); err != nil {
+			if result.Lag, err = checkIndexCheckpoint(block, page.CheckpointBlock, page.CheckpointMS); err != nil {
 				return listaPositionRefs{}, err
 			}
 			checkpointBlock, checkpointMS = page.CheckpointBlock, page.CheckpointMS
@@ -419,64 +372,14 @@ func (i *listaIndexer) indexedRefs(
 			}
 		}
 	}
-	return mergeListaRefs(result, nil, nil)
+	return dedupeListaRefs(result)
 }
 
-// listaClassifyTailVaults keeps only the transfer contracts that really are Moolah
-// vaults: registered in the vault factory, or one of the hand-deployed seed vaults that
-// predate it (a closed historical set).
-func listaClassifyTailVaults(
-	ctx context.Context,
-	client *RPCClient,
-	block BlockRef,
-	candidates []common.Address,
-	deployment listaMoolahDeployment,
-) ([]common.Address, error) {
-	if len(candidates) == 0 {
-		return nil, nil
-	}
-	result := make([]common.Address, 0)
-	unresolved := make([]common.Address, 0, len(candidates))
-	for _, candidate := range candidates {
-		if _, seeded := deployment.SeedVaults[candidate]; seeded {
-			result = append(result, candidate)
-			continue
-		}
-		unresolved = append(unresolved, candidate)
-	}
-	if deployment.VaultFactory != (common.Address{}) &&
-		deployment.VaultFactoryWindow.ActiveAt(block.Number) && len(unresolved) > 0 {
-		calls := make([]ContractCall, len(unresolved))
-		for index, candidate := range unresolved {
-			calls[index] = ContractCall{
-				Contract: deployment.VaultFactory, ABI: listaVaultFactoryABI,
-				Method: "isMoolahVault", Args: []any{candidate},
-			}
-		}
-		rows, err := client.ParallelCalls(ctx, block, calls)
-		if err != nil {
-			return nil, fmt.Errorf("vault factory validation: %w", err)
-		}
-		for index, row := range rows {
-			registered, decodeErr := BoolAt(row, 0)
-			if decodeErr != nil {
-				return nil, decodeErr
-			}
-			if registered {
-				result = append(result, unresolved[index])
-			}
-		}
-	}
-	return result, nil
-}
-
-func mergeListaRefs(
-	indexed listaPositionRefs,
-	tailMarkets []common.Hash,
-	tailVaults []common.Address,
-) (listaPositionRefs, error) {
-	marketSet := make(map[common.Hash]struct{}, len(indexed.MarketIDs)+len(tailMarkets))
-	for _, marketID := range append(indexed.MarketIDs, tailMarkets...) {
+// dedupeListaRefs sorts the identifiers a read collected and drops the repeats: a fee market can
+// also be one the account holds a position in.
+func dedupeListaRefs(indexed listaPositionRefs) (listaPositionRefs, error) {
+	marketSet := make(map[common.Hash]struct{}, len(indexed.MarketIDs))
+	for _, marketID := range indexed.MarketIDs {
 		marketSet[marketID] = struct{}{}
 	}
 	indexed.MarketIDs = indexed.MarketIDs[:0]
@@ -486,8 +389,8 @@ func mergeListaRefs(
 	sort.Slice(indexed.MarketIDs, func(i, j int) bool {
 		return indexed.MarketIDs[i].Hex() < indexed.MarketIDs[j].Hex()
 	})
-	vaultSet := make(map[common.Address]struct{}, len(indexed.Vaults)+len(tailVaults))
-	for _, vault := range append(indexed.Vaults, tailVaults...) {
+	vaultSet := make(map[common.Address]struct{}, len(indexed.Vaults))
+	for _, vault := range indexed.Vaults {
 		vaultSet[vault] = struct{}{}
 	}
 	indexed.Vaults = indexed.Vaults[:0]
@@ -535,25 +438,5 @@ func (i *listaIndexer) PositionRefs(
 	if err != nil {
 		return listaPositionRefs{}, fmt.Errorf("Lista index query: %w", err)
 	}
-	if indexed.IndexerBlock >= block.Number {
-		return indexed, nil
-	}
-	// Moolah is a Morpho fork with identical event signatures, so the Morpho RPC-tail
-	// helpers apply verbatim with the Moolah core address.
-	fromBlock := indexed.IndexerBlock + 1
-	tailMarkets, err := morphoTailMarketIDs(
-		ctx, client, fromBlock, block.Number, account, deployment.Address, includeCurrentFeeMarkets,
-	)
-	if err != nil {
-		return listaPositionRefs{}, err
-	}
-	candidates, err := morphoTailVaultCandidates(ctx, client, fromBlock, block.Number, account)
-	if err != nil {
-		return listaPositionRefs{}, err
-	}
-	tailVaults, err := listaClassifyTailVaults(ctx, client, block, candidates, deployment)
-	if err != nil {
-		return listaPositionRefs{}, err
-	}
-	return mergeListaRefs(indexed, tailMarkets, tailVaults)
+	return indexed, nil
 }

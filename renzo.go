@@ -2,13 +2,12 @@ package portfolio
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
-	"sort"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 )
 
 const (
@@ -100,12 +99,6 @@ var (
       {"type":"function","name":"getUnstakeRequestsLength","stateMutability":"view","inputs":[{"name":"account","type":"address"}],"outputs":[{"type":"uint256"}]},
 		{"type":"function","name":"unstakeRequests","stateMutability":"view","inputs":[{"name":"account","type":"address"},{"name":"index","type":"uint256"}],"outputs":[{"type":"uint256"},{"type":"uint256"}]}
     ]`)
-	renzoEigenWithdrawStartedTopic = crypto.Keccak256Hash([]byte(
-		"WithdrawStarted(bytes32,address,address,address,address,uint256,uint256,address[],uint256[])",
-	))
-	renzoEigenWithdrawClaimedTopic = crypto.Keccak256Hash([]byte(
-		"WithdrawRequestClaimed(bytes32,address,uint256,(address,address,address,uint256,uint32,address[],uint256[]))",
-	))
 )
 
 type renzoEigenVault struct {
@@ -287,96 +280,36 @@ func (a *RenzoAdapter) readMainnetReceipts(
 	return groups, nil
 }
 
-func renzoWithdrawalRoot(event rpcLog) (common.Hash, common.Address, error) {
-	if len(event.Topics) != 1 || len(event.Data) < 64 {
-		return common.Hash{}, common.Address{}, fmt.Errorf("malformed withdrawal event")
-	}
-	root := common.BytesToHash(event.Data[:32])
-	owner := common.BytesToAddress(event.Data[44:64])
-	if root == (common.Hash{}) || owner == (common.Address{}) {
-		return common.Hash{}, common.Address{}, fmt.Errorf("withdrawal event contains a zero identity")
-	}
-	return root, owner, nil
-}
-
-func (a *RenzoAdapter) eigenWithdrawalRefs(
-	ctx context.Context,
-	client *RPCClient,
-	block BlockRef,
-	account common.Address,
-) ([]accountRequestRef, error) {
-	contracts := make([]common.Address, 0, len(a.vaults))
-	allowed := make(map[common.Address]struct{}, len(a.vaults))
-	for _, vault := range a.vaults {
-		if block.Number >= vault.ActivationBlock {
-			contracts = append(contracts, vault.Address)
-			allowed[vault.Address] = struct{}{}
-		}
-	}
-	snapshot, err := a.indexer.IndexedRefs(ctx, block, account, contracts)
-	if err != nil {
-		return nil, fmt.Errorf("Eigen vault withdrawal index: %w", err)
-	}
-	refs := make(map[string]accountRequestRef, len(snapshot.Refs))
-	for _, ref := range snapshot.Refs {
-		refs[accountRequestRefKey(ref)] = ref
-	}
-	if snapshot.Block < block.Number {
-		logs, logsErr := client.Logs(
-			ctx, snapshot.Block+1, block.Number, contracts,
-			[][]common.Hash{{renzoEigenWithdrawStartedTopic, renzoEigenWithdrawClaimedTopic}},
-		)
-		if logsErr != nil {
-			return nil, fmt.Errorf("Eigen vault withdrawal RPC tail: %w", logsErr)
-		}
-		sortRPCLogs(logs)
-		for _, event := range logs {
-			if _, exists := allowed[event.Address]; !exists {
-				return nil, fmt.Errorf("Eigen withdrawal RPC tail returned unexpected vault")
-			}
-			root, eventOwner, decodeErr := renzoWithdrawalRoot(event)
-			if decodeErr != nil {
-				return nil, fmt.Errorf("Eigen withdrawal RPC tail: %w", decodeErr)
-			}
-			if eventOwner != account {
-				continue
-			}
-			ref := accountRequestRef{
-				Contract: event.Address, Key: strings.ToLower(root.Hex()),
-			}
-			switch event.Topics[0] {
-			case renzoEigenWithdrawStartedTopic:
-				refs[accountRequestRefKey(ref)] = ref
-			case renzoEigenWithdrawClaimedTopic:
-				delete(refs, accountRequestRefKey(ref))
-			default:
-				return nil, fmt.Errorf("Eigen withdrawal RPC tail returned unexpected event")
-			}
-		}
-	}
-	if len(refs) > renzoMaxEigenWithdrawals {
-		return nil, fmt.Errorf("Eigen withdrawal count exceeds %d", renzoMaxEigenWithdrawals)
-	}
-	result := make([]accountRequestRef, 0, len(refs))
-	for _, ref := range refs {
-		result = append(result, ref)
-	}
-	sort.Slice(result, func(left, right int) bool {
-		return accountRequestRefKey(result[left]) < accountRequestRefKey(result[right])
-	})
-	return result, nil
-}
-
 func (a *RenzoAdapter) readEigenWithdrawals(
 	ctx context.Context,
 	client *RPCClient,
 	block BlockRef,
 	account common.Address,
-) ([]Group, error) {
-	refs, err := a.eigenWithdrawalRefs(ctx, client, block, account)
-	if err != nil {
-		return nil, err
+) ([]Group, *indexLagNote, error) {
+	contracts := make([]common.Address, 0, len(a.vaults))
+	for _, vault := range a.vaults {
+		if block.Number >= vault.ActivationBlock {
+			contracts = append(contracts, vault.Address)
+		}
 	}
+	snapshot, err := a.indexer.IndexedRefs(ctx, block, account, contracts)
+	if err != nil {
+		return nil, nil, fmt.Errorf("Eigen vault withdrawal index: %w", err)
+	}
+	if len(snapshot.Refs) > renzoMaxEigenWithdrawals {
+		return nil, nil, fmt.Errorf("Eigen withdrawal count exceeds %d", renzoMaxEigenWithdrawals)
+	}
+	groups, err := a.eigenWithdrawalGroups(ctx, client, block, account, snapshot.Refs)
+	return groups, snapshot.Lag, err
+}
+
+func (a *RenzoAdapter) eigenWithdrawalGroups(
+	ctx context.Context,
+	client *RPCClient,
+	block BlockRef,
+	account common.Address,
+	refs []accountRequestRef,
+) ([]Group, error) {
 	vaultByAddress := make(map[common.Address]renzoEigenVault, len(a.vaults))
 	for _, vault := range a.vaults {
 		vaultByAddress[vault.Address] = vault
@@ -420,6 +353,10 @@ func (a *RenzoAdapter) readEigenWithdrawals(
 		initialShares, err := BigIntAt(rows[2], 1)
 		if err != nil {
 			return nil, fmt.Errorf("%s withdrawal %s initial shares: %w", vault.Label, root, err)
+		}
+		// A withdrawal claimed after the indexed block is deleted, and reads empty at the pin.
+		if withdrawer == (common.Address{}) && locked.Sign() == 0 {
+			continue
 		}
 		if withdrawer != account || locked.Sign() <= 0 || !createdAt.IsUint64() ||
 			createdAt.Uint64() > block.Number || createdAt.Uint64() < vault.ActivationBlock || scale.Sign() <= 0 ||
@@ -683,17 +620,25 @@ func (a *RenzoAdapter) Positions(
 	if block.ChainID != Ethereum {
 		return groups, nil
 	}
+	var lag *indexLagNote
+	readEigenWithdrawals := func(
+		ctx context.Context, client *RPCClient, block BlockRef, account common.Address,
+	) ([]Group, error) {
+		positions, note, err := a.readEigenWithdrawals(ctx, client, block, account)
+		lag = note
+		return positions, err
+	}
 	for _, reader := range []func(context.Context, *RPCClient, BlockRef, common.Address) ([]Group, error){
 		a.readEigenVaults,
-		a.readEigenWithdrawals,
+		readEigenWithdrawals,
 		a.readEZETHWithdrawals,
 		a.readLegacyStake,
 	} {
 		positions, readErr := reader(ctx, client, block, account)
 		if readErr != nil {
-			return groups, readErr
+			return groups, errors.Join(readErr, lag.err())
 		}
 		groups = append(groups, positions...)
 	}
-	return groups, nil
+	return groups, lag.err()
 }

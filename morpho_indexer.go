@@ -8,10 +8,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 )
 
 const (
@@ -19,10 +17,6 @@ const (
 	morphoMaxIndexedMarkets = 4_096
 	morphoMaxFeeMarketRows  = 8_192
 	morphoMaxIndexedVaults  = 4_096
-	morphoMaxRPCTailBlocks  = 2_048
-	morphoMaxTailContracts  = 4_096
-	morphoCheckpointMaxLag  = 15 * time.Minute
-	morphoBackfillMaxLag    = 7*24*time.Hour + 30*time.Minute
 )
 
 type morphoVaultVersion string
@@ -41,6 +35,8 @@ type morphoPositionRefs struct {
 	IndexerBlock uint64
 	MarketIDs    []common.Hash
 	Vaults       []morphoVaultRef
+	// Lag notes a live read that trails its pin by more than indexMaxLag.
+	Lag *indexLagNote
 }
 
 type morphoPositionIndexer interface {
@@ -313,27 +309,6 @@ func (i *morphoIndexer) graphqlPage(
 	return page, nil
 }
 
-func validateMorphoCheckpoint(block BlockRef, page morphoGraphQLPage) error {
-	if page.CheckpointBlock > block.Number {
-		return fmt.Errorf("indexer checkpoint %d is ahead of pinned block %d", page.CheckpointBlock, block.Number)
-	}
-	checkpointSeconds := page.CheckpointMS / 1_000
-	if checkpointSeconds > block.Timestamp+60 {
-		return fmt.Errorf("indexer checkpoint timestamp is ahead of pinned block")
-	}
-	if block.Timestamp > checkpointSeconds {
-		lag := time.Duration(block.Timestamp-checkpointSeconds) * time.Second
-		maximumLag := morphoCheckpointMaxLag
-		if block.Fixed {
-			maximumLag = morphoBackfillMaxLag
-		}
-		if lag > maximumLag {
-			return fmt.Errorf("indexer checkpoint is stale by %s", lag)
-		}
-	}
-	return nil
-}
-
 // presenceProbe asks every Morpho chain at once whether the account holds any market or vault
 // position, so a scan queries only the chains where it does.
 func (i *morphoIndexer) presenceProbe(account common.Address) presenceProbe {
@@ -349,9 +324,6 @@ func (i *morphoIndexer) presenceProbe(account common.Address) presenceProbe {
 			{entity: "morphoMarketPositionRefs", where: where},
 			{entity: "morphoVaultPositionRefs", where: where},
 		},
-		maxRPCTail:     morphoMaxRPCTailBlocks,
-		liveMaxLag:     morphoCheckpointMaxLag,
-		backfillMaxLag: morphoBackfillMaxLag,
 	}
 }
 
@@ -366,41 +338,21 @@ func (i *morphoIndexer) indexedRefs(
 	includeFeeMarkets bool,
 	start indexStart,
 ) (morphoPositionRefs, error) {
-	statuses, err := i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, false)
+	statuses, queryBlock, err := indexQueryBlock(block, func(forceRefresh bool) (map[ChainID]sentioChainStatus, error) {
+		return i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, forceRefresh)
+	})
 	if err != nil {
 		return morphoPositionRefs{}, err
 	}
-	status := statuses[block.ChainID]
-	if status.State != "PROCESSING_LATEST" {
-		return morphoPositionRefs{}, fmt.Errorf(
-			"indexer backfill is incomplete for chain %d: state=%s processed=%d estimatedLatest=%d",
-			block.ChainID, status.State, status.ProcessedBlock, status.EstimatedLatest,
-		)
-	}
-	if block.Number > status.ProcessedBlock && block.Number-status.ProcessedBlock > morphoMaxRPCTailBlocks {
-		statuses, err = i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, true)
-		if err != nil {
-			return morphoPositionRefs{}, err
-		}
-		status = statuses[block.ChainID]
-	}
-	if status.State != "PROCESSING_LATEST" ||
-		(block.Number > status.ProcessedBlock && block.Number-status.ProcessedBlock > morphoMaxRPCTailBlocks) {
-		return morphoPositionRefs{}, fmt.Errorf(
-			"indexer RPC tail exceeds %d blocks for chain %d: processed=%d target=%d",
-			morphoMaxRPCTailBlocks, block.ChainID, status.ProcessedBlock, block.Number,
-		)
-	}
-	queryBlock := min(block.Number, status.ProcessedBlock)
 	result := morphoPositionRefs{IndexerBlock: queryBlock}
 	// The fee-market surface is keyed by chain, not account, so only an account-only query can be
 	// answered by the probe.
 	if !includeFeeMarkets {
 		proof, empty := i.api.chainProvenEmpty(ctx, i.presenceProbe(account), block, strings.ToLower(account.Hex()), statuses)
 		if empty {
-			// The proof may predate this status read; the RPC tail then starts where it holds.
+			// The proof may predate this status read; it is the block the answer holds at.
 			result.IndexerBlock = proof.QueryBlock
-			return mergeMorphoRefs(result, nil, nil)
+			return dedupeMorphoRefs(result)
 		}
 	}
 	// Only the pages take a lane slot: the status read needs none, and a chain the probe proved
@@ -426,7 +378,7 @@ func (i *morphoIndexer) indexedRefs(
 			return morphoPositionRefs{}, pageErr
 		}
 		if firstPage {
-			if err := validateMorphoCheckpoint(block, page); err != nil {
+			if result.Lag, err = checkIndexCheckpoint(block, page.CheckpointBlock, page.CheckpointMS); err != nil {
 				return morphoPositionRefs{}, err
 			}
 			checkpointBlock, checkpointMS = page.CheckpointBlock, page.CheckpointMS
@@ -488,366 +440,14 @@ func (i *morphoIndexer) indexedRefs(
 			}
 		}
 	}
-	return mergeMorphoRefs(result, nil, nil)
+	return dedupeMorphoRefs(result)
 }
 
-func morphoAdaptiveLogs(
-	ctx context.Context,
-	client *RPCClient,
-	fromBlock uint64,
-	toBlock uint64,
-	addresses []common.Address,
-	topics [][]common.Hash,
-) ([]rpcLog, error) {
-	logs, err := client.Logs(ctx, fromBlock, toBlock, addresses, topics)
-	if err == nil {
-		return logs, nil
-	}
-	if fromBlock == toBlock {
-		return nil, err
-	}
-	middle := fromBlock + (toBlock-fromBlock)/2
-	left, leftErr := morphoAdaptiveLogs(ctx, client, fromBlock, middle, addresses, topics)
-	if leftErr != nil {
-		return nil, leftErr
-	}
-	right, rightErr := morphoAdaptiveLogs(ctx, client, middle+1, toBlock, addresses, topics)
-	if rightErr != nil {
-		return nil, rightErr
-	}
-	return append(left, right...), nil
-}
-
-var (
-	morphoTopic2AccountEvents = []common.Hash{
-		crypto.Keccak256Hash([]byte("Withdraw(bytes32,address,address,address,uint256,uint256)")),
-		crypto.Keccak256Hash([]byte("Borrow(bytes32,address,address,address,uint256,uint256)")),
-		crypto.Keccak256Hash([]byte("WithdrawCollateral(bytes32,address,address,address,uint256)")),
-	}
-	morphoTopic3AccountEvents = []common.Hash{
-		crypto.Keccak256Hash([]byte("Supply(bytes32,address,address,uint256,uint256)")),
-		crypto.Keccak256Hash([]byte("Repay(bytes32,address,address,uint256,uint256)")),
-		crypto.Keccak256Hash([]byte("SupplyCollateral(bytes32,address,address,uint256)")),
-		crypto.Keccak256Hash([]byte("Liquidate(bytes32,address,address,uint256,uint256,uint256,uint256,uint256)")),
-	}
-	morphoTransferTopic       = crypto.Keccak256Hash([]byte("Transfer(address,address,uint256)"))
-	morphoAccrueInterestTopic = crypto.Keccak256Hash(
-		[]byte("AccrueInterest(bytes32,uint256,uint256,uint256)"),
-	)
-	morphoSetFeeRecipientTopic = crypto.Keccak256Hash([]byte("SetFeeRecipient(address)"))
-	morphoSetFeeTopic          = crypto.Keccak256Hash([]byte("SetFee(bytes32,uint256)"))
-)
-
-func morphoAccountTopic(account common.Address) common.Hash {
-	return common.BytesToHash(account.Bytes())
-}
-
-func morphoTailMarketIDs(
-	ctx context.Context,
-	client *RPCClient,
-	fromBlock uint64,
-	toBlock uint64,
-	account common.Address,
-	core common.Address,
-	includeCurrentFeeMarkets bool,
-) ([]common.Hash, error) {
-	if fromBlock > toBlock {
-		return nil, nil
-	}
-	accountTopic := morphoAccountTopic(account)
-	filters := [][][]common.Hash{
-		{morphoTopic2AccountEvents, nil, {accountTopic}},
-		{morphoTopic3AccountEvents, nil, nil, {accountTopic}},
-	}
-	seen := make(map[common.Hash]struct{})
-	for _, topics := range filters {
-		logs, err := morphoAdaptiveLogs(ctx, client, fromBlock, toBlock, []common.Address{core}, topics)
-		if err != nil {
-			return nil, fmt.Errorf("core identifier RPC tail: %w", err)
-		}
-		for _, log := range logs {
-			if len(log.Topics) < 2 {
-				return nil, fmt.Errorf("core RPC tail returned a malformed log")
-			}
-			seen[log.Topics[1]] = struct{}{}
-		}
-	}
-	feeMarkets, err := morphoTailFeeMarketIDs(
-		ctx, client, fromBlock, toBlock, account, core, includeCurrentFeeMarkets,
-	)
-	if err != nil {
-		return nil, err
-	}
-	for _, marketID := range feeMarkets {
-		seen[marketID] = struct{}{}
-	}
-	result := make([]common.Hash, 0, len(seen))
-	for marketID := range seen {
-		result = append(result, marketID)
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i].Hex() < result[j].Hex() })
-	return result, nil
-}
-
-func morphoPositiveSetFeeMarketIDsFromLogs(logs []rpcLog) ([]common.Hash, error) {
-	seen := make(map[common.Hash]struct{})
-	for _, log := range logs {
-		if len(log.Topics) != 2 || log.Topics[0] != morphoSetFeeTopic || len(log.Data) != 32 {
-			return nil, fmt.Errorf("fee-market RPC tail returned a malformed SetFee log")
-		}
-		if new(big.Int).SetBytes(log.Data).Sign() > 0 {
-			seen[log.Topics[1]] = struct{}{}
-		}
-	}
-	result := make([]common.Hash, 0, len(seen))
-	for marketID := range seen {
-		result = append(result, marketID)
-	}
-	sort.Slice(result, func(left, right int) bool { return result[left].Hex() < result[right].Hex() })
-	return result, nil
-}
-
-func morphoFeeMarketIDsFromLogs(
-	initialRecipient common.Address,
-	account common.Address,
-	logs []rpcLog,
-) ([]common.Hash, error) {
-	sort.Slice(logs, func(left, right int) bool {
-		if logs[left].BlockNumber != logs[right].BlockNumber {
-			return logs[left].BlockNumber < logs[right].BlockNumber
-		}
-		return logs[left].LogIndex < logs[right].LogIndex
-	})
-	recipient := initialRecipient
-	seen := make(map[common.Hash]struct{})
-	for _, log := range logs {
-		if len(log.Topics) == 0 {
-			return nil, fmt.Errorf("fee-recipient RPC tail returned a log without topics")
-		}
-		switch log.Topics[0] {
-		case morphoSetFeeRecipientTopic:
-			if len(log.Topics) != 2 {
-				return nil, fmt.Errorf("fee-recipient RPC tail returned a malformed SetFeeRecipient log")
-			}
-			recipient = common.BytesToAddress(log.Topics[1].Bytes())
-		case morphoAccrueInterestTopic:
-			if len(log.Topics) != 2 || len(log.Data) != 96 {
-				return nil, fmt.Errorf("fee-recipient RPC tail returned a malformed AccrueInterest log")
-			}
-			feeShares := new(big.Int).SetBytes(log.Data[64:96])
-			if recipient == account && feeShares.Sign() > 0 {
-				seen[log.Topics[1]] = struct{}{}
-			}
-		default:
-			return nil, fmt.Errorf("fee-recipient RPC tail returned an unexpected event")
-		}
-	}
-	result := make([]common.Hash, 0, len(seen))
-	for marketID := range seen {
-		result = append(result, marketID)
-	}
-	sort.Slice(result, func(left, right int) bool { return result[left].Hex() < result[right].Hex() })
-	return result, nil
-}
-
-func morphoTailFeeMarketIDs(
-	ctx context.Context,
-	client *RPCClient,
-	fromBlock uint64,
-	toBlock uint64,
-	account common.Address,
-	core common.Address,
-	includeCurrentFeeMarkets bool,
-) ([]common.Hash, error) {
-	if fromBlock == 0 || fromBlock > toBlock {
-		return nil, nil
-	}
-	values, err := client.Call(
-		ctx,
-		BlockRef{ChainID: client.chainID, Number: fromBlock - 1, Fixed: true},
-		core,
-		morphoCoreABI,
-		"feeRecipient",
-	)
-	if err != nil {
-		return nil, fmt.Errorf("fee recipient before RPC tail: %w", err)
-	}
-	initialRecipient, err := AddressAt(values, 0)
-	if err != nil {
-		return nil, fmt.Errorf("fee recipient before RPC tail: %w", err)
-	}
-	setLogs, err := morphoAdaptiveLogs(
-		ctx,
-		client,
-		fromBlock,
-		toBlock,
-		[]common.Address{core},
-		[][]common.Hash{{morphoSetFeeRecipientTopic}},
-	)
-	if err != nil {
-		return nil, fmt.Errorf("fee-recipient changes RPC tail: %w", err)
-	}
-	relevantRecipient := initialRecipient == account
-	for _, log := range setLogs {
-		if len(log.Topics) != 2 {
-			return nil, fmt.Errorf("fee-recipient RPC tail returned a malformed SetFeeRecipient log")
-		}
-		if common.BytesToAddress(log.Topics[1].Bytes()) == account {
-			relevantRecipient = true
-		}
-	}
-	if !relevantRecipient {
-		return nil, nil
-	}
-	accrueLogs, err := morphoAdaptiveLogs(
-		ctx,
-		client,
-		fromBlock,
-		toBlock,
-		[]common.Address{core},
-		[][]common.Hash{{morphoAccrueInterestTopic}},
-	)
-	if err != nil {
-		return nil, fmt.Errorf("fee accrual identifier RPC tail: %w", err)
-	}
-	result, err := morphoFeeMarketIDsFromLogs(initialRecipient, account, append(setLogs, accrueLogs...))
-	if err != nil {
-		return nil, err
-	}
-	if !includeCurrentFeeMarkets {
-		return result, nil
-	}
-	feeLogs, err := morphoAdaptiveLogs(
-		ctx,
-		client,
-		fromBlock,
-		toBlock,
-		[]common.Address{core},
-		[][]common.Hash{{morphoSetFeeTopic}},
-	)
-	if err != nil {
-		return nil, fmt.Errorf("fee-market changes RPC tail: %w", err)
-	}
-	positiveFeeMarkets, err := morphoPositiveSetFeeMarketIDsFromLogs(feeLogs)
-	if err != nil {
-		return nil, err
-	}
-	seen := make(map[common.Hash]struct{}, len(result)+len(positiveFeeMarkets))
-	for _, marketID := range append(result, positiveFeeMarkets...) {
-		seen[marketID] = struct{}{}
-	}
-	result = result[:0]
-	for marketID := range seen {
-		result = append(result, marketID)
-	}
-	sort.Slice(result, func(left, right int) bool { return result[left].Hex() < result[right].Hex() })
-	return result, nil
-}
-
-func morphoTailVaultCandidates(
-	ctx context.Context,
-	client *RPCClient,
-	fromBlock uint64,
-	toBlock uint64,
-	account common.Address,
-) ([]common.Address, error) {
-	if fromBlock > toBlock {
-		return nil, nil
-	}
-	accountTopic := morphoAccountTopic(account)
-	filters := [][][]common.Hash{
-		{{morphoTransferTopic}, {accountTopic}},
-		{{morphoTransferTopic}, nil, {accountTopic}},
-	}
-	seen := make(map[common.Address]struct{})
-	for _, topics := range filters {
-		logs, err := morphoAdaptiveLogs(ctx, client, fromBlock, toBlock, nil, topics)
-		if err != nil {
-			return nil, fmt.Errorf("vault transfer RPC tail: %w", err)
-		}
-		for _, log := range logs {
-			seen[log.Address] = struct{}{}
-			if len(seen) > morphoMaxTailContracts {
-				return nil, fmt.Errorf("RPC tail contains more than %d transfer contracts", morphoMaxTailContracts)
-			}
-		}
-	}
-	result := make([]common.Address, 0, len(seen))
-	for address := range seen {
-		result = append(result, address)
-	}
-	sort.Slice(result, func(i, j int) bool {
-		return strings.ToLower(result[i].Hex()) < strings.ToLower(result[j].Hex())
-	})
-	return result, nil
-}
-
-func morphoClassifyTailVaults(
-	ctx context.Context,
-	client *RPCClient,
-	block BlockRef,
-	candidates []common.Address,
-	deployment morphoDeployment,
-) ([]morphoVaultRef, error) {
-	if len(candidates) == 0 {
-		return nil, nil
-	}
-	factories := make([]morphoVaultFactory, 0)
-	for _, factory := range append(deployment.VaultV1Factories, deployment.VaultV2Factories...) {
-		if factory.Window.ActiveAt(block.Number) {
-			factories = append(factories, factory)
-		}
-	}
-	if len(factories) == 0 {
-		return nil, nil
-	}
-	calls := make([]ContractCall, 0, len(candidates)*len(factories))
-	for _, candidate := range candidates {
-		for _, factory := range factories {
-			method := "isMetaMorpho"
-			if factory.Version == morphoVaultV2 {
-				method = "isVaultV2"
-			}
-			calls = append(calls, ContractCall{
-				Contract: factory.Address, ABI: morphoFactoryABI, Method: method, Args: []any{candidate},
-			})
-		}
-	}
-	rows, err := client.ParallelCalls(ctx, block, calls)
-	if err != nil {
-		return nil, fmt.Errorf("vault factory validation: %w", err)
-	}
-	result := make([]morphoVaultRef, 0)
-	for candidateIndex, candidate := range candidates {
-		var matched *morphoVaultVersion
-		for factoryIndex, factory := range factories {
-			registered, decodeErr := BoolAt(rows[candidateIndex*len(factories)+factoryIndex], 0)
-			if decodeErr != nil {
-				return nil, decodeErr
-			}
-			if !registered {
-				continue
-			}
-			if matched != nil && *matched != factory.Version {
-				return nil, fmt.Errorf("vault %s is registered by both Morpho generations", candidate)
-			}
-			version := factory.Version
-			matched = &version
-		}
-		if matched != nil {
-			result = append(result, morphoVaultRef{Address: candidate, Version: *matched})
-		}
-	}
-	return result, nil
-}
-
-func mergeMorphoRefs(
-	indexed morphoPositionRefs,
-	tailMarkets []common.Hash,
-	tailVaults []morphoVaultRef,
-) (morphoPositionRefs, error) {
-	marketSet := make(map[common.Hash]struct{}, len(indexed.MarketIDs)+len(tailMarkets))
-	for _, marketID := range append(indexed.MarketIDs, tailMarkets...) {
+// dedupeMorphoRefs sorts the identifiers a read collected and drops the repeats: a fee market can
+// also be one the account holds a position in.
+func dedupeMorphoRefs(indexed morphoPositionRefs) (morphoPositionRefs, error) {
+	marketSet := make(map[common.Hash]struct{}, len(indexed.MarketIDs))
+	for _, marketID := range indexed.MarketIDs {
 		marketSet[marketID] = struct{}{}
 	}
 	indexed.MarketIDs = indexed.MarketIDs[:0]
@@ -857,10 +457,10 @@ func mergeMorphoRefs(
 	sort.Slice(indexed.MarketIDs, func(i, j int) bool {
 		return indexed.MarketIDs[i].Hex() < indexed.MarketIDs[j].Hex()
 	})
-	vaultMap := make(map[common.Address]morphoVaultRef, len(indexed.Vaults)+len(tailVaults))
-	for _, vault := range append(indexed.Vaults, tailVaults...) {
+	vaultMap := make(map[common.Address]morphoVaultRef, len(indexed.Vaults))
+	for _, vault := range indexed.Vaults {
 		if existing, exists := vaultMap[vault.Address]; exists && existing.Version != vault.Version {
-			return morphoPositionRefs{}, fmt.Errorf("index and RPC tail disagree on vault %s generation", vault.Address)
+			return morphoPositionRefs{}, fmt.Errorf("index disagrees with itself on vault %s generation", vault.Address)
 		}
 		vaultMap[vault.Address] = vault
 	}
@@ -909,29 +509,5 @@ func (i *morphoIndexer) PositionRefs(
 	if err != nil {
 		return morphoPositionRefs{}, fmt.Errorf("Morpho index query: %w", err)
 	}
-	if indexed.IndexerBlock >= block.Number {
-		return indexed, nil
-	}
-	fromBlock := indexed.IndexerBlock + 1
-	tailMarkets, err := morphoTailMarketIDs(
-		ctx,
-		client,
-		fromBlock,
-		block.Number,
-		account,
-		deployment.Morpho,
-		includeCurrentFeeMarkets,
-	)
-	if err != nil {
-		return morphoPositionRefs{}, err
-	}
-	candidates, err := morphoTailVaultCandidates(ctx, client, fromBlock, block.Number, account)
-	if err != nil {
-		return morphoPositionRefs{}, err
-	}
-	tailVaults, err := morphoClassifyTailVaults(ctx, client, block, candidates, deployment)
-	if err != nil {
-		return morphoPositionRefs{}, err
-	}
-	return mergeMorphoRefs(indexed, tailMarkets, tailVaults)
+	return indexed, nil
 }

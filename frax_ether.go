@@ -2,6 +2,7 @@ package portfolio
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 
@@ -115,43 +116,69 @@ func (a *FraxEtherAdapter) Positions(
 		queueAddresses = append(queueAddresses, queue.Address)
 		queueByAddress[queue.Address] = queue
 	}
-	refs, err := a.indexer.PositionRefs(ctx, client, block, account, queueAddresses)
+	refs, lag, err := a.indexer.PositionRefs(ctx, block, account, queueAddresses)
 	if err != nil {
 		return groups, fmt.Errorf("redemption queue enumeration: %w", err)
 	}
+	tickets, err := ticketGroups(ctx, client, block, account, queueByAddress, refs)
+	return append(groups, tickets...), errors.Join(err, lag.err())
+}
+
+// ticketGroups values the redemption tickets the index lists for account.
+func ticketGroups(
+	ctx context.Context,
+	client *RPCClient,
+	block BlockRef,
+	account common.Address,
+	queueByAddress map[common.Address]fraxEtherQueueConfig,
+	refs []ownerTokenRef,
+) ([]Group, error) {
+	groups := make([]Group, 0, len(refs))
 	for _, ref := range refs {
 		queue := queueByAddress[ref.Contract]
 		contractABI := fraxEtherQueueV1ABI
 		if queue.Version == 2 {
 			contractABI = fraxEtherQueueV2ABI
 		}
-		rows, callErr := client.ParallelCalls(ctx, block, []ContractCall{
+		calls, callErr := client.ParallelCallsAllowFailure(ctx, block, []ContractCall{
 			{Contract: ref.Contract, ABI: contractABI, Method: "ownerOf", Args: []any{ref.TokenID}},
 			{Contract: ref.Contract, ABI: contractABI, Method: "nftInformation", Args: []any{ref.TokenID}},
 		})
 		if callErr != nil {
 			return groups, fmt.Errorf("redemption ticket %s: %w", ref.TokenID, callErr)
 		}
-		owner, decodeErr := AddressAt(rows[0], 0)
+		// The index lists the tickets the account held as of its checkpoint. One redeemed since
+		// was burned, and one transferred since is no longer the account's.
+		if calls[0].Error != nil {
+			if executionReverted(calls[0].Error) {
+				continue
+			}
+			return groups, fmt.Errorf("redemption ticket %s owner: %w", ref.TokenID, calls[0].Error)
+		}
+		owner, decodeErr := AddressAt(calls[0].Values, 0)
 		if decodeErr != nil {
 			return groups, fmt.Errorf("redemption ticket %s owner: %w", ref.TokenID, decodeErr)
 		}
 		if owner != account {
-			return groups, fmt.Errorf("redemption ticket %s ownership changed at pinned block", ref.TokenID)
+			continue
 		}
-		redeemed, decodeErr := BoolAt(rows[1], 0)
+		if calls[1].Error != nil {
+			return groups, fmt.Errorf("redemption ticket %s state: %w", ref.TokenID, calls[1].Error)
+		}
+		information := calls[1].Values
+		redeemed, decodeErr := BoolAt(information, 0)
 		if decodeErr != nil {
 			return groups, fmt.Errorf("redemption ticket %s state: %w", ref.TokenID, decodeErr)
 		}
-		maturity, decodeErr := BigIntAt(rows[1], 1)
+		maturity, decodeErr := BigIntAt(information, 1)
 		if decodeErr != nil {
 			return groups, fmt.Errorf("redemption ticket %s maturity: %w", ref.TokenID, decodeErr)
 		}
-		amount, decodeErr := BigIntAt(rows[1], 2)
+		amount, decodeErr := BigIntAt(information, 2)
 		if decodeErr != nil {
 			return groups, fmt.Errorf("redemption ticket %s amount: %w", ref.TokenID, decodeErr)
 		}
-		fee, decodeErr := BigIntAt(rows[1], 3)
+		fee, decodeErr := BigIntAt(information, 3)
 		if decodeErr != nil {
 			return groups, fmt.Errorf("redemption ticket %s fee: %w", ref.TokenID, decodeErr)
 		}

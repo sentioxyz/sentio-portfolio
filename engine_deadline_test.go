@@ -376,7 +376,7 @@ func TestStatusReadsGiveUpWithTheirContext(t *testing.T) {
 					api:     &sentioAPIClient{apiKey: "test", httpClient: server.client},
 				}
 				return func(ctx context.Context) error {
-					_, err := adapter.processedBlock(ctx)
+					_, err := adapter.queryBlock(ctx, BlockRef{ChainID: Ethereum, Number: 1})
 					return err
 				}
 			},

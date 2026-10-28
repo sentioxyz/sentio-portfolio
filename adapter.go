@@ -2,6 +2,7 @@ package portfolio
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -11,12 +12,48 @@ type Adapter interface {
 	Info() ProtocolInfo
 	// Positions may return verified groups together with an error when an independent
 	// protocol surface fails. The engine preserves those groups and reports the error.
+	// A coverageNote joined into the error is reported as a coverage note instead.
 	Positions(
 		ctx context.Context,
 		client *RPCClient,
 		block BlockRef,
 		account common.Address,
 	) ([]Group, error)
+}
+
+// coverageNote is an error an adapter returns about groups it read as asked: every quantity is
+// the one at the pin, but something the account holds may be absent from them.
+type coverageNote interface {
+	error
+	coverageNote()
+}
+
+// splitCoverageNotes separates the coverage notes an adapter joined into err from its failures.
+// A note wrapped with context keeps it; a failure joined beside a note is kept whole.
+func splitCoverageNotes(err error) (notes []error, failure error) {
+	var note coverageNote
+	if err == nil || !errors.As(err, &note) {
+		return nil, err
+	}
+	switch wrapped := err.(type) {
+	case interface{ Unwrap() []error }:
+		var failures []error
+		for _, child := range wrapped.Unwrap() {
+			childNotes, childFailure := splitCoverageNotes(child)
+			notes = append(notes, childNotes...)
+			if childFailure != nil {
+				failures = append(failures, childFailure)
+			}
+		}
+		return notes, errors.Join(failures...)
+	case interface{ Unwrap() error }:
+		notes, failure = splitCoverageNotes(wrapped.Unwrap())
+		if failure == nil {
+			return []error{err}, nil
+		}
+		return notes, failure
+	}
+	return []error{err}, nil
 }
 
 // chainAvailability describes every interval in which one adapter can safely run on a

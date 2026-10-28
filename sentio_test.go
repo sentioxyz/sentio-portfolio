@@ -524,7 +524,7 @@ func TestMethReadsItsStatusLikeEveryIndexer(t *testing.T) {
 				indexer: SentioIndexerConfig{GraphQLURL: server.URL, StatusURL: server.URL, ProcessorVersion: "1"},
 				api:     &sentioAPIClient{apiKey: "test-key", httpClient: server.Client()},
 			}
-			processed, err := adapter.processedBlock(context.Background())
+			processed, err := adapter.queryBlock(context.Background(), BlockRef{ChainID: Ethereum, Number: 120})
 			if test.wantError == "" {
 				if err != nil || processed != 110 {
 					t.Fatalf("processed = %d, %v, want block 110", processed, err)

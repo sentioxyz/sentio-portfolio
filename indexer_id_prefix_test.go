@@ -67,7 +67,7 @@ func TestAccountKeyedPagesBoundIDByRowPrefix(t *testing.T) {
 		{
 			name: "euler",
 			send: func() error {
-				_, err := (&eulerIndexer{api: api, config: config}).graphqlPage(ctx, Ethereum, presenceTestAccount, "", "", "", 1000, indexStart{})
+				_, err := (&eulerIndexer{api: api, config: config}).graphqlPage(ctx, Ethereum, presenceTestAccount, "", "", 1000, indexStart{})
 				return err
 			},
 			prefix:   "1:" + owner[:40] + ":",

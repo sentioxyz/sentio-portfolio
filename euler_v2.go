@@ -2,6 +2,7 @@ package portfolio
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"sort"
@@ -158,7 +159,7 @@ type eulerPositionIndexer interface {
 		*RPCClient,
 		BlockRef,
 		common.Address,
-	) ([]eulerPositionRef, error)
+	) ([]eulerPositionRef, *indexLagNote, error)
 }
 
 func newEulerV2Adapter(config SentioIndexerConfig) Adapter {
@@ -673,15 +674,17 @@ func (a *EulerV2Adapter) Positions(
 	client *RPCClient,
 	block BlockRef,
 	owner common.Address,
-) ([]Group, error) {
+) (groups []Group, err error) {
 	chain, supported := eulerV2ChainConfigs[block.ChainID]
 	if !supported || block.Number < chain.ActivationBlock {
 		return nil, nil
 	}
-	refs, err := a.indexer.PositionRefs(ctx, client, block, owner)
+	refs, lag, err := a.indexer.PositionRefs(ctx, client, block, owner)
 	if err != nil {
 		return nil, fmt.Errorf("position enumeration: %w", err)
 	}
+	// However the read ends, a lagging index qualifies it.
+	defer func() { err = errors.Join(err, lag.err()) }()
 	refs, err = a.ownedRefs(ctx, client, block, owner, refs, chain)
 	if err != nil {
 		return nil, err

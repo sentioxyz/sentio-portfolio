@@ -401,7 +401,7 @@ func laneOfOneCases(t *testing.T, server *httptest.Server, account common.Addres
 			name: "pendle", chainID: Ethereum,
 			prefetch: func(ctx context.Context) { pendle.prefetchPresence(ctx, account) },
 			read: func(ctx context.Context) error {
-				_, err := pendle.PositionRefs(ctx, nil, block(Ethereum), account)
+				_, _, err := pendle.PositionRefs(ctx, nil, block(Ethereum), account)
 				return err
 			},
 		},
@@ -438,7 +438,7 @@ func laneOfOneCases(t *testing.T, server *httptest.Server, account common.Addres
 		{
 			name: "owner-token", chainID: Ethereum,
 			read: func(ctx context.Context) error {
-				_, err := ownerTokens.PositionRefs(ctx, nil, block(Ethereum), account, contracts)
+				_, _, err := ownerTokens.PositionRefs(ctx, block(Ethereum), account, contracts)
 				return err
 			},
 		},
@@ -452,7 +452,7 @@ func laneOfOneCases(t *testing.T, server *httptest.Server, account common.Addres
 		{
 			name: "meth-protocol", chainID: Ethereum,
 			read: func(ctx context.Context) error {
-				_, err := meth.requestIDs(ctx, nil, block(Ethereum), account)
+				_, _, err := meth.requestIDs(ctx, block(Ethereum), account)
 				return err
 			},
 		},
