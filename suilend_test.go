@@ -262,3 +262,28 @@ func TestSuilendInterestCurveInterpolatesInWad(t *testing.T) {
 		t.Fatalf("interpolated index %v %v", next.borrowIndex, err)
 	}
 }
+
+func TestSuilendSpreadAboveAvailableIsFullUtilization(t *testing.T) {
+	f, owner := suilendFixture()
+	editSuilendReserve(f, func(o suiFields) {
+		// 100 SUI of unclaimed spread against 50 SUI available.
+		o["available_amount"] = "50000000000"
+		o["borrowed_amount"] = suilendTestDecimal(suilendTestWad("500000000000"))
+		o["config"] = map[string]any{"element": map[string]any{"interest_rate_utils": []any{0, 100}, "interest_rate_aprs": []any{"0", "20000"}, "spread_fee_bps": "1000"}}
+	})
+	state, err := loadSuilend(context.Background(), owner, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := state.markets[naviAddress("0x30")][0]
+	// The available amount net of spread counts as zero: 100% utilization on
+	// the 0%-200% curve, floored to 63419583967 per second.
+	next, err := r.at(1001)
+	if err != nil || next.borrowIndex.String() != "3000000190258751901" {
+		t.Fatalf("full-utilization index %v %v", next.borrowIndex, err)
+	}
+	got, err := readSuilendFixture(t, f, owner)
+	if err != nil || len(got.Errors) > 0 || len(got.Groups) == 0 {
+		t.Fatalf("positions %+v %v", got, err)
+	}
+}

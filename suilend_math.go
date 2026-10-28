@@ -167,16 +167,23 @@ func (r suilendReserve) totalSupply() *big.Int {
 // At compounds reserve debt and protocol spread to the observed chain time,
 // matching reserve::compound_interest and reserve_config::calculate_apr.
 func (r suilendReserve) at(target uint64) (suilendReserve, error) {
-	total := r.totalSupply()
-	if target < r.updated || total.Sign() < 0 || new(big.Int).Mul(r.available, suilendWad).Cmp(r.fees) < 0 {
+	if target < r.updated || r.totalSupply().Sign() < 0 {
 		return r, fmt.Errorf("invalid Suilend reserve time or net liquidity")
 	}
 	if target == r.updated {
 		return r, nil
 	}
+	// Utilization excludes unclaimed spread from the available amount. A reserve
+	// borrowed down to its floor can owe more spread than it holds, and chain
+	// state keeps compounding it: the available amount then counts as zero, so
+	// utilization is 100% rather than past the end of the curve.
+	available := new(big.Int).Mul(r.available, suilendWad)
+	if available.Sub(available, r.fees).Sign() < 0 {
+		available.SetInt64(0)
+	}
 	util := new(big.Int)
-	if total.Sign() > 0 {
-		util = suilendDiv(r.borrowed, total)
+	if supply := available.Add(available, r.borrowed); supply.Sign() > 0 {
+		util = suilendDiv(r.borrowed, supply)
 	}
 	var apr *big.Int
 	percent := new(big.Int).Div(new(big.Int).Set(suilendWad), big.NewInt(100))
