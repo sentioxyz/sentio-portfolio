@@ -142,8 +142,10 @@ are outside this lending surface.
 Deposits convert cTokens through net reserve supply (available + borrowed -
 unclaimed spread fees). Borrows apply the cumulative borrow index. Reserves
 accrue to the sample's checkpoint timestamp using the on-chain piecewise APR
-curve, per-second compounding and spread fee; a reserve stamped later than the
-sample is a contradiction the read rejects rather than projecting backwards. All operations use integer WAD
+curve, per-second compounding and spread fee; utilization excludes unclaimed
+spread from the available amount, which counts as zero when the spread exceeds
+it (100% utilization). A reserve stamped later than the sample is a
+contradiction the read rejects rather than projecting backwards. All operations use integer WAD
 arithmetic and the Move operation order; raw token amounts are floored only
 after conversion. Metadata comes from the chain and must agree with reserve
 precision. USD prices remain the host's responsibility. The formulas follow
