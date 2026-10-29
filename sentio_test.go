@@ -520,11 +520,12 @@ func TestMethReadsItsStatusLikeEveryIndexer(t *testing.T) {
 					test.versionState, test.estimated, test.state, test.errorRecord)
 			}))
 			defer server.Close()
-			adapter := &MethAdapter{
-				indexer: SentioIndexerConfig{GraphQLURL: server.URL, StatusURL: server.URL, ProcessorVersion: "1"},
-				api:     &sentioAPIClient{apiKey: "test-key", httpClient: server.Client()},
+			index := &sentioIndex{
+				api:    &sentioAPIClient{apiKey: "test-key", httpClient: server.Client()},
+				config: SentioIndexerConfig{GraphQLURL: server.URL, StatusURL: server.URL, ProcessorVersion: "1"},
+				chains: []ChainID{Ethereum},
 			}
-			processed, err := adapter.queryBlock(context.Background(), BlockRef{ChainID: Ethereum, Number: 120})
+			_, processed, err := index.queryBlock(context.Background(), BlockRef{ChainID: Ethereum, Number: 120})
 			if test.wantError == "" {
 				if err != nil || processed != 110 {
 					t.Fatalf("processed = %d, %v, want block 110", processed, err)

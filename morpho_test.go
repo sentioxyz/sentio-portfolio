@@ -365,47 +365,28 @@ func TestDedupeMorphoRefsRejectsGenerationDrift(t *testing.T) {
 	}
 }
 
-func TestMorphoFeeMarketGraphQLKeepsOnlyActiveFees(t *testing.T) {
+// The fee recipient holds a position only in the fee markets that charge a fee.
+func TestMorphoFeeMarketsKeepOnlyActiveFees(t *testing.T) {
 	active := common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	inactive := common.HexToHash("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		var body struct {
-			Variables map[string]any `json:"variables"`
+	stream := moolahFeeMarketStream("morphoFeeMarkets")
+	markets := make([]moolahFeeMarket, 0, 2)
+	for _, row := range []moolahFeeMarketRow{
+		{ChainID: 1, MarketID: strings.ToLower(active.Hex()), Fee: "100000000000000000"},
+		{ChainID: 1, MarketID: strings.ToLower(inactive.Hex()), Fee: "0"},
+	} {
+		market, err := stream.Decode(Ethereum, "1:"+row.MarketID, row)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
-			t.Errorf("decode GraphQL request: %v", err)
-			return
-		}
-		if body.Variables["block"] != "123" || body.Variables["chainId"] != float64(1) {
-			t.Errorf("unexpected GraphQL variables: %#v", body.Variables)
-		}
-		writer.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(writer).Encode(map[string]any{
-			"data": map[string]any{
-				"morphoFeeMarkets": []map[string]any{
-					{"id": "1:" + strings.ToLower(active.Hex()), "chainId": 1, "marketId": strings.ToLower(active.Hex()), "fee": "100000000000000000"},
-					{"id": "1:" + strings.ToLower(inactive.Hex()), "chainId": 1, "marketId": strings.ToLower(inactive.Hex()), "fee": "0"},
-				},
-			},
-		})
-	}))
-	t.Cleanup(server.Close)
-	indexer := &morphoIndexer{
-		api: &sentioAPIClient{
-			apiKey: "test", httpClient: server.Client(), statuses: make(map[string]sentioStatusCache),
-		},
-		config: SentioIndexerConfig{GraphQLURL: server.URL},
+		markets = append(markets, market)
 	}
-	page, err := indexer.graphqlFeeMarketPage(
-		context.Background(), Ethereum, morphoFeeMarketRowPrefix(Ethereum), 123,
-	)
-	if err != nil {
-		t.Fatal(err)
+	if got := activeFeeMarkets(markets); len(got) != 1 || got[0] != active {
+		t.Fatalf("active fee markets = %v, want [%s]", got, active)
 	}
-	if len(page.RowIDs) != 2 {
-		t.Fatalf("fee-market rows = %d, want 2", len(page.RowIDs))
-	}
-	if len(page.ActiveMarketIDs) != 1 || page.ActiveMarketIDs[0] != active {
-		t.Fatalf("active fee markets = %v, want [%s]", page.ActiveMarketIDs, active)
+	if _, err := stream.Decode(Ethereum, "1:"+strings.ToLower(active.Hex()), moolahFeeMarketRow{
+		ChainID: 1, MarketID: strings.ToLower(active.Hex()), Fee: "-1",
+	}); err == nil {
+		t.Fatal("a negative fee was accepted")
 	}
 }

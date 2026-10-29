@@ -3,7 +3,6 @@ package portfolio
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -291,13 +290,13 @@ type pendlePositionIndexer interface {
 		*RPCClient,
 		BlockRef,
 		common.Address,
-	) ([]pendlePositionRef, *indexLagNote, error)
-	// MarketsForPT groups the markets the index recorded for each of the given PTs. A PT names
-	// no market on-chain, and Pendle allows more than one, so this is the only way to reach the
-	// market whose implied rate discounts it.
+	) ([]pendlePositionRef, indexAt, error)
+	// MarketsForPT groups the markets the index recorded for each of the given PTs, where
+	// PositionRefs read. A PT names no market on-chain, and Pendle allows more than one, so this
+	// is the only way to reach the market whose implied rate discounts it.
 	MarketsForPT(
 		context.Context,
-		BlockRef,
+		indexAt,
 		[]common.Address,
 	) (map[common.Address][]common.Address, error)
 }
@@ -349,19 +348,15 @@ func (a *PendleAdapter) Positions(
 	if !supported || block.Number < chain.ActivationBlock {
 		return nil, nil
 	}
-	refs, lag, err := a.indexer.PositionRefs(ctx, client, block, account)
+	refs, at, err := a.indexer.PositionRefs(ctx, client, block, account)
 	if err != nil {
 		return nil, fmt.Errorf("position enumeration: %w", err)
 	}
 	held, err := a.heldRefs(ctx, client, block, account, refs)
-	if err != nil {
-		return nil, errors.Join(err, lag.err())
+	if err != nil || len(held) == 0 {
+		return nil, err
 	}
-	if len(held) == 0 {
-		return nil, lag.err()
-	}
-	groups, err := a.buildGroups(ctx, client, block, held)
-	return groups, errors.Join(err, lag.err())
+	return a.buildGroups(ctx, client, block, at, held)
 }
 
 type pendleHolding struct {
@@ -415,6 +410,7 @@ func (a *PendleAdapter) buildGroups(
 	ctx context.Context,
 	client *RPCClient,
 	block BlockRef,
+	at indexAt,
 	held []pendleHolding,
 ) ([]Group, error) {
 	groups := make([]Group, 0, len(held))
@@ -432,7 +428,7 @@ func (a *PendleAdapter) buildGroups(
 		}
 		direct = append(direct, holding)
 	}
-	directGroups, err := a.tokenGroups(ctx, client, block, direct)
+	directGroups, err := a.tokenGroups(ctx, client, block, at, direct)
 	if err != nil {
 		return nil, err
 	}
@@ -471,6 +467,7 @@ func (a *PendleAdapter) tokenGroups(
 	ctx context.Context,
 	client *RPCClient,
 	block BlockRef,
+	at indexAt,
 	held []pendleHolding,
 ) ([]Group, error) {
 	if len(held) == 0 {
@@ -486,7 +483,7 @@ func (a *PendleAdapter) tokenGroups(
 			positiveHoldings = append(positiveHoldings, holding)
 		}
 	}
-	bases, err := a.tokenPriceBases(ctx, client, block, positiveHoldings)
+	bases, err := a.tokenPriceBases(ctx, client, block, at, positiveHoldings)
 	if err != nil {
 		return nil, err
 	}
@@ -729,6 +726,7 @@ func (a *PendleAdapter) tokenPriceBases(
 	ctx context.Context,
 	client *RPCClient,
 	block BlockRef,
+	at indexAt,
 	held []pendleHolding,
 ) (map[common.Address]pendleTokenBasis, error) {
 	seenSY := make(map[common.Address]struct{}, len(held))
@@ -757,7 +755,7 @@ func (a *PendleAdapter) tokenPriceBases(
 	if len(syAddresses) == 0 {
 		return nil, nil
 	}
-	rates, err := a.marketImpliedRates(ctx, client, block, unexpired)
+	rates, err := a.marketImpliedRates(ctx, client, block, at, unexpired)
 	if err != nil {
 		return nil, err
 	}
@@ -874,12 +872,13 @@ func (a *PendleAdapter) marketImpliedRates(
 	ctx context.Context,
 	client *RPCClient,
 	block BlockRef,
+	at indexAt,
 	pts []common.Address,
 ) (map[common.Address]*big.Int, error) {
 	if len(pts) == 0 {
 		return nil, nil
 	}
-	markets, err := a.indexer.MarketsForPT(ctx, block, pts)
+	markets, err := a.indexer.MarketsForPT(ctx, at, pts)
 	if err != nil {
 		return nil, fmt.Errorf("Pendle market lookup: %w", err)
 	}

@@ -7,8 +7,8 @@ import (
 
 // scanScope is what a scan attaches to its context so that the RPC client and the indexer
 // clients, which adapters call with signatures the kernel does not want to widen, can still reach
-// the scan's observer, its indexer lane, the blocks it pinned and its per-scan memo — and report
-// under the protocol and chain they serve.
+// the scan's observer, its indexer lane, the blocks it pinned, its per-scan memo and the running
+// deployment's coverage sink — and report under the protocol and chain they serve.
 type scanScope struct {
 	observer Observer
 	// lane bounds concurrent indexer requests for the engine that started the scan.
@@ -30,6 +30,8 @@ type scanScope struct {
 	// presence marks work done for a presence probe, so its lane waits and requests report
 	// apart from the per-chain pages.
 	presence bool
+	// coverage collects the coverage notes of the deployment running under the scope.
+	coverage *coverageSink
 }
 
 // prefetchConcurrency is how many presence probes run ahead of the workers at once. Two leaves
@@ -100,6 +102,42 @@ func withDeployment(ctx context.Context, protocolID string, chainID ChainID) con
 	scope.protocolID = protocolID
 	scope.chainID = chainID
 	return context.WithValue(ctx, scanScopeKey{}, scope)
+}
+
+// coverageSink collects the coverage notes a deployment's index reads record while it runs: an
+// index read that answers short of its pin says so here rather than through the adapter, so the
+// note reaches the scan however the adapter's read ends.
+type coverageSink struct {
+	mu    sync.Mutex
+	notes []error
+}
+
+// withCoverage opens a sink for the notes recorded under the returned context. The engine opens one
+// per deployment it reads.
+func withCoverage(ctx context.Context) (context.Context, *coverageSink) {
+	scope, _ := ctx.Value(scanScopeKey{}).(scanScope)
+	scope.coverage = &coverageSink{}
+	return context.WithValue(ctx, scanScopeKey{}, scope), scope.coverage
+}
+
+// noteCoverage records note in the sink ctx carries. Outside one, nothing reports it.
+func noteCoverage(ctx context.Context, note error) {
+	sink := scopeFrom(ctx).coverage
+	if sink == nil {
+		return
+	}
+	sink.mu.Lock()
+	sink.notes = append(sink.notes, note)
+	sink.mu.Unlock()
+}
+
+// take returns the notes recorded so far and empties the sink.
+func (s *coverageSink) take() []error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	notes := s.notes
+	s.notes = nil
+	return notes
 }
 
 // withPresence marks what runs under ctx as work for a presence probe.
@@ -180,25 +218,6 @@ func (m *scanMemo) once(ctx context.Context, key string, compute func() any) any
 	defer close(entry.done)
 	entry.value = compute()
 	return entry.value
-}
-
-// await blocks until a computation started for key has finished, or ctx ends. It returns at once
-// when nothing was started, so a caller can wait before taking a lane slot without ever holding
-// that slot while a background computation needs it.
-func (m *scanMemo) await(ctx context.Context, key string) {
-	if m == nil {
-		return
-	}
-	m.mu.Lock()
-	entry, exists := m.entries[key]
-	m.mu.Unlock()
-	if !exists {
-		return
-	}
-	select {
-	case <-entry.done:
-	case <-ctx.Done():
-	}
 }
 
 // start computes key in the background unless someone already claimed it, so a later once for

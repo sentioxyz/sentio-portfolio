@@ -559,11 +559,11 @@ func (e *Engine) ScanWithOptions(
 			return
 		}
 		startedAt := time.Now()
-		// Every RPC and indexer request the adapter makes reports under its name.
-		jobCtx := withDeployment(collectCtx, info.ID, job.chainID)
+		// Every RPC and indexer request the adapter makes reports under its name, and every index
+		// read records its coverage notes for this deployment, whatever the adapter returns.
+		jobCtx, coverage := withCoverage(withDeployment(collectCtx, info.ID, job.chainID))
 		groups := make([]Group, 0)
 		var positionErr error
-		var coverageNotes []error
 		for _, account := range chain.accounts {
 			var accountGroups []Group
 			var err error
@@ -592,9 +592,6 @@ func (e *Engine) ScanWithOptions(
 				)
 			}
 			groups = append(groups, attributedGroups(accountGroups, account, address)...)
-			// A coverage note qualifies groups read as asked, so it stops nothing.
-			notes, err := splitCoverageNotes(err)
-			coverageNotes = append(coverageNotes, notes...)
 			if err != nil {
 				positionErr = errors.Join(positionErr, err)
 				// Wallet holdings are independent per account, so one malformed or failed
@@ -624,7 +621,9 @@ func (e *Engine) ScanWithOptions(
 			}
 			response.Errors = append(response.Errors, scanError)
 		}
-		// Every account of the deployment can carry the same note; report each once.
+		// A coverage note qualifies groups read as asked, so it stops nothing. Every account of the
+		// deployment can carry the same note; report each once.
+		coverageNotes := coverage.take()
 		noted := make(map[string]struct{}, len(coverageNotes))
 		for _, note := range coverageNotes {
 			message := PublicError(note)

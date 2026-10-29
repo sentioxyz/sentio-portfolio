@@ -371,12 +371,13 @@ func TestStatusReadsGiveUpWithTheirContext(t *testing.T) {
 		{
 			name: "mETH",
 			new: func(server *statusTestServer) func(context.Context) error {
-				adapter := &MethAdapter{
-					indexer: SentioIndexerConfig{GraphQLURL: server.url, StatusURL: server.url, ProcessorVersion: "1"},
-					api:     &sentioAPIClient{apiKey: "test", httpClient: server.client},
+				index := &sentioIndex{
+					api:    &sentioAPIClient{apiKey: "test", httpClient: server.client},
+					config: SentioIndexerConfig{GraphQLURL: server.url, StatusURL: server.url, ProcessorVersion: "1"},
+					chains: []ChainID{Ethereum},
 				}
 				return func(ctx context.Context) error {
-					_, err := adapter.queryBlock(ctx, BlockRef{ChainID: Ethereum, Number: 1})
+					_, _, err := index.queryBlock(ctx, BlockRef{ChainID: Ethereum, Number: 1})
 					return err
 				}
 			},

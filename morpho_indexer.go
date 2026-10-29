@@ -4,16 +4,13 @@ import (
 	"context"
 	"fmt"
 	"math/big"
-	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 )
 
 const (
-	morphoIndexerPageSize   = 500
 	morphoMaxIndexedMarkets = 4_096
 	morphoMaxFeeMarketRows  = 8_192
 	morphoMaxIndexedVaults  = 4_096
@@ -35,8 +32,6 @@ type morphoPositionRefs struct {
 	IndexerBlock uint64
 	MarketIDs    []common.Hash
 	Vaults       []morphoVaultRef
-	// Lag notes a live read that trails its pin by more than indexMaxLag.
-	Lag *indexLagNote
 }
 
 type morphoPositionIndexer interface {
@@ -50,397 +45,141 @@ type morphoPositionIndexer interface {
 }
 
 type morphoIndexer struct {
-	api            *sentioAPIClient
-	config         SentioIndexerConfig
-	requiredChains []ChainID
+	index *sentioIndex
 }
 
 func newMorphoIndexer(config SentioIndexerConfig) *morphoIndexer {
-	return &morphoIndexer{
-		api: newSentioAPIClient(), config: config,
-		requiredChains: deploymentChains(morphoDeployments),
-	}
+	return &morphoIndexer{index: &sentioIndex{
+		name:   "morpho-blue",
+		api:    newSentioAPIClient(),
+		config: config,
+		chains: deploymentChains(morphoDeployments),
+		probe:  true,
+		start:  func(chainID ChainID) uint64 { return morphoDeployments[chainID].Window.ActivationBlock },
+	}}
 }
 
-const morphoWalletQuery = `
-query MorphoWalletPositions(
-  $chainId: Int!
-  $account: String!
-  $idPrefix: String!
-  $marketAfter: ID!
-  $vaultAfter: ID!
-  $checkpoint: ID!
-  $first: Int!
-  $block: BigInt!
-) {
-  indexerCheckpoints(first: 2, block: { number: $block }, where: { id: $checkpoint }) {
-    blockNumber
-    timestampMs
-  }
-  morphoMarketPositionRefs(
-    first: $first
-    orderBy: id
-    orderDirection: asc
-    block: { number: $block }
-    where: { chainId: $chainId, account: $account, id_starts_with: $idPrefix, id_gt: $marketAfter }
-  ) {
-    id
-    chainId
-    account
-    marketId
-  }
-  morphoVaultPositionRefs(
-    first: $first
-    orderBy: id
-    orderDirection: asc
-    block: { number: $block }
-    where: { chainId: $chainId, account: $account, id_starts_with: $idPrefix, id_gt: $vaultAfter }
-  ) {
-    id
-    chainId
-    account
-    vault
-    version
-  }
-}`
-
-type morphoGraphQLResponse struct {
-	Data struct {
-		Checkpoints []indexerCheckpointRow `json:"indexerCheckpoints"`
-		Markets     []struct {
-			ID       string `json:"id"`
-			ChainID  int    `json:"chainId"`
-			Account  string `json:"account"`
-			MarketID string `json:"marketId"`
-		} `json:"morphoMarketPositionRefs"`
-		Vaults []struct {
-			ID      string `json:"id"`
-			ChainID int    `json:"chainId"`
-			Account string `json:"account"`
-			Vault   string `json:"vault"`
-			Version string `json:"version"`
-		} `json:"morphoVaultPositionRefs"`
-	} `json:"data"`
-	Errors []struct {
-		Message string `json:"message"`
-	} `json:"errors"`
+// moolahMarketRow is a market position ref of a Morpho Blue-shaped index: Morpho's own, and the
+// Moolah fork Lista runs. Its id is the account's row prefix and the market ID.
+type moolahMarketRow struct {
+	ChainID  int    `json:"chainId"`
+	Account  string `json:"account"`
+	MarketID string `json:"marketId"`
 }
 
-type morphoGraphQLPage struct {
-	CheckpointBlock uint64
-	CheckpointMS    uint64
-	MarketIDs       []common.Hash
-	MarketRowIDs    []string
-	Vaults          []morphoVaultRef
-	VaultRowIDs     []string
-}
-
-const morphoFeeMarketsQuery = `
-query MorphoFeeMarkets(
-  $chainId: Int!
-  $after: ID!
-  $first: Int!
-  $block: BigInt!
-) {
-  morphoFeeMarkets(
-    first: $first
-    orderBy: id
-    orderDirection: asc
-    block: { number: $block }
-    where: { chainId: $chainId, id_gt: $after }
-  ) {
-    id
-    chainId
-    marketId
-    fee
-  }
-}`
-
-type morphoFeeMarketsGraphQLResponse struct {
-	Data struct {
-		Markets []struct {
-			ID       string `json:"id"`
-			ChainID  int    `json:"chainId"`
-			MarketID string `json:"marketId"`
-			Fee      string `json:"fee"`
-		} `json:"morphoFeeMarkets"`
-	} `json:"data"`
-	Errors []struct {
-		Message string `json:"message"`
-	} `json:"errors"`
-}
-
-type morphoFeeMarketPage struct {
-	RowIDs          []string
-	ActiveMarketIDs []common.Hash
-}
-
-func morphoFeeMarketRowPrefix(chainID ChainID) string {
-	return fmt.Sprintf("%d:", chainID)
-}
-
-func (i *morphoIndexer) graphqlFeeMarketPage(
-	ctx context.Context,
-	chainID ChainID,
-	after string,
-	block uint64,
-) (morphoFeeMarketPage, error) {
-	var payload morphoFeeMarketsGraphQLResponse
-	err := i.api.doJSON(
-		ctx,
-		http.MethodPost,
-		i.config.GraphQLURL,
-		map[string]any{
-			"query": morphoFeeMarketsQuery,
-			"variables": map[string]any{
-				"chainId": int(chainID), "after": after,
-				"first": morphoIndexerPageSize, "block": strconv.FormatUint(block, 10),
-			},
+// moolahMarketStream reads the markets account holds a position in.
+func moolahMarketStream(entity string, account common.Address, maxRows int) *indexStream[moolahMarketRow, common.Hash] {
+	return &indexStream[moolahMarketRow, common.Hash]{
+		Entity: entity, Account: account, MaxRows: maxRows,
+		Where: func(chainID ChainID) indexWhere {
+			return indexWhere{Prefix: indexAccountPrefix(chainID, account), Terms: []indexTerm{
+				{"chainId", int(chainID)}, {"account", strings.ToLower(account.Hex())},
+			}}
 		},
-		&payload,
-	)
-	if err != nil {
-		return morphoFeeMarketPage{}, err
-	}
-	if len(payload.Errors) > 0 {
-		messages := make([]string, 0, len(payload.Errors))
-		for _, graphQLError := range payload.Errors {
-			messages = append(messages, graphQLError.Message)
-		}
-		return morphoFeeMarketPage{}, fmt.Errorf("GraphQL: %s", strings.Join(messages, "; "))
-	}
-	prefix := morphoFeeMarketRowPrefix(chainID)
-	page := morphoFeeMarketPage{RowIDs: make([]string, 0, len(payload.Data.Markets))}
-	for _, row := range payload.Data.Markets {
-		if row.ChainID != int(chainID) || !strings.HasPrefix(row.ID, prefix) || row.ID <= after ||
-			!strings.HasPrefix(row.MarketID, "0x") || len(row.MarketID) != 66 {
-			return morphoFeeMarketPage{}, fmt.Errorf("GraphQL returned malformed fee-market row %q", row.ID)
-		}
-		marketID := common.HexToHash(row.MarketID)
-		if row.ID != prefix+strings.ToLower(marketID.Hex()) {
-			return morphoFeeMarketPage{}, fmt.Errorf("GraphQL returned foreign fee-market row %q", row.ID)
-		}
-		fee, valid := new(big.Int).SetString(row.Fee, 10)
-		if !valid || fee.Sign() < 0 {
-			return morphoFeeMarketPage{}, fmt.Errorf("GraphQL returned invalid fee for row %q", row.ID)
-		}
-		page.RowIDs = append(page.RowIDs, row.ID)
-		if fee.Sign() > 0 {
-			page.ActiveMarketIDs = append(page.ActiveMarketIDs, marketID)
-		}
-	}
-	return page, nil
-}
-
-func morphoRowPrefix(chainID ChainID, account common.Address) string {
-	return fmt.Sprintf("%d:%s:", chainID, strings.ToLower(account.Hex()))
-}
-
-func (i *morphoIndexer) graphqlPage(
-	ctx context.Context,
-	chainID ChainID,
-	account common.Address,
-	marketAfter string,
-	vaultAfter string,
-	block uint64,
-	start indexStart,
-) (morphoGraphQLPage, error) {
-	prefix := morphoRowPrefix(chainID, account)
-	var payload morphoGraphQLResponse
-	err := i.api.doJSON(
-		ctx,
-		http.MethodPost,
-		i.config.GraphQLURL,
-		map[string]any{
-			"query": morphoWalletQuery,
-			"variables": map[string]any{
-				"chainId": int(chainID), "account": strings.ToLower(account.Hex()), "idPrefix": prefix,
-				"marketAfter": marketAfter, "vaultAfter": vaultAfter,
-				"checkpoint": strconv.FormatUint(uint64(chainID), 10),
-				"first":      morphoIndexerPageSize, "block": strconv.FormatUint(block, 10),
-			},
+		Decode: func(chainID ChainID, id string, row moolahMarketRow) (common.Hash, error) {
+			if row.ChainID != int(chainID) || !strings.EqualFold(row.Account, account.Hex()) || !validHash(row.MarketID) {
+				return common.Hash{}, fmt.Errorf("GraphQL returned malformed market row %q", id)
+			}
+			marketID := common.HexToHash(row.MarketID)
+			if id != indexAccountPrefix(chainID, account)+strings.ToLower(marketID.Hex()) {
+				return common.Hash{}, fmt.Errorf("GraphQL returned foreign market row %q", id)
+			}
+			return marketID, nil
 		},
-		&payload,
-	)
-	if err != nil {
-		return morphoGraphQLPage{}, err
 	}
-	if len(payload.Errors) > 0 {
-		messages := make([]string, 0, len(payload.Errors))
-		for _, graphQLError := range payload.Errors {
-			messages = append(messages, graphQLError.Message)
-		}
-		return morphoGraphQLPage{}, fmt.Errorf("GraphQL: %s", strings.Join(messages, "; "))
-	}
-	checkpointBlock, checkpointMS, err := start.checkpoint(ctx, payload.Data.Checkpoints)
-	if err != nil {
-		return morphoGraphQLPage{}, err
-	}
-	page := morphoGraphQLPage{CheckpointBlock: checkpointBlock, CheckpointMS: checkpointMS}
-	for _, row := range payload.Data.Markets {
-		if row.ChainID != int(chainID) || !strings.EqualFold(row.Account, account.Hex()) ||
-			!strings.HasPrefix(row.ID, prefix) || row.ID <= marketAfter ||
-			!strings.HasPrefix(row.MarketID, "0x") || len(row.MarketID) != 66 {
-			return morphoGraphQLPage{}, fmt.Errorf("GraphQL returned malformed market row %q", row.ID)
-		}
-		marketID := common.HexToHash(row.MarketID)
-		if row.ID != prefix+strings.ToLower(marketID.Hex()) {
-			return morphoGraphQLPage{}, fmt.Errorf("GraphQL returned foreign market row %q", row.ID)
-		}
-		page.MarketIDs = append(page.MarketIDs, marketID)
-		page.MarketRowIDs = append(page.MarketRowIDs, row.ID)
-	}
-	for _, row := range payload.Data.Vaults {
-		if row.ChainID != int(chainID) || !strings.EqualFold(row.Account, account.Hex()) ||
-			!strings.HasPrefix(row.ID, prefix) || row.ID <= vaultAfter || !common.IsHexAddress(row.Vault) {
-			return morphoGraphQLPage{}, fmt.Errorf("GraphQL returned malformed vault row %q", row.ID)
-		}
-		vault := common.HexToAddress(row.Vault)
-		if row.ID != prefix+strings.ToLower(vault.Hex()) {
-			return morphoGraphQLPage{}, fmt.Errorf("GraphQL returned foreign vault row %q", row.ID)
-		}
-		version := morphoVaultVersion(row.Version)
-		if version != morphoVaultV1 && version != morphoVaultV2 {
-			return morphoGraphQLPage{}, fmt.Errorf("GraphQL returned invalid vault version %q", row.Version)
-		}
-		page.Vaults = append(page.Vaults, morphoVaultRef{Address: vault, Version: version})
-		page.VaultRowIDs = append(page.VaultRowIDs, row.ID)
-	}
-	return page, nil
 }
 
-// presenceProbe asks every Morpho chain at once whether the account holds any market or vault
+// moolahFeeMarketRow is a market whose fee accrues to the core contract's fee recipient. Its id is
+// the chain and the market ID: the rows are the chain's, not an account's.
+type moolahFeeMarketRow struct {
+	ChainID  int    `json:"chainId"`
+	MarketID string `json:"marketId"`
+	Fee      string `json:"fee"`
+}
+
+// moolahFeeMarket is a fee market and whether it charges a fee at all.
+type moolahFeeMarket struct {
+	MarketID common.Hash
+	Active   bool
+}
+
+// moolahFeeMarketStream reads every fee market of the chain, which the fee recipient holds a fee
+// position in. The rows are not an account's, so a read that includes them is never proven empty.
+func moolahFeeMarketStream(entity string) *indexStream[moolahFeeMarketRow, moolahFeeMarket] {
+	return &indexStream[moolahFeeMarketRow, moolahFeeMarket]{
+		Entity: entity, MaxRows: morphoMaxFeeMarketRows,
+		Where: func(chainID ChainID) indexWhere {
+			return indexWhere{Prefix: fmt.Sprintf("%d:", chainID), Terms: []indexTerm{{"chainId", int(chainID)}}}
+		},
+		Decode: func(chainID ChainID, id string, row moolahFeeMarketRow) (moolahFeeMarket, error) {
+			if row.ChainID != int(chainID) || !validHash(row.MarketID) {
+				return moolahFeeMarket{}, fmt.Errorf("GraphQL returned malformed fee-market row %q", id)
+			}
+			marketID := common.HexToHash(row.MarketID)
+			if id != fmt.Sprintf("%d:%s", chainID, strings.ToLower(marketID.Hex())) {
+				return moolahFeeMarket{}, fmt.Errorf("GraphQL returned foreign fee-market row %q", id)
+			}
+			fee, valid := new(big.Int).SetString(row.Fee, 10)
+			if !valid || fee.Sign() < 0 {
+				return moolahFeeMarket{}, fmt.Errorf("GraphQL returned invalid fee for row %q", id)
+			}
+			return moolahFeeMarket{MarketID: marketID, Active: fee.Sign() > 0}, nil
+		},
+	}
+}
+
+// activeFeeMarkets are the fee markets that charge a fee.
+func activeFeeMarkets(markets []moolahFeeMarket) []common.Hash {
+	active := make([]common.Hash, 0, len(markets))
+	for _, market := range markets {
+		if market.Active {
+			active = append(active, market.MarketID)
+		}
+	}
+	return active
+}
+
+func validHash(value string) bool {
+	return strings.HasPrefix(value, "0x") && len(value) == 66
+}
+
+type morphoVaultRow struct {
+	ChainID int    `json:"chainId"`
+	Account string `json:"account"`
+	Vault   string `json:"vault"`
+	Version string `json:"version"`
+}
+
+func morphoVaultStream(account common.Address) *indexStream[morphoVaultRow, morphoVaultRef] {
+	return &indexStream[morphoVaultRow, morphoVaultRef]{
+		Entity: "morphoVaultPositionRefs", Account: account, MaxRows: morphoMaxIndexedVaults,
+		Where: func(chainID ChainID) indexWhere {
+			return indexWhere{Prefix: indexAccountPrefix(chainID, account), Terms: []indexTerm{
+				{"chainId", int(chainID)}, {"account", strings.ToLower(account.Hex())},
+			}}
+		},
+		Decode: func(chainID ChainID, id string, row morphoVaultRow) (morphoVaultRef, error) {
+			if row.ChainID != int(chainID) || !strings.EqualFold(row.Account, account.Hex()) || !common.IsHexAddress(row.Vault) {
+				return morphoVaultRef{}, fmt.Errorf("GraphQL returned malformed vault row %q", id)
+			}
+			vault := common.HexToAddress(row.Vault)
+			if id != indexAccountPrefix(chainID, account)+strings.ToLower(vault.Hex()) {
+				return morphoVaultRef{}, fmt.Errorf("GraphQL returned foreign vault row %q", id)
+			}
+			version := morphoVaultVersion(row.Version)
+			if version != morphoVaultV1 && version != morphoVaultV2 {
+				return morphoVaultRef{}, fmt.Errorf("GraphQL returned invalid vault version %q", row.Version)
+			}
+			return morphoVaultRef{Address: vault, Version: version}, nil
+		},
+	}
+}
+
+// prefetchPresence asks every Morpho chain at once whether the account holds any market or vault
 // position, so a scan queries only the chains where it does.
-func (i *morphoIndexer) presenceProbe(account common.Address) presenceProbe {
-	owner := strings.ToLower(account.Hex())
-	where := func(chainID ChainID) string {
-		return fmt.Sprintf("chainId: %d, account: \"%s\", id_starts_with: \"%s\"", chainID, owner, morphoRowPrefix(chainID, account))
-	}
-	return presenceProbe{
-		name:           "morpho-blue",
-		config:         i.config,
-		requiredChains: i.requiredChains,
-		fields: []presenceField{
-			{entity: "morphoMarketPositionRefs", where: where},
-			{entity: "morphoVaultPositionRefs", where: where},
-		},
-	}
-}
-
 func (i *morphoIndexer) prefetchPresence(ctx context.Context, account common.Address) {
-	i.api.prefetchPresence(ctx, i.presenceProbe(account), strings.ToLower(account.Hex()))
-}
-
-func (i *morphoIndexer) indexedRefs(
-	ctx context.Context,
-	block BlockRef,
-	account common.Address,
-	includeFeeMarkets bool,
-	start indexStart,
-) (morphoPositionRefs, error) {
-	statuses, queryBlock, err := indexQueryBlock(block, func(forceRefresh bool) (map[ChainID]sentioChainStatus, error) {
-		return i.api.chainStatusesForScan(ctx, i.config, i.requiredChains, block.ChainID, forceRefresh)
-	})
-	if err != nil {
-		return morphoPositionRefs{}, err
-	}
-	result := morphoPositionRefs{IndexerBlock: queryBlock}
-	// The fee-market surface is keyed by chain, not account, so only an account-only query can be
-	// answered by the probe.
-	if !includeFeeMarkets {
-		proof, empty := i.api.chainProvenEmpty(ctx, i.presenceProbe(account), block, strings.ToLower(account.Hex()), statuses)
-		if empty {
-			// The proof may predate this status read; it is the block the answer holds at.
-			result.IndexerBlock = proof.QueryBlock
-			return dedupeMorphoRefs(result)
-		}
-	}
-	// Only the pages take a lane slot: the status read needs none, and a chain the probe proved
-	// empty sends nothing.
-	release, err := lockSentioLane(ctx)
-	if err != nil {
-		return morphoPositionRefs{}, err
-	}
-	defer release()
-	prefix := morphoRowPrefix(block.ChainID, account)
-	marketAfter := prefix
-	vaultAfter := prefix
-	marketDone := false
-	vaultDone := false
-	var checkpointBlock uint64
-	var checkpointMS uint64
-	firstPage := true
-	for !marketDone || !vaultDone {
-		page, pageErr := i.graphqlPage(
-			ctx, block.ChainID, account, marketAfter, vaultAfter, queryBlock, start,
-		)
-		if pageErr != nil {
-			return morphoPositionRefs{}, pageErr
-		}
-		if firstPage {
-			if result.Lag, err = checkIndexCheckpoint(block, page.CheckpointBlock, page.CheckpointMS); err != nil {
-				return morphoPositionRefs{}, err
-			}
-			checkpointBlock, checkpointMS = page.CheckpointBlock, page.CheckpointMS
-			firstPage = false
-		} else if page.CheckpointBlock != checkpointBlock || page.CheckpointMS != checkpointMS {
-			return morphoPositionRefs{}, fmt.Errorf("GraphQL pagination changed checkpoint")
-		}
-		if !marketDone {
-			for index, rowID := range page.MarketRowIDs {
-				if rowID <= marketAfter {
-					return morphoPositionRefs{}, fmt.Errorf("market rows are not ordered")
-				}
-				marketAfter = rowID
-				result.MarketIDs = append(result.MarketIDs, page.MarketIDs[index])
-			}
-			marketDone = len(page.MarketRowIDs) < morphoIndexerPageSize
-		}
-		if !vaultDone {
-			for index, rowID := range page.VaultRowIDs {
-				if rowID <= vaultAfter {
-					return morphoPositionRefs{}, fmt.Errorf("vault rows are not ordered")
-				}
-				vaultAfter = rowID
-				result.Vaults = append(result.Vaults, page.Vaults[index])
-			}
-			vaultDone = len(page.VaultRowIDs) < morphoIndexerPageSize
-		}
-		if len(result.MarketIDs) > morphoMaxIndexedMarkets {
-			return morphoPositionRefs{}, fmt.Errorf("account has more than %d indexed Morpho markets", morphoMaxIndexedMarkets)
-		}
-		if len(result.Vaults) > morphoMaxIndexedVaults {
-			return morphoPositionRefs{}, fmt.Errorf("account has more than %d indexed Morpho vaults", morphoMaxIndexedVaults)
-		}
-	}
-	if includeFeeMarkets {
-		feeAfter := morphoFeeMarketRowPrefix(block.ChainID)
-		feeRows := 0
-		for {
-			page, pageErr := i.graphqlFeeMarketPage(ctx, block.ChainID, feeAfter, queryBlock)
-			if pageErr != nil {
-				return morphoPositionRefs{}, pageErr
-			}
-			for _, rowID := range page.RowIDs {
-				if rowID <= feeAfter {
-					return morphoPositionRefs{}, fmt.Errorf("fee-market rows are not ordered")
-				}
-				feeAfter = rowID
-			}
-			feeRows += len(page.RowIDs)
-			if feeRows > morphoMaxFeeMarketRows {
-				return morphoPositionRefs{}, fmt.Errorf(
-					"chain has more than %d indexed Morpho fee markets",
-					morphoMaxFeeMarketRows,
-				)
-			}
-			result.MarketIDs = append(result.MarketIDs, page.ActiveMarketIDs...)
-			if len(page.RowIDs) < morphoIndexerPageSize {
-				break
-			}
-		}
-	}
-	return dedupeMorphoRefs(result)
+	i.index.prefetchPresence(ctx,
+		moolahMarketStream("morphoMarketPositionRefs", account, morphoMaxIndexedMarkets), morphoVaultStream(account))
 }
 
 // dedupeMorphoRefs sorts the identifiers a read collected and drops the repeats: a fee market can
@@ -498,16 +237,33 @@ func (i *morphoIndexer) PositionRefs(
 	if err != nil {
 		return morphoPositionRefs{}, fmt.Errorf("Morpho fee recipient at pinned block: %w", err)
 	}
-	includeCurrentFeeMarkets := feeRecipient != (common.Address{}) && feeRecipient == account
-	if !includeCurrentFeeMarkets {
-		i.api.awaitPresence(ctx, i.presenceProbe(account), strings.ToLower(account.Hex()))
+	return i.refs(ctx, client, block, account, feeRecipient != (common.Address{}) && feeRecipient == account)
+}
+
+// refs reads the markets and vaults account holds a position in on block's chain, and the chain's
+// fee markets when the account is their fee recipient.
+func (i *morphoIndexer) refs(
+	ctx context.Context,
+	client *RPCClient,
+	block BlockRef,
+	account common.Address,
+	feeRecipient bool,
+) (morphoPositionRefs, error) {
+	markets := moolahMarketStream("morphoMarketPositionRefs", account, morphoMaxIndexedMarkets)
+	vaults := morphoVaultStream(account)
+	streams := []indexStreamer{markets, vaults}
+	// The fee recipient holds a position in every market charging a fee.
+	feeMarkets := moolahFeeMarketStream("morphoFeeMarkets")
+	if feeRecipient {
+		streams = append(streams, feeMarkets)
 	}
-	indexed, err := i.indexedRefs(
-		ctx, block, account, includeCurrentFeeMarkets,
-		indexStart{client: client, block: deployment.Window.ActivationBlock},
-	)
+	at, err := i.index.read(ctx, client, block, streams...)
 	if err != nil {
 		return morphoPositionRefs{}, fmt.Errorf("Morpho index query: %w", err)
 	}
-	return indexed, nil
+	return dedupeMorphoRefs(morphoPositionRefs{
+		IndexerBlock: at.QueryBlock,
+		MarketIDs:    append(markets.Rows(), activeFeeMarkets(feeMarkets.Rows())...),
+		Vaults:       vaults.Rows(),
+	})
 }

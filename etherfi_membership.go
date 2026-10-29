@@ -25,16 +25,15 @@ func (a *EtherfiAdapter) readMemberships(
 	client *RPCClient,
 	block BlockRef,
 	account common.Address,
-) ([]Group, *indexLagNote, error) {
+) ([]Group, error) {
 	if block.ChainID != Ethereum || block.Number < etherfiMembershipActivationBlock {
-		return nil, nil, nil
+		return nil, nil
 	}
-	refs, lag, err := a.indexer.PositionRefs(ctx, block, account, []common.Address{etherfiMembershipNFT})
+	refs, err := a.indexer.PositionRefs(ctx, block, account, []common.Address{etherfiMembershipNFT})
 	if err != nil {
-		return nil, nil, fmt.Errorf("membership enumeration: %w", err)
+		return nil, fmt.Errorf("membership enumeration: %w", err)
 	}
-	groups, err := a.membershipGroups(ctx, client, block, account, refs)
-	return groups, lag, err
+	return a.membershipGroups(ctx, client, block, account, refs)
 }
 
 func (a *EtherfiAdapter) membershipGroups(

@@ -143,6 +143,8 @@ func newSentioTransport() *http.Transport {
 	return transport
 }
 
+// doJSON sends one request outside the indexer lane: the processor status read, which runs none of
+// the key's queries.
 func (c *sentioAPIClient) doJSON(
 	ctx context.Context,
 	method string,
@@ -150,10 +152,59 @@ func (c *sentioAPIClient) doJSON(
 	body any,
 	result any,
 ) error {
-	return c.doJSONAttempts(ctx, method, endpoint, body, result, 3)
+	return c.doJSONAttempts(ctx, method, endpoint, body, result, 3, nil)
 }
 
-func (c *sentioAPIClient) doJSONAttempts(ctx context.Context, method, endpoint string, body, result any, attempts int) error {
+// graphql sends one GraphQL query and decodes the data it answers into data. Each attempt holds a
+// lane slot for its own round trip and gives it back before a retry waits, so no wait — a status
+// read, a presence proof, a retry's backoff, a stand-in's block read — ever holds a slot.
+func (c *sentioAPIClient) graphql(ctx context.Context, endpoint, query string, data any) error {
+	var envelope graphQLEnvelope
+	err := c.doJSONAttempts(ctx, http.MethodPost, endpoint, map[string]any{"query": query}, &envelope, 3, lockSentioLane)
+	if err != nil {
+		return err
+	}
+	if len(envelope.Errors) > 0 {
+		messages := make([]string, 0, len(envelope.Errors))
+		for _, graphQLError := range envelope.Errors {
+			messages = append(messages, graphQLError.Message)
+		}
+		return redactEndpoints(fmt.Errorf("GraphQL: %s", strings.Join(messages, "; ")))
+	}
+	if err := json.Unmarshal(envelope.Data, data); err != nil {
+		return fmt.Errorf("GraphQL returned malformed data: %w", err)
+	}
+	return nil
+}
+
+// graphQLEnvelope is a GraphQL response. Each attempt decodes it afresh, so an attempt that failed
+// to decode leaves nothing behind for the one that answers after it.
+type graphQLEnvelope struct {
+	Data   json.RawMessage `json:"data"`
+	Errors []struct {
+		Message string `json:"message"`
+	} `json:"errors"`
+}
+
+func (e *graphQLEnvelope) UnmarshalJSON(body []byte) error {
+	type fields graphQLEnvelope
+	var decoded fields
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		return err
+	}
+	*e = graphQLEnvelope(decoded)
+	return nil
+}
+
+// doJSONAttempts sends one request, retrying what may answer differently. admit, when set, is
+// called before each attempt and its release after the attempt's round trip.
+func (c *sentioAPIClient) doJSONAttempts(
+	ctx context.Context,
+	method, endpoint string,
+	body, result any,
+	attempts int,
+	admit func(context.Context) (func(), error),
+) error {
 	if c.apiKey == "" {
 		return fmt.Errorf("Sentio API key is not configured")
 	}
@@ -166,8 +217,18 @@ func (c *sentioAPIClient) doJSONAttempts(ctx context.Context, method, endpoint s
 	}
 	var last error
 	for attempt := 0; attempt < attempts; attempt++ {
+		var release func()
+		if admit != nil {
+			var err error
+			if release, err = admit(ctx); err != nil {
+				return err
+			}
+		}
 		startedAt := time.Now()
 		retry, err := c.roundTrip(ctx, method, endpoint, payload, result)
+		if release != nil {
+			release()
+		}
 		observeIndexerRequest(ctx, method, attempt, startedAt, err)
 		if err == nil {
 			return nil
@@ -316,8 +377,9 @@ func validateSentioChainStatuses(
 // while it runs shares — its failure too, which is not cached. Each caller waits for the read or
 // for its own context, whichever ends first: the read runs on a context of its own, carrying ctx's
 // values but not its cancellation and bounded by statusTimeout, so the caller that happened to
-// start it can leave without failing the others. The read takes no indexer lane slot. Callers ask
-// while holding one, and with a lane of one a read that needed a slot would never get it.
+// start it can leave without failing the others. The read takes no indexer lane slot: it runs none
+// of the key's queries, and every chain job of the processor waits on it, so a read queued behind
+// the lane would hold them all back.
 func (c *sentioAPIClient) chainStatuses(
 	ctx context.Context,
 	config SentioIndexerConfig,

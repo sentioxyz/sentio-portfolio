@@ -2,7 +2,6 @@ package portfolio
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/big"
 	"sort"
@@ -273,7 +272,7 @@ func (a *AsterAdapter) readWithdrawalRequests(
 	client *RPCClient,
 	block BlockRef,
 	account common.Address,
-) ([]Group, *indexLagNote, error) {
+) ([]Group, error) {
 	active := make([]asterWithdrawalContract, 0, len(a.withdrawals))
 	contracts := make([]common.Address, 0, len(a.withdrawals))
 	byAddress := make(map[common.Address]asterWithdrawalContract, len(a.withdrawals))
@@ -286,14 +285,13 @@ func (a *AsterAdapter) readWithdrawalRequests(
 		byAddress[withdrawal.Address] = withdrawal
 	}
 	if len(active) == 0 {
-		return nil, nil, nil
+		return nil, nil
 	}
 	snapshot, err := a.indexer.IndexedRefs(ctx, block, account, contracts)
 	if err != nil {
-		return nil, nil, fmt.Errorf("withdrawal request index: %w", err)
+		return nil, fmt.Errorf("withdrawal request index: %w", err)
 	}
-	groups, err := a.withdrawalGroups(ctx, client, block, account, byAddress, snapshot.Refs)
-	return groups, snapshot.Lag, err
+	return a.withdrawalGroups(ctx, client, block, account, byAddress, snapshot.Refs)
 }
 
 func (a *AsterAdapter) withdrawalGroups(
@@ -406,16 +404,15 @@ func (a *AsterAdapter) readMintRequests(
 	client *RPCClient,
 	block BlockRef,
 	account common.Address,
-) ([]Group, *indexLagNote, error) {
+) ([]Group, error) {
 	if block.ChainID != BSC || block.Number < asterAsBNBMinterActivation {
-		return nil, nil, nil
+		return nil, nil
 	}
 	snapshot, err := a.indexer.IndexedRefs(ctx, block, account, []common.Address{asterAsBNBMinter})
 	if err != nil {
-		return nil, nil, fmt.Errorf("mint request index: %w", err)
+		return nil, fmt.Errorf("mint request index: %w", err)
 	}
-	groups, err := a.mintGroups(ctx, client, block, account, snapshot.Refs)
-	return groups, snapshot.Lag, err
+	return a.mintGroups(ctx, client, block, account, snapshot.Refs)
 }
 
 func (a *AsterAdapter) mintGroups(
@@ -513,14 +510,14 @@ func (a *AsterAdapter) Positions(
 	if err != nil {
 		return nil, err
 	}
-	requests, mintLag, err := a.readMintRequests(ctx, client, block, account)
+	requests, err := a.readMintRequests(ctx, client, block, account)
 	if err != nil {
-		return groups, errors.Join(err, mintLag.err())
+		return groups, err
 	}
 	groups = append(groups, requests...)
-	withdrawals, withdrawalLag, err := a.readWithdrawalRequests(ctx, client, block, account)
+	withdrawals, err := a.readWithdrawalRequests(ctx, client, block, account)
 	if err != nil {
-		return groups, errors.Join(err, mintLag.err(), withdrawalLag.err())
+		return groups, err
 	}
-	return append(groups, withdrawals...), errors.Join(mintLag.err(), withdrawalLag.err())
+	return append(groups, withdrawals...), nil
 }

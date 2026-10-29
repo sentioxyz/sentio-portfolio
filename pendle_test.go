@@ -84,7 +84,6 @@ func TestPendleActivationBlockIsTheOldestGeneration(t *testing.T) {
 
 type stubPendleIndexer struct {
 	refs          []pendlePositionRef
-	lag           *indexLagNote
 	markets       map[common.Address][]common.Address
 	err           error
 	called        bool
@@ -97,14 +96,14 @@ func (s *stubPendleIndexer) PositionRefs(
 	*RPCClient,
 	BlockRef,
 	common.Address,
-) ([]pendlePositionRef, *indexLagNote, error) {
+) ([]pendlePositionRef, indexAt, error) {
 	s.called = true
-	return s.refs, s.lag, s.err
+	return s.refs, indexAt{}, s.err
 }
 
 func (s *stubPendleIndexer) MarketsForPT(
 	_ context.Context,
-	_ BlockRef,
+	_ indexAt,
 	pts []common.Address,
 ) (map[common.Address][]common.Address, error) {
 	s.marketsCalled = true
@@ -201,7 +200,7 @@ func TestPendleTokenKindValidationRejectsUnknownKinds(t *testing.T) {
 func TestPendleRowIdentitiesAreLowercaseAndStable(t *testing.T) {
 	account := common.HexToAddress("0xC02dd10b401E01E0fb3BF497E46E6d6b51664AD7")
 	token := common.HexToAddress("0xDC169ABe56461a2e0C034DA431aC2A3EBF596094")
-	if got, want := pendleRefRowPrefix(Ethereum, account),
+	if got, want := indexAccountPrefix(Ethereum, account),
 		"1:0xc02dd10b401e01e0fb3bf497e46e6d6b51664ad7:"; got != want {
 		t.Fatalf("ref prefix = %q, want %q", got, want)
 	}
@@ -210,8 +209,8 @@ func TestPendleRowIdentitiesAreLowercaseAndStable(t *testing.T) {
 		t.Fatalf("token row id = %q, want %q", got, want)
 	}
 	if !strings.HasPrefix(
-		pendleRefRowPrefix(Ethereum, account)+strings.ToLower(token.Hex()),
-		pendleRefRowPrefix(Ethereum, account),
+		indexAccountPrefix(Ethereum, account)+strings.ToLower(token.Hex()),
+		indexAccountPrefix(Ethereum, account),
 	) {
 		t.Fatal("position row id does not extend its account prefix")
 	}

@@ -2,7 +2,6 @@ package portfolio
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/big"
 
@@ -116,12 +115,12 @@ func (a *FraxEtherAdapter) Positions(
 		queueAddresses = append(queueAddresses, queue.Address)
 		queueByAddress[queue.Address] = queue
 	}
-	refs, lag, err := a.indexer.PositionRefs(ctx, block, account, queueAddresses)
+	refs, err := a.indexer.PositionRefs(ctx, block, account, queueAddresses)
 	if err != nil {
 		return groups, fmt.Errorf("redemption queue enumeration: %w", err)
 	}
 	tickets, err := ticketGroups(ctx, client, block, account, queueByAddress, refs)
-	return append(groups, tickets...), errors.Join(err, lag.err())
+	return append(groups, tickets...), err
 }
 
 // ticketGroups values the redemption tickets the index lists for account.
