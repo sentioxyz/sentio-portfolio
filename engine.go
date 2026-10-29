@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -25,6 +26,8 @@ type Engine struct {
 	indexerLane           *indexerLane
 	disabledChains        map[ChainID]struct{}
 	scanWorkers           int
+	// sentioIndexers is the host's index configuration, kept for the Sui engine built from this one.
+	sentioIndexers map[string]SentioIndexerConfig
 }
 
 // defaultHeadLagBlocks is how far behind the advertised head a live scan pins itself. Four blocks
@@ -201,6 +204,7 @@ func NewEngineWithConfig(
 		indexerLane:           newIndexerLane(config.IndexerConcurrency),
 		disabledChains:        disabledChains,
 		scanWorkers:           config.ScanWorkers,
+		sentioIndexers:        maps.Clone(config.SentioIndexers),
 	}
 }
 

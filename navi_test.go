@@ -110,7 +110,7 @@ func naviCalculationSource(t *testing.T, objects []suiProtocolObject, values []s
 	t.Helper()
 	return &naviCalculationFixture{objects, values}
 }
-func (f *naviCalculationFixture) Read(ctx context.Context, protocol string, owner SuiAddress, pin SuiCheckpoint, reader SuiReader) (SuiProtocolPositions, error) {
+func (f *naviCalculationFixture) Read(ctx context.Context, protocol string, owner SuiAddress, pin SuiCheckpoint, reader SuiReader) (suiPositions, error) {
 	state := suiProtocolState{VaultPrices: map[string]suiProtocolObject{}}
 	for _, o := range f.objects {
 		switch o.Kind {
@@ -147,7 +147,7 @@ func (f *naviCalculationFixture) Read(ctx context.Context, protocol string, owne
 			}
 		}
 	}
-	result := SuiProtocolPositions{ProtocolID: protocol, Checkpoint: pin}
+	result := suiPositions{ProtocolID: protocol, Checkpoint: pin}
 	if protocol == "navi" {
 		groups, err := naviLending(ctx, owner, pin, reader, state)
 		if err != nil {

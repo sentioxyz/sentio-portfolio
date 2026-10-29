@@ -71,7 +71,7 @@ func createdSuiRoots(ctx context.Context, reader SuiObjectReader, changes []SuiO
 	return ids, nil
 }
 
-func (r *SuiProtocolReader) discoverNaviMarkets(ctx context.Context, reader SuiObjectReader) ([]string, error) {
+func (r *suiNodeProtocols) discoverNaviMarkets(ctx context.Context, reader SuiObjectReader) ([]string, error) {
 	lineage, ok := reader.(SuiObjectLineageReader)
 	if !ok {
 		return nil, fmt.Errorf("Sui object lineage reads are unavailable")
@@ -159,7 +159,7 @@ func (r *SuiProtocolReader) discoverNaviMarkets(ctx context.Context, reader SuiO
 	return ids, nil
 }
 
-func (r *SuiProtocolReader) discoverVoloOracle(ctx context.Context, reader SuiObjectReader) ([]string, error) {
+func (r *suiNodeProtocols) discoverVoloOracle(ctx context.Context, reader SuiObjectReader) ([]string, error) {
 	lineage, ok := reader.(SuiObjectLineageReader)
 	if !ok {
 		return nil, fmt.Errorf("Sui object lineage reads are unavailable")

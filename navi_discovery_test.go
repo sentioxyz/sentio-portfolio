@@ -12,7 +12,7 @@ func TestNaviDiscoveryCachesAndFollowsOnlyNewCreations(t *testing.T) {
 	f.addMarket(0, 2, "0x11", "1", false)
 	f.addMarket(1, 2, "0x11", "1", false)
 	f.addMarket(2, 2, "0x11", "1", false)
-	r := NewSuiProtocolReader()
+	r := newSuiNodeProtocols()
 	ctx := context.Background()
 	ids, err := r.discoverNaviMarkets(ctx, f)
 	if err != nil || len(ids) != 3 || f.transactionReads != 1 {
@@ -60,7 +60,7 @@ func TestNaviDiscoveryRejectsBrokenLineageAndDoesNotCacheFailure(t *testing.T) {
 			case "duplicate creation":
 				f.transactions[suiTestDigest] = append(f.transactions[suiTestDigest], f.transactions[suiTestDigest][1])
 			}
-			r := NewSuiProtocolReader()
+			r := newSuiNodeProtocols()
 			if _, err := r.discoverNaviMarkets(context.Background(), f); err == nil || len(r.markets.ids) != 0 {
 				t.Fatalf("accepted/cached %s: %v", broken, err)
 			}
@@ -74,7 +74,7 @@ func TestVoloOracleDiscoveredFromPublicationAndCached(t *testing.T) {
 	oracle := latestObject("0x44", voloVaultPackage+"::vault_oracle::OracleConfig", "SHARED", "", map[string]any{})
 	f.objects[oracle.ID] = oracle
 	f.transactions[suiTestDigest] = []SuiObjectChange{{ID: oracle.ID, OwnerKind: "SHARED", Created: true}}
-	r := NewSuiProtocolReader()
+	r := newSuiNodeProtocols()
 	for range 2 {
 		ids, err := r.discoverVoloOracle(context.Background(), f)
 		if err != nil || len(ids) != 1 || ids[0] != oracle.ID {
@@ -87,7 +87,7 @@ func TestVoloOracleDiscoveredFromPublicationAndCached(t *testing.T) {
 }
 
 func TestSuiDiscoveryWaitCanBeCanceled(t *testing.T) {
-	r := NewSuiProtocolReader()
+	r := newSuiNodeProtocols()
 	r.markets.gate <- struct{}{}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -102,7 +102,7 @@ func TestNaviDiscoveryCoalescesConcurrentColdScans(t *testing.T) {
 	f := latestFixture()
 	f.addMarket(0, 1, "0x11", "1", false)
 	f.addMarket(1, 1, "0x11", "1", false)
-	r := NewSuiProtocolReader()
+	r := newSuiNodeProtocols()
 	var wg sync.WaitGroup
 	for range 8 {
 		wg.Go(func() {

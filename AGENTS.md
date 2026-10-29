@@ -223,6 +223,42 @@ discovery is still writing; whatever reconciles holdings with positions, such as
 
 ## Sui reads
 
+A host reads Sui only through the Sui engine (`sui_engine*.go`): `NewSuiEngine` builds it from an
+`Engine`, whose indexer lane, observer and `SentioIndexers` it shares, and `Scan`,
+`ScanWithOptions` and `ScanRange` are its only reads. The rules it owns, each once:
+
+- Where a protocol is read lives in `suiRoutes` alone: one source for its latest state and one for
+  its pinned state. A read never falls back from one source to another — a NAVI node failure is not
+  answered from NAVI's index, an unconfigured Suilend index is not answered from the node —
+  because each answers for a different checkpoint.
+- A pinned scan never reads node state. A protocol with no pinned source reports that it was not
+  read; the only node request a pinned scan makes is wallet coin metadata, which is immutable. A
+  request whose protocols are all indexed never dials the node, and a node that cannot be dialled
+  costs only the protocols that need it.
+- A pinned time scan is a range scan of one instant, so `ScanRange([t])[0]` and
+  `ScanWithOptions(SuiAtTime(t))` answer alike; keep them on one path.
+- An indexed latest read must name a whole sample (nonzero sequence, digest and timestamp) no
+  older than `suiIndexedLatestMaxAge` and not in the future; a pinned one must not postdate its
+  pin. Anything else is a protocol error, not a position.
+- The wallet's past comes from the host's `SuiWalletHistory`, read at the one checkpoint every
+  protocol of the instant is aligned to (`alignSamples`). Without that adapter, or without a
+  protocol sample to pin to, the wallet is reported unread, never empty. The adapter must fail
+  rather than answer for a checkpoint it has not ingested through; only `ErrSuiWalletNotCovered`
+  is an answer, every other failure is retried.
+- Value head state at the latest quote and a sample at its own timestamp, through `SuiPrices`, and
+  never substitute one for the other. An unquoted protocol coin is a reported gap; an unquoted
+  wallet coin is left for the host to hide, as on EVM chains. A `SuiPriceFailure` marked
+  `Unavailable` makes a range instant retry; a missing quote does not.
+- A range instant retries only when a source did not answer. An index that answered — even with a
+  sample it could not certify — is final. Reads stop short of the deadline (`suiRangePriceReserve`,
+  at most a quarter of what is left) so what they read is still priced, and what they did not reach
+  wraps `ErrSuiRangeUnread`.
+- Test these rules through the engine (`sui_engine_test.go`): the index, node, price and wallet
+  sources are fakes behind their seams, and a test asserts on the `SuiResponse` and on what each
+  source was asked.
+
+The transports and indexes underneath:
+
 Sui is read through `SuiReader` (`sui.go`), implemented by `SuiGRPCClient` (`sui_grpc.go`) over
 the `sui.rpc.v2` services a fullnode, or a proxy in front of one, serves. The rules:
 
@@ -234,12 +270,12 @@ the `sui.rpc.v2` services a fullnode, or a proxy in front of one, serves. The ru
   bounds on the object versions returned. A consumer must surface a
   head read as such; the rule that a latest amount is never labelled with an earlier `BlockRef`
   applies here too.
-- Direct wallet history is unavailable. A pinned read (`Holdings` with a non-nil checkpoint)
-  returns no balances with `HistoryUnsupported` set and makes no round trip; it never reads the
-  head under the pin's name. Present that result as not read, never as nothing held. Reading
-  specific retained object versions through gRPC does not establish complete wallet holdings
-  at a historical checkpoint; there is no wallet-history fallback.
-- NAVI, Volo, Cetus and Bluefin *latest* reads use `SuiProtocolReader.ReadLatest` with direct object state.
+- The node has no wallet history. A pinned read (`Holdings` with a non-nil checkpoint) returns no
+  balances with `HistoryUnsupported` set and makes no round trip; it never reads the head under
+  the pin's name. Present that result as not read, never as nothing held. Reading specific
+  retained object versions through gRPC does not establish complete wallet holdings at a
+  historical checkpoint; the wallet's past comes from the host's `SuiWalletHistory` alone.
+- NAVI, Volo, Cetus and Bluefin *latest* reads use direct object state (`suiNodeProtocols`).
   Root objects are discovered through `SuiObjectLineageReader` over the same gRPC connection:
   NAVI market-counter versions and their producing transactions, and Volo package publication.
   Cache root IDs, refresh NAVI discovery when the counter version changes, and never scan
@@ -251,8 +287,9 @@ the `sui.rpc.v2` services a fullnode, or a proxy in front of one, serves. The ru
 - Suilend is read from a version-pinned SQL processor index (`sui_history.go`, `sui_sql.go`,
   `sui_sql_query.go`), for latest and historical positions alike. Each address read is one SQL
   statement, executed once, with no Sui node call and no status or GraphQL follow-up; an
-  unconfigured index is an error, never a node read. Hosts supply `SentioIndexerConfig.SQLURL`
-  (the project's `…/sql/execute`) and an explicit processor version. Volo, Cetus and Bluefin
+  unconfigured index is an error, never a node read. Hosts supply it as the engine's
+  `SentioIndexers["suilend"]`: a `SentioIndexerConfig.SQLURL` (the project's `…/sql/execute`)
+  and an explicit processor version. Volo, Cetus and Bluefin
   still read head state from a node and still have no history.
 - Every SQL statement goes through `sentio_sql.go`: submitted to the async execute endpoint on the
   LARGE engine and polled at `…/sql/query_result/{id}` until it finishes. A poll that fails
@@ -264,9 +301,9 @@ the `sui.rpc.v2` services a fullnode, or a proxy in front of one, serves. The ru
   would run beside one nobody can cancel. A server error keeps none of its message, which may
   name the deployment.
 - NAVI is read from the same index machinery, but only for history. Its
-  `ReadLatest` stays on the node, which answers for the head rather than for the
-  newest completed sample; `NaviHistoryReader.ReadAtTime` / `ReadAtCheckpoint`
-  answer what a node cannot. Both paths run the same `naviLending` and
+  latest read stays on the node, which answers for the head rather than for the
+  newest completed sample; its index (`SentioIndexers["navi"]`) answers only pinned
+  reads, what a node cannot. Both paths run the same `naviLending` and
   `suiVaults` over a `suiProtocolState`, so only where that state is read
   differs — the test that matters builds one holding both ways and compares the
   groups. Do not make the indexed path a fallback for a failed node read: the
@@ -361,6 +398,8 @@ only live scans use `USDPrices`. Never fall back from a historical quote to the
 latest one: an unpriced component is a gap the response reports, while a current
 price on a past balance is a wrong number nobody can see is wrong. A provider
 that cannot serve a historical quote must return a `PriceFailure` for the token.
+The Sui engine follows the same rule through `SuiPrices`: a sample is valued at its own
+timestamp, and an index answering a latest request is still valued at its sample's.
 
 ## Pricing a token nothing quotes
 

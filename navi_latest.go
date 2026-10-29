@@ -110,7 +110,7 @@ func smallSuiTables(ctx context.Context, reader SuiObjectReader, ids []string) (
 	return output, nil
 }
 
-func (r *SuiProtocolReader) loadLatest(ctx context.Context, protocolID string, owner SuiAddress, reader SuiObjectReader) (suiProtocolState, error, error) {
+func (r *suiNodeProtocols) loadLatest(ctx context.Context, protocolID string, owner SuiAddress, reader SuiObjectReader) (suiProtocolState, error, error) {
 	state := suiProtocolState{}
 	var lendingErr error
 	if protocolID == "navi" {
@@ -127,7 +127,7 @@ func (r *SuiProtocolReader) loadLatest(ctx context.Context, protocolID string, o
 	return state, lendingErr, vaultErr
 }
 
-func (r *SuiProtocolReader) loadNavi(ctx context.Context, owner SuiAddress, reader SuiObjectReader, state *suiProtocolState) error {
+func (r *suiNodeProtocols) loadNavi(ctx context.Context, owner SuiAddress, reader SuiObjectReader, state *suiProtocolState) error {
 	ids, err := r.discoverNaviMarkets(ctx, reader)
 	if err != nil {
 		return err
@@ -340,7 +340,7 @@ func (r *SuiProtocolReader) loadNavi(ctx context.Context, owner SuiAddress, read
 	return nil
 }
 
-func (r *SuiProtocolReader) loadVaults(ctx context.Context, protocolID string, owner SuiAddress, reader SuiObjectReader, state *suiProtocolState) error {
+func (r *suiNodeProtocols) loadVaults(ctx context.Context, protocolID string, owner SuiAddress, reader SuiObjectReader, state *suiProtocolState) error {
 	packageID, module, tableName, stateType := naviVaultPackage, "navi_vault", "user_states", naviVaultPackage+"::navi_vault::UserState"
 	receiptType := packageID + "::navi_vault::Receipt"
 	if protocolID == "volo-vaults" {
@@ -431,7 +431,7 @@ func (r *SuiProtocolReader) loadVaults(ctx context.Context, protocolID string, o
 	return nil
 }
 
-func (r *SuiProtocolReader) loadVoloValuation(ctx context.Context, reader SuiObjectReader, state *suiProtocolState) error {
+func (r *suiNodeProtocols) loadVoloValuation(ctx context.Context, reader SuiObjectReader, state *suiProtocolState) error {
 	active, err := suiActiveShareVaults(*state)
 	if err != nil {
 		return err

@@ -53,7 +53,7 @@ func newSuiHistoryIndex(config SentioIndexerConfig, protocolID, name string, sta
 	return &suiHistoryIndex{api: newSentioAPIClient(), config: config, sql: sql, protocolID: protocolID, name: name, start: start}, nil
 }
 
-func (r *suiHistoryIndex) WithEngine(engine *Engine) *suiHistoryIndex {
+func (r *suiHistoryIndex) withEngine(engine *Engine) *suiHistoryIndex {
 	copy := *r
 	copy.engine = engine
 	return &copy
@@ -91,15 +91,15 @@ func indexedSuiCheckpoint(sequence, timestamp, digest string, start uint64) (Sui
 // ReadLatest returns the newest completed hourly sample certified by a later
 // index watermark. Its checkpoint describes that sample, not the current head.
 // Hosts may enforce a wall-clock freshness bound before serving the result.
-func (r *suiHistoryIndex) ReadLatest(ctx context.Context, owner SuiAddress) (SuiProtocolPositions, error) {
+func (r *suiHistoryIndex) ReadLatest(ctx context.Context, owner SuiAddress) (suiPositions, error) {
 	return r.readSQLPortfolio(ctx, owner, suiSQLSelection{})
 }
 
-func (r *suiHistoryIndex) ReadAtTime(ctx context.Context, owner SuiAddress, at time.Time) (SuiProtocolPositions, error) {
+func (r *suiHistoryIndex) ReadAtTime(ctx context.Context, owner SuiAddress, at time.Time) (suiPositions, error) {
 	return r.readSQLPortfolio(ctx, owner, suiSQLSelection{at: &at})
 }
 
-func (r *suiHistoryIndex) ReadAtCheckpoint(ctx context.Context, owner SuiAddress, sequence uint64) (SuiProtocolPositions, error) {
+func (r *suiHistoryIndex) ReadAtCheckpoint(ctx context.Context, owner SuiAddress, sequence uint64) (suiPositions, error) {
 	return r.readSQLPortfolio(ctx, owner, suiSQLSelection{checkpoint: &sequence})
 }
 
@@ -111,6 +111,6 @@ func historyUint(value string) (uint64, error) {
 	return n, nil
 }
 
-func (r *suiHistoryIndex) result(pin SuiCheckpoint) SuiProtocolPositions {
-	return SuiProtocolPositions{ProtocolID: r.protocolID, ProtocolName: r.name, Checkpoint: pin, HeadBeforeRead: pin.Sequence}
+func (r *suiHistoryIndex) result(pin SuiCheckpoint) suiPositions {
+	return suiPositions{ProtocolID: r.protocolID, ProtocolName: r.name, Checkpoint: pin, HeadBeforeRead: pin.Sequence}
 }

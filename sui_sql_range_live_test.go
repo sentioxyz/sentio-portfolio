@@ -36,17 +36,17 @@ func TestSuiHistoryRangeMatchesPointReadsLive(t *testing.T) {
 	var index *suiHistoryIndex
 	switch fields[0] {
 	case "navi":
-		reader, err := NewNaviHistoryReader(config)
+		reader, err := newNaviIndex(config)
 		if err != nil {
 			t.Fatal(err)
 		}
-		index = reader.suiHistoryIndex
+		index = reader
 	case "suilend":
-		reader, err := NewSuilendHistoryReader(config)
+		reader, err := newSuilendIndex(config)
 		if err != nil {
 			t.Fatal(err)
 		}
-		index = reader.suiHistoryIndex
+		index = reader
 	default:
 		t.Fatalf("unsupported protocol %q", fields[0])
 	}
@@ -73,7 +73,7 @@ func TestSuiHistoryRangeMatchesPointReadsLive(t *testing.T) {
 			}
 			// A transport failure of the comparison read says nothing about the
 			// range; only an answered read is compared.
-			var point SuiProtocolPositions
+			var point suiPositions
 			var pointErr error
 			started := time.Now()
 			for attempt := 0; attempt < 3; attempt++ {

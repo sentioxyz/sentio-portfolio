@@ -295,8 +295,8 @@ func TestSuiHistoryRangeWithoutSamples(t *testing.T) {
 // the sample itself unchanged for the next instant.
 func TestSuiHistorySampleAt(t *testing.T) {
 	start := time.Date(2026, 9, 20, 0, 0, 0, 0, time.UTC)
-	sample := SuiHistorySample{Start: start, Until: start.Add(time.Hour), Positions: SuiProtocolPositions{ProtocolID: "navi",
-		Groups: []SuiProtocolGroup{{ID: "g", Metadata: map[string]any{"stateMode": "historical"}}, {ID: "h"}}}}
+	sample := suiHistorySample{Start: start, Until: start.Add(time.Hour), Positions: suiPositions{ProtocolID: "navi",
+		Groups: []SuiGroup{{ID: "g", Metadata: map[string]any{"stateMode": "historical"}}, {ID: "h"}}}}
 	at := start.Add(10 * time.Minute)
 	got, err := sample.At(at)
 	if err != nil || got.Groups[0].Metadata["requestedTimestamp"] != at.Format(time.RFC3339Nano) || got.Groups[1].Metadata["requestedTimestamp"] == nil {

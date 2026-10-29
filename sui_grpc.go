@@ -30,10 +30,9 @@ import (
 // and http:// are plaintext for an endpoint reached inside a private network, and a bare host:port
 // is TLS, because an unmarked endpoint is more likely public than not.
 type SuiGRPCClient struct {
-	chainID ChainID
-	conn    *grpc.ClientConn
-	state   rpcv2.StateServiceClient
-	ledger  rpcv2.LedgerServiceClient
+	conn   *grpc.ClientConn
+	state  rpcv2.StateServiceClient
+	ledger rpcv2.LedgerServiceClient
 }
 
 var _ SuiReader = (*SuiGRPCClient)(nil)
@@ -89,9 +88,8 @@ func suiGRPCTarget(endpoint string) (string, credentials.TransportCredentials, e
 
 // DialSuiGRPC connects to a Sui gRPC endpoint and verifies it serves the network named by
 // chainIdentifier. The endpoint is never quoted in errors.
-func DialSuiGRPC(
+func dialSuiGRPC(
 	ctx context.Context,
-	chainID ChainID,
 	endpoint string,
 	chainIdentifier string,
 ) (*SuiGRPCClient, error) {
@@ -109,10 +107,9 @@ func DialSuiGRPC(
 		return nil, redactedError{message: "Sui gRPC endpoint is not a target grpc can dial", cause: err}
 	}
 	client := &SuiGRPCClient{
-		chainID: chainID,
-		conn:    conn,
-		state:   rpcv2.NewStateServiceClient(conn),
-		ledger:  rpcv2.NewLedgerServiceClient(conn),
+		conn:   conn,
+		state:  rpcv2.NewStateServiceClient(conn),
+		ledger: rpcv2.NewLedgerServiceClient(conn),
 	}
 	info, err := client.serviceInfo(ctx)
 	if err != nil {
@@ -188,7 +185,7 @@ func (c *SuiGRPCClient) invoke(ctx context.Context, method string, call func(ctx
 		startedAt := time.Now()
 		last = describeSuiGRPCError(method, call(callCtx))
 		cancel()
-		observeSuiRequest(ctx, c.chainID, method, attempt, startedAt, last)
+		observeSuiRequest(ctx, method, attempt, startedAt, last)
 		if last == nil {
 			return nil
 		}

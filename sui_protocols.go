@@ -6,53 +6,49 @@ import (
 	"sort"
 )
 
-// SuiProtocolReader reads latest lending, vault and liquidity state through the same reader as
-// wallet holdings. Object lineage discovers and caches protocol root IDs only.
-type SuiProtocolReader struct {
+// suiNodeProtocols reads latest lending, vault and liquidity state from a node's head object
+// state. Object lineage discovers and caches protocol root IDs only. Suilend has no node path and
+// is not read here.
+type suiNodeProtocols struct {
 	markets, oracle suiRootCache
-	// suilend is read from its processor index for both latest and historical
-	// positions. Index absence is an error: there is no node fallback, because
-	// a node cannot answer for a past checkpoint at all.
-	suilend *SuilendHistoryReader
 }
 
-func NewSuiProtocolReader() *SuiProtocolReader {
-	return &SuiProtocolReader{markets: suiRootCache{gate: make(chan struct{}, 1)}, oracle: suiRootCache{gate: make(chan struct{}, 1)}}
+func newSuiNodeProtocols() *suiNodeProtocols {
+	return &suiNodeProtocols{markets: suiRootCache{gate: make(chan struct{}, 1)}, oracle: suiRootCache{gate: make(chan struct{}, 1)}}
 }
 
-// WithSuilendHistory configures the Suilend index without changing r.
-func (r *SuiProtocolReader) WithSuilendHistory(index *SuilendHistoryReader) *SuiProtocolReader {
-	copy := *r
-	copy.suilend = index
-	return &copy
-}
-
-func (r *SuiProtocolReader) ProtocolIDs() []string {
-	return []string{"navi", "volo-vaults", "suilend", "cetus", "bluefin"}
-}
-
-type SuiProtocolComponent struct {
+// SuiComponent is one amount of one coin a group holds or owes. PriceUSD and ValueUSD are set when
+// the coin was priced; a debt's ValueUSD is positive and is subtracted from its group.
+type SuiComponent struct {
 	Kind                 string
 	Coin                 SuiCoinMetadata
 	AmountRaw            string
 	AmountDenominatorRaw string
+	PriceUSD             *float64
+	ValueUSD             *float64
 	Metadata             map[string]any
 }
 
-type SuiProtocolGroup struct {
+// SuiGroup is one position: a wallet coin, a lending account in one market, a vault receipt or a
+// liquidity NFT. ValueUSD nets its priced components and is nil when none was priced.
+type SuiGroup struct {
 	ID         string
 	MarketID   string
 	Label      string
-	Components []SuiProtocolComponent
+	Components []SuiComponent
+	ValueUSD   *float64
 	Metadata   map[string]any
 }
 
-type SuiProtocolPositions struct {
+// suiPositions is what one read of one protocol returned, before valuation: the checkpoint it
+// answers for (the head seen after a node read, or the sample of an index read) and the errors of
+// the parts it could not read.
+type suiPositions struct {
 	ProtocolID     string
 	ProtocolName   string
 	Checkpoint     SuiCheckpoint
 	HeadBeforeRead uint64
-	Groups         []SuiProtocolGroup
+	Groups         []SuiGroup
 	Errors         []error
 }
 
@@ -83,18 +79,12 @@ type suiProtocolState struct {
 
 // ReadLatest reports head observations explicitly; they need not be ordered
 // when requests reach different backends. It cannot read history.
-func (r *SuiProtocolReader) ReadLatest(ctx context.Context, protocolID string, owner SuiAddress, reader SuiReader) (SuiProtocolPositions, error) {
+func (r *suiNodeProtocols) ReadLatest(ctx context.Context, protocolID string, owner SuiAddress, reader SuiReader) (suiPositions, error) {
 	if protocolID == "cetus" || protocolID == "bluefin" {
 		return readSuiCLMMLatest(ctx, protocolID, owner, reader)
 	}
-	if protocolID == "suilend" {
-		if r.suilend == nil {
-			return SuiProtocolPositions{ProtocolID: protocolID, ProtocolName: "Suilend"}, fmt.Errorf("suilend requires a configured processor index")
-		}
-		return r.suilend.ReadLatest(ctx, owner)
-	}
 	name := map[string]string{"navi": "NAVI", "volo-vaults": "Volo Vaults"}[protocolID]
-	result := SuiProtocolPositions{ProtocolID: protocolID, ProtocolName: name}
+	result := suiPositions{ProtocolID: protocolID, ProtocolName: name}
 	if name == "" {
 		return result, fmt.Errorf("unsupported Sui protocol")
 	}
@@ -114,7 +104,7 @@ func (r *SuiProtocolReader) ReadLatest(ctx context.Context, protocolID string, o
 	result.Checkpoint, result.HeadBeforeRead = after, before.Sequence
 	if protocolID == "navi" {
 		if lendingErr == nil {
-			var groups []SuiProtocolGroup
+			var groups []SuiGroup
 			groups, lendingErr = naviLending(ctx, owner, after, reader, state)
 			if lendingErr == nil {
 				result.Groups = append(result.Groups, groups...)
@@ -125,7 +115,7 @@ func (r *SuiProtocolReader) ReadLatest(ctx context.Context, protocolID string, o
 		}
 	}
 	if vaultErr == nil {
-		var groups []SuiProtocolGroup
+		var groups []SuiGroup
 		groups, vaultErr = suiVaults(ctx, protocolID, reader, state)
 		if vaultErr == nil {
 			result.Groups = append(result.Groups, groups...)

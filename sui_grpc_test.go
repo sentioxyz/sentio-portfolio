@@ -210,8 +210,8 @@ func suiTestBalance(coinType string, amount uint64) *rpcv2.Balance {
 	}
 }
 
-func newSuiGRPCTestClient(t *testing.T, ctx context.Context, chainID ChainID, server *suiGRPCTestServer) *SuiGRPCClient {
-	client, err := DialSuiGRPC(ctx, chainID, server.endpoint(), SuiMainnetChainIdentifier)
+func newSuiGRPCTestClient(t *testing.T, ctx context.Context, server *suiGRPCTestServer) *SuiGRPCClient {
+	client, err := dialSuiGRPC(ctx, server.endpoint(), SuiMainnetChainIdentifier)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,13 +253,13 @@ func TestDialSuiGRPCRejectsAnotherNetworkAndRedactsTheAddress(t *testing.T) {
 	server.chainID = suiTestDigest
 	server.mu.Unlock()
 	otherIdentifier, _ := suiChainIdentifierHex(suiTestDigest)
-	_, err := DialSuiGRPC(context.Background(), 0, server.endpoint(), SuiMainnetChainIdentifier)
+	_, err := dialSuiGRPC(context.Background(), server.endpoint(), SuiMainnetChainIdentifier)
 	if err == nil || !strings.Contains(err.Error(), otherIdentifier) || !strings.Contains(err.Error(), SuiMainnetChainIdentifier) {
 		t.Fatalf("dial error = %v, want both chain identifiers named", err)
 	}
 
 	server.server.Stop()
-	_, err = DialSuiGRPC(context.Background(), 0, server.endpoint(), SuiMainnetChainIdentifier)
+	_, err = dialSuiGRPC(context.Background(), server.endpoint(), SuiMainnetChainIdentifier)
 	if err == nil {
 		t.Fatal("dial succeeded against a stopped server")
 	}
@@ -283,7 +283,7 @@ func TestSuiGRPCHoldingsReportTheHeadWindowAndPaginate(t *testing.T) {
 		suiTestBalance("0xdead::spent::SPENT", 0),
 		suiTestBalance(gift, 2595000000000),
 	}
-	client := newSuiGRPCTestClient(t, context.Background(), 0, server)
+	client := newSuiGRPCTestClient(t, context.Background(), server)
 	owner, _ := ParseSuiAddress("0x3cd40490b1e5a583f8717284291c6db97f604bd3d812b6e214591823d985b900")
 
 	holdings, err := client.Holdings(context.Background(), owner, nil)
@@ -331,7 +331,7 @@ func TestSuiGRPCHoldingsReportTheHeadWindowAndPaginate(t *testing.T) {
 func TestSuiGRPCHoldingsAtAFixedCheckpointAreEmptyByDecision(t *testing.T) {
 	server := newSuiGRPCTestServer(t)
 	server.balances = []*rpcv2.Balance{suiTestBalance("0x2::sui::SUI", 1)}
-	client := newSuiGRPCTestClient(t, context.Background(), 0, server)
+	client := newSuiGRPCTestClient(t, context.Background(), server)
 	owner, _ := ParseSuiAddress("0x1")
 	pin, err := newSuiCheckpoint(300_000_000, suiTestDigest, suiTestCheckpointTime)
 	if err != nil {
@@ -364,7 +364,7 @@ func TestSuiGRPCHoldingsPreserveHeadObservationsWhenBackendsDiffer(t *testing.T)
 	server.head = 320_000_010
 	server.headStep = ^uint64(0) - 3 // each head read answers four lower, as a lagging backend would
 	server.balances = []*rpcv2.Balance{suiTestBalance("0x2::sui::SUI", 1)}
-	client := newSuiGRPCTestClient(t, context.Background(), 0, server)
+	client := newSuiGRPCTestClient(t, context.Background(), server)
 	owner, _ := ParseSuiAddress("0x1")
 
 	holdings, err := client.Holdings(context.Background(), owner, nil)
@@ -382,7 +382,7 @@ func TestSuiGRPCHoldingsPreserveHeadObservationsWhenBackendsDiffer(t *testing.T)
 func TestSuiGRPCHoldingsRejectABalanceWithoutAnAmount(t *testing.T) {
 	server := newSuiGRPCTestServer(t)
 	server.balances = []*rpcv2.Balance{{CoinType: proto.String("0x2::sui::SUI")}}
-	client := newSuiGRPCTestClient(t, context.Background(), 0, server)
+	client := newSuiGRPCTestClient(t, context.Background(), server)
 	owner, _ := ParseSuiAddress("0x1")
 	if _, err := client.Holdings(context.Background(), owner, nil); err == nil {
 		t.Fatal("a balance without an amount was accepted as zero")
@@ -391,7 +391,7 @@ func TestSuiGRPCHoldingsRejectABalanceWithoutAnAmount(t *testing.T) {
 
 func TestSuiGRPCCheckpointsResolveAndReportUnknownSequences(t *testing.T) {
 	server := newSuiGRPCTestServer(t)
-	client := newSuiGRPCTestClient(t, context.Background(), 0, server)
+	client := newSuiGRPCTestClient(t, context.Background(), server)
 	dialCalls := server.methodCalls("GetCheckpoint")
 
 	latest, err := client.LatestCheckpoint(context.Background())
@@ -420,7 +420,7 @@ func TestSuiGRPCRetriesTransientStatusesButNotVerdictsAndRedactsTheAddress(t *te
 	server := newSuiGRPCTestServer(t)
 	observer := &recordingObserver{}
 	ctx := withObserver(context.Background(), observer)
-	client := newSuiGRPCTestClient(t, ctx, Ethereum, server)
+	client := newSuiGRPCTestClient(t, ctx, server)
 
 	server.fail("GetCheckpoint", codes.Unavailable, codes.ResourceExhausted)
 	if _, err := client.LatestCheckpoint(ctx); err != nil {
@@ -431,7 +431,7 @@ func TestSuiGRPCRetriesTransientStatusesButNotVerdictsAndRedactsTheAddress(t *te
 	for _, observation := range observer.rpcs {
 		if observation.Method == "GetCheckpoint" {
 			attempts++
-			if observation.ChainID != Ethereum || observation.Attempt != attempts {
+			if observation.Attempt != attempts {
 				t.Fatalf("observation = %+v, want chain %v attempt %d", observation, Ethereum, attempts)
 			}
 		}
@@ -477,7 +477,7 @@ func TestSuiGRPCCoinMetadataNamesUnusableCoins(t *testing.T) {
 		bad:         {Decimals: proto.Uint32(6), Name: proto.String("Bad"), Symbol: proto.String("B\x00AD")},
 		bare:        nil,
 	}
-	client := newSuiGRPCTestClient(t, context.Background(), 0, server)
+	client := newSuiGRPCTestClient(t, context.Background(), server)
 
 	metadata, unusable, err := client.CoinMetadata(context.Background(), []string{suiLongType, gift, bad, bare, unknown})
 	if err != nil {

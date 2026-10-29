@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-func naviLending(ctx context.Context, owner SuiAddress, pin SuiCheckpoint, reader suiCoinMetadataReader, state suiProtocolState) ([]SuiProtocolGroup, error) {
+func naviLending(ctx context.Context, owner SuiAddress, pin SuiCheckpoint, reader suiCoinMetadataReader, state suiProtocolState) ([]SuiGroup, error) {
 	accounts := map[string]bool{owner.Hex(): true}
 	for _, object := range state.Owned {
 		if object.Kind != "account" {
@@ -89,7 +89,7 @@ func naviLending(ctx context.Context, owner SuiAddress, pin SuiCheckpoint, reade
 		}
 		emodes[row.Market+":"+row.Account] = entered
 	}
-	groups := map[string]*SuiProtocolGroup{}
+	groups := map[string]*SuiGroup{}
 	for _, p := range positions {
 		ref := p.table.Reserve
 		reserve := ref.Fields
@@ -125,16 +125,16 @@ func naviLending(ctx context.Context, owner SuiAddress, pin SuiCheckpoint, reade
 			if p.account != owner.Hex() && emodes[groupKey] {
 				product, label = "multiply", "Multiply"
 			}
-			group = &SuiProtocolGroup{ID: "navi:" + groupKey, MarketID: ref.Market, Label: label, Metadata: map[string]any{"product": product, "account": p.account}}
+			group = &SuiGroup{ID: "navi:" + groupKey, MarketID: ref.Market, Label: label, Metadata: map[string]any{"product": product, "account": p.account}}
 			groups[groupKey] = group
 		}
 		kind := "asset"
 		if side == "borrow" {
 			kind = "debt"
 		}
-		group.Components = append(group.Components, SuiProtocolComponent{Kind: kind, Coin: coin, AmountRaw: amount.String(), Metadata: map[string]any{"reserve": ref.Asset, "scaledPrincipal": p.principal.String()}})
+		group.Components = append(group.Components, SuiComponent{Kind: kind, Coin: coin, AmountRaw: amount.String(), Metadata: map[string]any{"reserve": ref.Asset, "scaledPrincipal": p.principal.String()}})
 	}
-	result := []SuiProtocolGroup{}
+	result := []SuiGroup{}
 	for _, group := range groups {
 		result = append(result, *group)
 	}
@@ -162,7 +162,7 @@ func suiProtocolMetadata(ctx context.Context, reader suiCoinMetadataReader, want
 	return metadata, nil
 }
 
-func suiVaults(ctx context.Context, protocolID string, reader suiCoinMetadataReader, state suiProtocolState) ([]SuiProtocolGroup, error) {
+func suiVaults(ctx context.Context, protocolID string, reader suiCoinMetadataReader, state suiProtocolState) ([]SuiGroup, error) {
 	receipts := make(map[string]suiProtocolObject)
 	vaultSet := make(map[string]bool)
 	ids := []string{}
@@ -232,7 +232,7 @@ func suiVaults(ctx context.Context, protocolID string, reader suiCoinMetadataRea
 			return nil, err
 		}
 	}
-	result := []SuiProtocolGroup{}
+	result := []SuiGroup{}
 	seen := make(map[string]bool)
 	for _, object := range states {
 		receipt, ok := receipts[object.Key]
@@ -270,7 +270,7 @@ func suiVaults(ctx context.Context, protocolID string, reader suiCoinMetadataRea
 			return nil, err
 		}
 		coin := metadata[coins[receipt.Key]]
-		group := SuiProtocolGroup{ID: protocolID + ":vault:" + receipt.ID, MarketID: receipt.Key, Label: "Vault", Metadata: map[string]any{"product": "vault", "receipt": receipt.ID, "shares": shares.String(), "valuation": "stored_nav"}}
+		group := SuiGroup{ID: protocolID + ":vault:" + receipt.ID, MarketID: receipt.Key, Label: "Vault", Metadata: map[string]any{"product": "vault", "receipt": receipt.ID, "shares": shares.String(), "valuation": "stored_nav"}}
 		if shares.Sign() > 0 {
 			totalShares, err := vault.uint("total_shares")
 			if err != nil || totalShares.Sign() == 0 || shares.Cmp(totalShares) > 0 {
@@ -294,7 +294,7 @@ func suiVaults(ctx context.Context, protocolID string, reader suiCoinMetadataRea
 				group.Metadata["valuationPriceTimestampMs"] = strconv.FormatUint(valuation.PriceTimestampMS, 10)
 				group.Metadata["valuation"] = "settled_nav"
 			}
-			group.Components = append(group.Components, SuiProtocolComponent{Kind: "asset", Coin: coin, AmountRaw: amount.String()})
+			group.Components = append(group.Components, SuiComponent{Kind: "asset", Coin: coin, AmountRaw: amount.String()})
 		}
 		if protocolID == "volo-vaults" {
 			for _, field := range []string{"pending_deposit_balance", "claimable_principal"} {
@@ -303,7 +303,7 @@ func suiVaults(ctx context.Context, protocolID string, reader suiCoinMetadataRea
 					return nil, err
 				}
 				if amount.Sign() > 0 {
-					group.Components = append(group.Components, SuiProtocolComponent{Kind: "asset", Coin: coin, AmountRaw: amount.String(), Metadata: map[string]any{"status": field}})
+					group.Components = append(group.Components, SuiComponent{Kind: "asset", Coin: coin, AmountRaw: amount.String(), Metadata: map[string]any{"status": field}})
 				}
 			}
 			pending, err := state.uint("pending_withdraw_shares")

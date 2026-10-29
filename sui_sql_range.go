@@ -30,18 +30,18 @@ const (
 // SuiHistorySample is one completed sample of a range read. It owns the interval
 // [Start, Until): a single read at any instant inside it is answered from this
 // sample, and At reports it the way that read would.
-type SuiHistorySample struct {
+type suiHistorySample struct {
 	Start, Until time.Time
-	Positions    SuiProtocolPositions
+	Positions    suiPositions
 	// Err is this sample's own certificate or calculation failure. It does not
 	// invalidate the other samples of the range.
 	Err error
 }
 
 // At returns the positions a ReadAtTime(at) answered from this sample reports.
-func (s SuiHistorySample) At(at time.Time) (SuiProtocolPositions, error) {
+func (s suiHistorySample) At(at time.Time) (suiPositions, error) {
 	if at.Before(s.Start) || !at.Before(s.Until) {
-		return SuiProtocolPositions{ProtocolID: s.Positions.ProtocolID, ProtocolName: s.Positions.ProtocolName}, fmt.Errorf("Sui index has no completed sample for the requested hour")
+		return suiPositions{ProtocolID: s.Positions.ProtocolID, ProtocolName: s.Positions.ProtocolName}, fmt.Errorf("Sui index has no completed sample for the requested hour")
 	}
 	if s.Err != nil {
 		return s.Positions, s.Err
@@ -66,14 +66,14 @@ func (s SuiHistorySample) At(at time.Time) (SuiProtocolPositions, error) {
 // no completed sample, as a single read at it would report. When a statement
 // fails, the samples of the statements before it are returned with the error:
 // they stand on their own, and only the rest of the range is unanswered.
-func (r *suiHistoryIndex) ReadRange(ctx context.Context, owner SuiAddress, from, to time.Time) ([]SuiHistorySample, error) {
+func (r *suiHistoryIndex) ReadRange(ctx context.Context, owner SuiAddress, from, to time.Time) ([]suiHistorySample, error) {
 	if to.Before(from) || from.UnixMilli() < 0 {
 		return nil, fmt.Errorf("invalid Sui history range")
 	}
 	// One memo per range: consecutive samples share market versions a Suilend
 	// obligation names, and each version is decoded once.
 	markets := newSuilendMarketMemo()
-	var out []SuiHistorySample
+	var out []suiHistorySample
 	// ceiling is below the smallest window a response has not fitted, so sizing
 	// from bytes never asks for one that failed again.
 	limit, ceiling := suiSQLRangeProbeSamples, suiSQLRangeSamples
@@ -116,7 +116,7 @@ func suiSQLRangeLimit(size, samples int) int {
 }
 
 // readRangeSQL executes one range statement and also reports the size of its rows.
-func (r *suiHistoryIndex) readRangeSQL(ctx context.Context, owner SuiAddress, from, to time.Time, limit int, markets *suilendMarketMemo) ([]SuiHistorySample, int, error) {
+func (r *suiHistoryIndex) readRangeSQL(ctx context.Context, owner SuiAddress, from, to time.Time, limit int, markets *suilendMarketMemo) ([]suiHistorySample, int, error) {
 	query, err := r.rangeSQL(owner, from, to, limit)
 	if err != nil {
 		return nil, 0, err
@@ -338,7 +338,7 @@ func decodeSuiSQLRange(rows []suiSQLRow) (suiSQLRange, error) {
 // sample whose own rows fail is returned with its error; a statement whose
 // samples cannot be placed in time fails whole, since no instant could be
 // attributed to the right sample.
-func (r *suiHistoryIndex) rangeSamples(ctx context.Context, owner SuiAddress, rows suiSQLRange, from, to time.Time, markets *suilendMarketMemo) ([]SuiHistorySample, error) {
+func (r *suiHistoryIndex) rangeSamples(ctx context.Context, owner SuiAddress, rows suiSQLRange, from, to time.Time, markets *suilendMarketMemo) ([]suiHistorySample, error) {
 	view, err := newSuiSQLRangeView(rows)
 	if err != nil {
 		return nil, err
@@ -362,9 +362,9 @@ func (r *suiHistoryIndex) rangeSamples(ctx context.Context, owner SuiAddress, ro
 		samples = append(samples, placed{s, cp, time.UnixMilli(int64(start)).UTC(), time.UnixMilli(int64(next)).UTC()})
 	}
 	sort.SliceStable(samples, func(i, j int) bool { return samples[i].checkpoint < samples[j].checkpoint })
-	out := make([]SuiHistorySample, 0, len(samples))
+	out := make([]suiHistorySample, 0, len(samples))
 	for _, s := range samples {
-		sample := SuiHistorySample{Start: s.start, Until: s.next, Positions: r.result(SuiCheckpoint{})}
+		sample := suiHistorySample{Start: s.start, Until: s.next, Positions: r.result(SuiCheckpoint{})}
 		if seen[s.checkpoint] > 1 {
 			// Two certificates for one checkpoint cannot both describe it.
 			sample.Err = fmt.Errorf("Sui index has no completed sample for the requested hour")

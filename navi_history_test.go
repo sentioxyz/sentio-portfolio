@@ -91,7 +91,7 @@ func naviIndexRows(t *testing.T, f *latestSuiFixture, pin SuiCheckpoint) []suiSQ
 
 // newNaviIndexFixture serves those rows as the one SQL statement the reader
 // issues, with a certificate that counts exactly what the rows contain.
-func newNaviIndexFixture(t *testing.T, f *latestSuiFixture, values []suiSQLValue) (*sqlPortfolioFixture, *NaviHistoryReader) {
+func newNaviIndexFixture(t *testing.T, f *latestSuiFixture, values []suiSQLValue) (*sqlPortfolioFixture, *suiHistoryIndex) {
 	t.Helper()
 	t.Setenv("PORTFOLIO_SENTIO_API_KEY", "test-key")
 	pin := f.pin
@@ -125,7 +125,7 @@ func newNaviIndexFixture(t *testing.T, f *latestSuiFixture, values []suiSQLValue
 		_ = json.NewEncoder(w).Encode(response)
 	}))
 	t.Cleanup(server.Close)
-	reader, err := NewNaviHistoryReader(SentioIndexerConfig{SQLURL: server.URL + "/sql/execute", ProcessorVersion: "1"})
+	reader, err := newNaviIndex(SentioIndexerConfig{SQLURL: server.URL + "/sql/execute", ProcessorVersion: "1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestNaviIndexedHistoryMatchesTheNodePath(t *testing.T) {
 		object := latestObject(id, naviAccountType, "ADDRESS", owner.Hex(), map[string]any{"owner": naviAddress("0x22")})
 		node.objects[object.ID] = object
 	}
-	want, err := NewSuiProtocolReader().ReadLatest(context.Background(), "navi", owner, node)
+	want, err := newSuiNodeProtocols().ReadLatest(context.Background(), "navi", owner, node)
 	if err != nil || len(want.Errors) > 0 || len(want.Groups) != 2 {
 		t.Fatalf("node path: %+v %v", want, err)
 	}
