@@ -100,7 +100,6 @@ func waitSuiRetry(ctx context.Context, delay time.Duration) error {
 // transport apart from the EVM JSON-RPC methods in its metrics.
 func observeSuiRequest(
 	ctx context.Context,
-	chainID ChainID,
 	method string,
 	attempt int,
 	startedAt time.Time,
@@ -108,7 +107,6 @@ func observeSuiRequest(
 ) {
 	scope := scopeFrom(ctx)
 	scope.observer.ObserveRPC(RPCObservation{
-		ChainID:    chainID,
 		ProtocolID: scope.protocolID,
 		Method:     method,
 		Attempt:    attempt + 1,

@@ -30,7 +30,7 @@ func TestSuiProtocolLiveLatest(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	rpc, err := DialSuiGRPC(ctx, 0, os.Getenv("PORTFOLIO_SUI_GRPC_URL"), SuiMainnetChainIdentifier)
+	rpc, err := dialSuiGRPC(ctx, os.Getenv("PORTFOLIO_SUI_GRPC_URL"), SuiMainnetChainIdentifier)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func TestSuiProtocolLiveLatest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader := NewSuiProtocolReader()
+	reader := newSuiNodeProtocols()
 	result, err := reader.ReadLatest(ctx, sample.Protocol, owner, rpc)
 	if err != nil {
 		t.Fatal(err)

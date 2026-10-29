@@ -48,18 +48,9 @@ func suilendObligationParent(table, obligation string) (string, error) {
 
 const suilendHistoryStart uint64 = 28510257
 
-// SuilendHistoryReader reads completed hourly lending state from its processor
-// index, including ownership, market reserves, obligations and coin metadata.
-type SuilendHistoryReader struct{ *suiHistoryIndex }
-
-func NewSuilendHistoryReader(config SentioIndexerConfig) (*SuilendHistoryReader, error) {
-	i, err := newSuiHistoryIndex(config, "suilend", "Suilend", suilendHistoryStart)
-	if err != nil {
-		return nil, err
-	}
-	return &SuilendHistoryReader{i}, nil
-}
-
-func (r *SuilendHistoryReader) WithEngine(engine *Engine) *SuilendHistoryReader {
-	return &SuilendHistoryReader{r.suiHistoryIndex.WithEngine(engine)}
+// newSuilendIndex reads completed hourly lending state from Suilend's processor index, including
+// ownership, market reserves, obligations and coin metadata. Suilend has no node path: its latest
+// state is the newest completed sample too.
+func newSuilendIndex(config SentioIndexerConfig) (*suiHistoryIndex, error) {
+	return newSuiHistoryIndex(config, "suilend", "Suilend", suilendHistoryStart)
 }

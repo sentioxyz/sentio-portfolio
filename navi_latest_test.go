@@ -120,7 +120,7 @@ func TestSuiLatestKeepsPositionsWhenBackendHeadsDiffer(t *testing.T) {
 					before.Timestamp = after.Timestamp.Add(-time.Second)
 				}
 				reader := &latestHeadFixture{latestSuiFixture: f, heads: []SuiCheckpoint{before, after}}
-				got, err := NewSuiProtocolReader().ReadLatest(context.Background(), protocol, owner, reader)
+				got, err := newSuiNodeProtocols().ReadLatest(context.Background(), protocol, owner, reader)
 				if err != nil || len(got.Errors) != 0 || len(got.Groups) != 1 {
 					t.Fatalf("latest positions: %+v, %v", got, err)
 				}
@@ -188,7 +188,7 @@ func TestNaviLatestDiscoversNewMarketAndDeduplicatesChildCaps(t *testing.T) {
 		o := latestObject(id, naviAccountType, "ADDRESS", owner.Hex(), map[string]any{"owner": naviAddress("0x22")})
 		f.objects[o.ID] = o
 	}
-	r := NewSuiProtocolReader()
+	r := newSuiNodeProtocols()
 	got, err := r.ReadLatest(context.Background(), "navi", owner, f)
 	if err != nil || len(got.Errors) > 0 || len(got.Groups) != 2 {
 		t.Fatalf("%+v %v", got, err)
@@ -215,7 +215,7 @@ func TestNaviLatestRejectsIncompleteMarketDirectory(t *testing.T) {
 	f := latestFixture()
 	owner, _ := ParseSuiAddress("0x11")
 	f.addMarket(0, 1, owner.Hex(), "1", false)
-	got, err := NewSuiProtocolReader().ReadLatest(context.Background(), "navi", owner, f)
+	got, err := newSuiNodeProtocols().ReadLatest(context.Background(), "navi", owner, f)
 	if err != nil || len(got.Errors) != 1 || !strings.Contains(got.Errors[0].Error(), "market inventory") || len(got.Groups) != 0 {
 		t.Fatalf("incomplete %+v %v", got, err)
 	}
@@ -225,7 +225,7 @@ func TestNaviLatestRejectsMissingReserve(t *testing.T) {
 	owner, _ := ParseSuiAddress("0x11")
 	f.addMarket(0, 0, owner.Hex(), "1", false)
 	f.tables[naviAddress("0x200")] = nil
-	got, err := NewSuiProtocolReader().ReadLatest(context.Background(), "navi", owner, f)
+	got, err := newSuiNodeProtocols().ReadLatest(context.Background(), "navi", owner, f)
 	if err != nil || len(got.Errors) != 1 || len(got.Groups) != 0 {
 		t.Fatalf("reserve gap %+v %v", got, err)
 	}
@@ -235,7 +235,7 @@ func TestNaviLatestPointReadFailureIsNotZero(t *testing.T) {
 	owner, _ := ParseSuiAddress("0x11")
 	f.addMarket(0, 0, owner.Hex(), "1", false)
 	f.failObjects = true
-	got, err := NewSuiProtocolReader().ReadLatest(context.Background(), "navi", owner, f)
+	got, err := newSuiNodeProtocols().ReadLatest(context.Background(), "navi", owner, f)
 	if err != nil || len(got.Errors) != 1 || len(got.Groups) != 0 {
 		t.Fatalf("point read gap %+v %v", got, err)
 	}
@@ -246,7 +246,7 @@ func TestLatestVaultReceiptFindsUnlistedVaultAndEmptyState(t *testing.T) {
 	receipt, vault, parent := naviAddress("0x22"), naviAddress("0x33"), naviAddress("0x44")
 	f.objects[receipt] = latestObject(receipt, naviVaultPackage+"::navi_vault::Receipt", "ADDRESS", owner.Hex(), map[string]any{"vault_address": vault})
 	f.objects[vault] = latestObject(vault, naviVaultPackage+"::navi_vault::Vault<0x2::sui::SUI>", "SHARED", "", map[string]any{"total_shares": "3", "total_assets": "1000000001", "user_states": map[string]any{"id": parent}})
-	r := NewSuiProtocolReader()
+	r := newSuiNodeProtocols()
 	state := suiProtocolState{}
 	if err := r.loadVaults(context.Background(), "navi", owner, f, &state); err != nil {
 		t.Fatal(err)

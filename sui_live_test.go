@@ -19,7 +19,7 @@ func TestSuiLiveGRPCReader(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	client, err := DialSuiGRPC(ctx, 0, endpoint, SuiMainnetChainIdentifier)
+	client, err := dialSuiGRPC(ctx, endpoint, SuiMainnetChainIdentifier)
 	if err != nil {
 		t.Fatal(err)
 	}

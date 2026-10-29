@@ -47,12 +47,12 @@ type suiCLMMTick struct {
 	rewards []*big.Int
 }
 
-func readSuiCLMMLatest(ctx context.Context, protocol string, owner SuiAddress, reader SuiReader) (SuiProtocolPositions, error) {
+func readSuiCLMMLatest(ctx context.Context, protocol string, owner SuiAddress, reader SuiReader) (suiPositions, error) {
 	name, pkg := "Cetus", cetusCLMMPackage
 	if protocol == "bluefin" {
 		name, pkg = "Bluefin", bluefinCLMMPackage
 	}
-	result := SuiProtocolPositions{ProtocolID: protocol, ProtocolName: name}
+	result := suiPositions{ProtocolID: protocol, ProtocolName: name}
 	objects, ok := reader.(SuiObjectReader)
 	if !ok {
 		return result, fmt.Errorf("Sui object reads are unavailable")
@@ -348,12 +348,12 @@ func parseSuiCLMMPool(parser *suiCLMMParser, o SuiObject, f suiFields, pkg strin
 	return p
 }
 
-func suiCLMMGroups(ctx context.Context, reader SuiReader, protocol string, positions []suiCLMMPosition, pools map[string]suiCLMMPool, head SuiCheckpoint) ([]SuiProtocolGroup, error) {
-	groups := []SuiProtocolGroup{}
+func suiCLMMGroups(ctx context.Context, reader SuiReader, protocol string, positions []suiCLMMPosition, pools map[string]suiCLMMPool, head SuiCheckpoint) ([]SuiGroup, error) {
+	groups := []SuiGroup{}
 	coins := map[string]bool{}
 	for _, p := range positions {
 		pool := pools[p.pool]
-		g := SuiProtocolGroup{ID: protocol + ":" + p.object.ID, MarketID: p.pool, Label: "Liquidity", Metadata: map[string]any{"positionId": p.object.ID, "positionVersion": fmt.Sprint(p.object.Version), "poolVersion": fmt.Sprint(pool.object.Version), "liquidity": p.liquidity.String(), "tickLower": p.lower, "tickUpper": p.upper, "currentTick": pool.current, "sqrtPriceX64": pool.price.String(), "ownership": "direct"}}
+		g := SuiGroup{ID: protocol + ":" + p.object.ID, MarketID: p.pool, Label: "Liquidity", Metadata: map[string]any{"positionId": p.object.ID, "positionVersion": fmt.Sprint(p.object.Version), "poolVersion": fmt.Sprint(pool.object.Version), "liquidity": p.liquidity.String(), "tickLower": p.lower, "tickUpper": p.upper, "currentTick": pool.current, "sqrtPriceX64": pool.price.String(), "ownership": "direct"}}
 		if p.stateID != "" {
 			g.Metadata["positionInfoId"] = p.stateID
 			g.Metadata["positionInfoVersion"] = fmt.Sprint(p.stateVersion)
@@ -363,7 +363,7 @@ func suiCLMMGroups(ctx context.Context, reader SuiReader, protocol string, posit
 				return
 			}
 			coins[coin] = true
-			g.Components = append(g.Components, SuiProtocolComponent{Kind: kind, Coin: SuiCoinMetadata{CoinType: coin}, AmountRaw: amount.String(), Metadata: map[string]any{"positionId": p.object.ID, "role": role}})
+			g.Components = append(g.Components, SuiComponent{Kind: kind, Coin: SuiCoinMetadata{CoinType: coin}, AmountRaw: amount.String(), Metadata: map[string]any{"positionId": p.object.ID, "role": role}})
 		}
 		if p.liquidity.Sign() > 0 {
 			a, b := suiCLMMAmounts(p.liquidity, pool.price, p.ticks[0].price, p.ticks[1].price)

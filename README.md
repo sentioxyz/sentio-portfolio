@@ -74,25 +74,38 @@ spelled out rather than inferred from a zero value. Adapters continue to gate
 later markets, vaults, rewards, and replacement contracts with their narrower
 component deployment windows.
 
-Sui uses a separate `SuiReader` for direct wallet holdings and
-`NewSuiProtocolReader()` for latest NAVI lending, NAVI Multiply,
-native NAVI vaults, Volo strategy vaults (including Single Loop and Astros),
-Suilend lending, and Cetus/Bluefin concentrated liquidity. The protocol IDs are
-`navi`, `volo-vaults`, `suilend`, `cetus`, and `bluefin`.
-`ReadLatest` takes a `SuiObjectReader`; NAVI and Volo discovery also requires
-`SuiObjectLineageReader` (`SuiGRPCClient` implements both). Those reads use that
-gRPC connection and answer for the head only.
+Sui accounts are read by a `SuiEngine`, built with `NewSuiEngine(engine, SuiConfig{…})` from the
+`Engine` whose indexer lane, observer and `SentioIndexers` it shares. It covers direct wallet
+holdings, NAVI lending, NAVI Multiply, native NAVI vaults, Volo strategy vaults (including Single
+Loop and Astros), Suilend lending, and Cetus/Bluefin concentrated liquidity; the protocol IDs are
+`wallet`, `navi`, `volo-vaults`, `suilend`, `cetus`, and `bluefin`. `Scan` and `ScanWithOptions`
+answer one request as a `SuiResponse`, shaped like `Response`; `ScanRange` answers a backfill. The
+host supplies what the kernel does not own: `SuiConfig.Node` dials a node (`SuiGRPCNode`) on the
+first read that needs one, `Prices` values coins through `SuiPrices`, and `WalletHistory` reads past
+balances through `SuiWalletHistory`.
 
-Suilend is the exception: it is read from a version-pinned SQL processor index
-rather than from a node, which is what lets it answer for a past checkpoint at
-all. A host configures it with `NewSuilendHistoryReader(SentioIndexerConfig{…})`
-and `SuiProtocolReader.WithSuilendHistory(reader)`; `ReadLatest`,
-`ReadAtTime` and `ReadAtCheckpoint` then each execute one SQL statement, once,
-against the pinned processor version: submitted to the async SQL endpoint on the
-LARGE engine and polled until it finishes. Without that configuration a Suilend read
-is an error — it never falls back to a node, because a node cannot answer for a
-historical checkpoint and a head answer under a past pin would be a wrong number
-nobody can see is wrong. The other four Sui protocols have no history.
+Each protocol reads its latest and its pinned state from one fixed source, and a source that fails
+is never replaced by another, because each answers for a different checkpoint:
+
+| Protocol | Latest | Pinned |
+| --- | --- | --- |
+| `wallet` | node holdings | wallet history, at the protocol samples' checkpoint |
+| `navi` | node object state | processor index |
+| `suilend` | processor index: the newest completed sample, at most 2h1m old | processor index |
+| `volo-vaults`, `cetus`, `bluefin` | node object state | not read |
+
+A pinned scan never reads node state: a latest-only protocol reports that it was not read rather
+than answering for the head under the pin's name, and the only node request a pinned scan may make
+is a coin's immutable metadata for wallet history. A request for indexed protocols alone needs no
+node. Without a source, its protocols are reported unread, never empty: an unconfigured Suilend
+index is an error, not a node read, because a node cannot answer for a past checkpoint and a head
+answer under a past pin would be a wrong number nobody can see is wrong. NAVI and Volo discovery
+reads `SuiObjectLineageReader` (`SuiGRPCClient` implements it) over the same connection.
+
+Suilend and NAVI's history are read from version-pinned SQL processor indexes, configured as the
+`Engine`'s `SentioIndexers["suilend"]` and `["navi"]`. A read executes one SQL statement, once,
+against the pinned processor version: submitted to the async SQL endpoint on the LARGE engine and
+polled until it finishes.
 
 The index publishes immutable object-version rows (`PortfolioObjectState`), a
 per-sample completion certificate (`PortfolioSnapshot`), coin metadata, and two
@@ -103,18 +116,27 @@ with what is visible before accepting the sample. The returned checkpoint is the
 sample's, not the current head, and group metadata reports the sample interval
 the certificate itself bounds.
 
-`ReadRange(owner, from, to)` answers a backfill: it returns every completed
-sample whose interval meets `[from, to]`, each as a `SuiHistorySample` owning
-`[Start, Until)`, and `At(t)` reports one as `ReadAtTime(t)` would. A statement
-covers several samples: it selects each stage's candidates once for all of
-them, keeps per object only the newest version up to each sample, and counts
-every certificate in one scan of their joint interval. The reader then repeats
-the single-sample selection for each sample over those rows and certifies it
-with the same checks, so a sample whose certificate fails carries its own error
-without affecting its neighbours. Statements are sized from the bytes per sample
-the previous one returned, because the response is most of their cost. A
-statement whose response is paged or past the body limit, or that the client or
-the endpoint gives up on, is asked again for fewer samples.
+A range scan reads each index once over its instants' span: every completed sample whose
+interval meets it, each owning `[Start, Until)`, and an instant is answered by the newest sample
+covering it, as a single read at that instant would be. A pinned time scan is a range of one
+instant. A statement covers several samples: it selects each stage's candidates once for all of
+them, keeps per object only the newest version up to each sample, and counts every certificate in
+one scan of their joint interval. The reader then repeats the single-sample selection for each
+sample over those rows and certifies it with the same checks, so a sample whose certificate fails
+carries its own error without affecting its neighbours. Statements are sized from the bytes per
+sample the previous one returned, because the response is most of their cost. A statement whose
+response is paged or past the body limit, or that the client or the endpoint gives up on, is asked
+again for fewer samples.
+
+The wallet is read at the state the protocols beside it describe, or an asset moving between them
+would be counted twice or not at all: every protocol of an instant is answered at the oldest of the
+checkpoints its samples are at — indexes sample on fixed UTC boundaries, a coarser one's a subset of
+a finer one's, so each has a sample there — and wallet history is read at that checkpoint, once for
+every instant of a range. Each sample is valued at its own timestamp, never at a later quote. A
+range instant carries `Retry` when a source did not answer — an index read failed, wallet history
+had not reached the checkpoint, the price service was unavailable — and wraps `ErrSuiRangeUnread`
+when the scan ran out of time first; part of the deadline is kept for pricing what was read. An
+index that answered, even with a sample it could not certify, is not a reason to retry.
 
 Cetus and Bluefin discover directly owned `position::Position` NFTs from their
 defining packages. Each position names its pool; only those pools, the two active
@@ -157,7 +179,7 @@ it (100% utilization). A reserve stamped later than the sample is a
 contradiction the read rejects rather than projecting backwards. All operations use integer WAD
 arithmetic and the Move operation order; raw token amounts are floored only
 after conversion. Metadata comes from the chain and must agree with reserve
-precision. USD prices remain the host's responsibility. The formulas follow
+precision. The formulas follow
 [Suilend's Move contracts](https://github.com/suilend/suilend/tree/devel/contracts/suilend/sources).
 
 NAVI discovery follows the main Storage's market-counter object through its
@@ -185,8 +207,8 @@ Latest reads report the heads observed before and after reading
 to nodes at different heights. Regressing heads do not discard positions or
 trigger synchronization retries; the original observations are preserved. They
 do not bound the object versions read or describe an atomic portfolio at one
-checkpoint. History is not supported. Hosts must reject historical requests
-before reading current state and preserve this metadata when combining snapshots.
+checkpoint. Volo, Cetus and Bluefin have no history, so a pinned scan reports them unread;
+preserve this metadata when combining snapshots.
 
 Lending projects reserve interest indices forward to the observed timestamp using
 integer RAY arithmetic and NAVI's fixed nine-decimal principal precision.
@@ -198,7 +220,7 @@ Multiply retains collateral and debt. Vault amounts use stored NAV
 includes pending deposits and claimable principal once, and reports the oldest
 contributing NAV/oracle timestamp. Incentive rewards and withdrawal fees are
 excluded; amounts describe positions, not an immediate redemption quote. Coin
-precision comes from on-chain metadata, and the host supplies current prices.
+precision comes from on-chain metadata, and prices from the host's `SuiPrices`.
 
 The accounting follows the official [NAVI contracts](https://github.com/naviprotocol/navi-smart-contracts)
 and [NAVI SDK](https://github.com/naviprotocol/naviprotocol-monorepo), with Volo

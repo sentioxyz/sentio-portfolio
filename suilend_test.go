@@ -61,8 +61,7 @@ func TestSuilendLatestSupplyDebtAndOwnership(t *testing.T) {
 	// Multiple caps can legally authorize one obligation; never duplicate its debt.
 	cap := f.objects[naviAddress("0x10")]
 	f.objects[naviAddress("0x11")] = latestObject("0x11", cap.ObjectType, "ADDRESS", owner.Hex(), map[string]any{"obligation_id": naviAddress("0x20")})
-	reader := NewSuiProtocolReader()
-	if !slices.Contains(reader.ProtocolIDs(), "suilend") {
+	if !slices.ContainsFunc(suiRoutes, func(route suiRoute) bool { return route.id == "suilend" && route.latest == suiFromIndex }) {
 		t.Fatal("Suilend is not registered")
 	}
 	got, err := readSuilendFixture(t, f, owner)

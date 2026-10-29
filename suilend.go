@@ -268,11 +268,11 @@ func (m *suilendMarketMemo) market(market SuiObject) (suilendParsedMarket, error
 	return parsed, nil
 }
 
-func suilendLending(ctx context.Context, owner SuiAddress, pin SuiCheckpoint, reader suiCoinMetadataReader, state suilendState) ([]SuiProtocolGroup, error) {
-	groups := []SuiProtocolGroup{}
+func suilendLending(ctx context.Context, owner SuiAddress, pin SuiCheckpoint, reader suiCoinMetadataReader, state suilendState) ([]SuiGroup, error) {
+	groups := []SuiGroup{}
 	tokens := map[string]bool{}
 	for _, p := range state.obligations {
-		group := SuiProtocolGroup{ID: "suilend:" + p.market + ":" + p.object.ID, MarketID: p.market, Label: "Lending", Metadata: map[string]any{"product": "lending", "account": owner.Hex(), "obligation": p.object.ID, "ownerCapabilities": p.caps, "marketType": p.marketType}}
+		group := SuiGroup{ID: "suilend:" + p.market + ":" + p.object.ID, MarketID: p.market, Label: "Lending", Metadata: map[string]any{"product": "lending", "account": owner.Hex(), "obligation": p.object.ID, "ownerCapabilities": p.caps, "marketType": p.marketType}}
 		for _, side := range []string{"deposits", "borrows"} {
 			positions, err := suilendStructVector(p.fields, side)
 			if err != nil {
@@ -329,7 +329,7 @@ func suilendLending(ctx context.Context, owner SuiAddress, pin SuiCheckpoint, re
 					continue
 				}
 				tokens[coin] = true
-				group.Components = append(group.Components, SuiProtocolComponent{Kind: kind, Coin: SuiCoinMetadata{CoinType: coin, Decimals: reserve.decimals}, AmountRaw: amount.String(), Metadata: map[string]any{"reserve": reserve.id, "reserveIndex": index.String(), amountKey: principal}})
+				group.Components = append(group.Components, SuiComponent{Kind: kind, Coin: SuiCoinMetadata{CoinType: coin, Decimals: reserve.decimals}, AmountRaw: amount.String(), Metadata: map[string]any{"reserve": reserve.id, "reserveIndex": index.String(), amountKey: principal}})
 			}
 		}
 		if len(group.Components) > 0 {

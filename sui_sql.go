@@ -61,7 +61,7 @@ func (d *suiSQLData) suilendMarket(market SuiObject) (suilendParsedMarket, error
 
 // Each read is a single version-pinned SQL statement. The snapshot row survives
 // an empty address selection, so an empty wallet cannot hide missing history.
-func (r *suiHistoryIndex) readSQLPortfolio(ctx context.Context, owner SuiAddress, selection suiSQLSelection) (SuiProtocolPositions, error) {
+func (r *suiHistoryIndex) readSQLPortfolio(ctx context.Context, owner SuiAddress, selection suiSQLSelection) (suiPositions, error) {
 	data, err := r.readSQL(ctx, owner, selection)
 	if err != nil {
 		return r.result(SuiCheckpoint{}), err
@@ -71,7 +71,7 @@ func (r *suiHistoryIndex) readSQLPortfolio(ctx context.Context, owner SuiAddress
 
 // samplePortfolio calculates one certified sample and labels its groups with the
 // sample they were answered from and the selection that chose it.
-func (r *suiHistoryIndex) samplePortfolio(ctx context.Context, owner SuiAddress, data *suiSQLData, selection suiSQLSelection) (SuiProtocolPositions, error) {
+func (r *suiHistoryIndex) samplePortfolio(ctx context.Context, owner SuiAddress, data *suiSQLData, selection suiSQLSelection) (suiPositions, error) {
 	result, err := r.calculatePortfolio(ctx, owner, data)
 	if err != nil {
 		return result, err
@@ -120,7 +120,7 @@ func suiSampleIntervalSeconds(data *suiSQLData) int64 {
 
 // calculatePortfolio turns one snapshot's indexed objects into position groups.
 // Quantities are computed locally from those objects; no further read happens.
-func (r *suiHistoryIndex) calculatePortfolio(ctx context.Context, owner SuiAddress, data *suiSQLData) (SuiProtocolPositions, error) {
+func (r *suiHistoryIndex) calculatePortfolio(ctx context.Context, owner SuiAddress, data *suiSQLData) (suiPositions, error) {
 	result := r.result(data.pin)
 	switch r.protocolID {
 	case "suilend":

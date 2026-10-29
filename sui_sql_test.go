@@ -14,6 +14,8 @@ import (
 )
 
 type sqlPortfolioFixture struct {
+	// url is the fixture server's SQL execute endpoint.
+	url    string
 	pin    SuiCheckpoint
 	rows   []suiSQLRow
 	calls  int
@@ -105,18 +107,18 @@ func newSQLPortfolioFixture(t *testing.T, protocol string, base *latestSuiFixtur
 		_ = json.NewEncoder(w).Encode(response)
 	}))
 	t.Cleanup(server.Close)
-	reader, err := newSuiHistoryIndex(SentioIndexerConfig{SQLURL: server.URL + "/sql/execute", ProcessorVersion: "1"}, protocol, "Suilend", start)
+	fixture.url = server.URL + "/sql/execute"
+	reader, err := newSuiHistoryIndex(SentioIndexerConfig{SQLURL: fixture.url, ProcessorVersion: "1"}, protocol, "Suilend", start)
 	if err != nil {
 		t.Fatal(err)
 	}
 	fastSQL(reader.api)
 	return fixture, reader
 }
-func newSuilendIndexFixture(t *testing.T, base *latestSuiFixture) (*sqlPortfolioFixture, *SuilendHistoryReader) {
-	f, r := newSQLPortfolioFixture(t, "suilend", base)
-	return f, &SuilendHistoryReader{r}
+func newSuilendIndexFixture(t *testing.T, base *latestSuiFixture) (*sqlPortfolioFixture, *suiHistoryIndex) {
+	return newSQLPortfolioFixture(t, "suilend", base)
 }
-func readSuilendFixture(t *testing.T, f *latestSuiFixture, owner SuiAddress) (SuiProtocolPositions, error) {
+func readSuilendFixture(t *testing.T, f *latestSuiFixture, owner SuiAddress) (suiPositions, error) {
 	fixture, r := newSuilendIndexFixture(t, f)
 	result, err := r.ReadLatest(context.Background(), owner)
 	if fixture.calls != 1 {
@@ -131,7 +133,7 @@ func TestSuiSQLLatestAndHistoryAreOneRequestWithNoNode(t *testing.T) {
 	base, owner := suilendFixture()
 	fixture, index := newSQLPortfolioFixture(t, "suilend", base)
 	for _, mode := range []string{"latest", "checkpoint", "time"} {
-		var got SuiProtocolPositions
+		var got suiPositions
 		var err error
 		before := fixture.calls
 		switch mode {
@@ -287,19 +289,6 @@ func TestSuiSQLTerminalAndTransferredCaps(t *testing.T) {
 	}
 }
 
-// Suilend is served by its index or not at all: an unconfigured index is an
-// error, never a node read that would silently answer for the head instead.
-func TestSuiSQLUnconfiguredSuilendNeverReadsNode(t *testing.T) {
-	base, owner := suilendFixture()
-	node := &latestHeadFixture{latestSuiFixture: base}
-	if _, err := NewSuiProtocolReader().ReadLatest(context.Background(), "suilend", owner, node); err == nil {
-		t.Fatal("suilend accepted a missing index")
-	}
-	if node.headReads != 0 {
-		t.Fatal("suilend invoked the node")
-	}
-}
-
 // An address that holds nothing is still answered from a completed sample, so
 // an empty result cannot be confused with an index that has not caught up.
 func TestSuiSQLCompletedSnapshotCertifiesEmptyWallet(t *testing.T) {
@@ -331,7 +320,7 @@ func TestSuiSQLNeverRetriesHTTPExecution(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			reader, err := NewSuilendHistoryReader(SentioIndexerConfig{SQLURL: server.URL + "/sql/execute", ProcessorVersion: "1"})
+			reader, err := newSuilendIndex(SentioIndexerConfig{SQLURL: server.URL + "/sql/execute", ProcessorVersion: "1"})
 			if err != nil {
 				t.Fatal(err)
 			}
