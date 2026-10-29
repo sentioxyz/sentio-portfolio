@@ -298,7 +298,10 @@ type SuiResponse struct {
 	// Checkpoint is the newest checkpoint any read answered for: a head seen after a latest read,
 	// or an index sample. It is zero when nothing was read.
 	Checkpoint SuiCheckpoint
-	// Prices holds every quote a component was valued at, keyed "sui:<coin type>".
+	// Prices holds one quote per coin a component was valued at, keyed "sui:<coin type>": the
+	// first protocol's in response order when protocols value a coin at different instants, as a
+	// latest scan does an indexed sample. A component's own PriceUSD is the price it was valued
+	// at.
 	Prices      map[string]float64
 	CompletedAt time.Time
 }
@@ -360,7 +363,9 @@ func (response *SuiResponse) add(result *suiProtocolResult) {
 		response.Checkpoint = result.checkpoint
 	}
 	for coin, price := range result.prices {
-		response.Prices[suiPriceKey(coin)] = price
+		if _, quoted := response.Prices[suiPriceKey(coin)]; !quoted {
+			response.Prices[suiPriceKey(coin)] = price
+		}
 	}
 }
 
@@ -460,7 +465,7 @@ func (e *SuiEngine) readLatest(ctx context.Context, owner SuiAddress, route suiR
 	}
 	var positions suiPositions
 	if route.id == "wallet" {
-		positions, err = readSuiWalletLatest(ctx, owner, reader)
+		positions, err = e.readWalletLatest(ctx, owner, reader)
 	} else {
 		positions, err = e.nodes.ReadLatest(ctx, route.id, owner, reader)
 		if err == nil && positions.ProtocolID != route.id {

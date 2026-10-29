@@ -781,3 +781,19 @@ func TestSuiEngineWiresIndexesAndObserverFromItsEngine(t *testing.T) {
 		t.Fatal("an index without a processor version was accepted")
 	}
 }
+
+// A price failure is about the coins it names, or every coin of its instant; a protocol that holds
+// nothing has nothing it failed to price.
+func TestSuiPriceFailureReachesOnlyProtocolsHoldingCoins(t *testing.T) {
+	owner := suiEngineOwner(t)
+	head := suiEngineCheckpoint(2000, suiEngineTestBase)
+	navi := suiEnginePositions("navi", head, map[string]string{suiLongType: "1"})
+	test := &suiEngineTest{t: t, node: &fakeSuiNode{head: head}, nodes: &fakeSuiNodeProtocols{positions: map[string]suiPositions{"navi": navi}}}
+	response := test.engine().ScanWithOptions(context.Background(), owner, SuiScanOptions{ProtocolIDs: map[string]struct{}{"navi": {}, "cetus": {}}})
+	if !suiHasError(response, "navi", "pricing", "Sui prices are not configured") {
+		t.Fatalf("navi: %+v", response.Errors)
+	}
+	if got := suiErrorsOf(response, "cetus", "pricing"); len(got) != 0 {
+		t.Fatalf("cetus holds nothing yet failed pricing: %v", got)
+	}
+}

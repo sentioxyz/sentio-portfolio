@@ -338,12 +338,14 @@ func suiWalletPin(read []suiRoute, answers map[string]suiAnsweredSample, plan su
 	if len(read) == 0 {
 		return pin, errors.New("Sui wallet history is read at a protocol sample's checkpoint, and no protocol index was read")
 	}
+	var at *time.Time
+	if plan.checkpoint == nil {
+		at = &plan.instants[i]
+	}
 	for _, route := range read {
 		answer := answers[route.id]
 		sample := answer.positions.Checkpoint
-		late := plan.checkpoint != nil && sample.Sequence > *plan.checkpoint ||
-			plan.checkpoint == nil && sample.Timestamp.After(plan.instants[i])
-		if answer.err != nil || sample.Sequence == 0 || sample.Timestamp.IsZero() || sample.Digest == ([32]byte{}) || late {
+		if answer.err != nil || checkSuiSample(route, answer.positions, plan.checkpoint, at) != nil {
 			return SuiCheckpoint{}, fmt.Errorf("wallet balances were not read: %s has no sample to pin them to", route.name)
 		}
 		if pin.Sequence != 0 && sample.Sequence != pin.Sequence {

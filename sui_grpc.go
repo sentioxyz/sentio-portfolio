@@ -86,7 +86,7 @@ func suiGRPCTarget(endpoint string) (string, credentials.TransportCredentials, e
 	}
 }
 
-// DialSuiGRPC connects to a Sui gRPC endpoint and verifies it serves the network named by
+// dialSuiGRPC connects to a Sui gRPC endpoint and verifies it serves the network named by
 // chainIdentifier. The endpoint is never quoted in errors.
 func dialSuiGRPC(
 	ctx context.Context,

@@ -46,10 +46,10 @@ const (
 	suiWalletMetadataCacheSize = 20_000
 )
 
-// readSuiWalletLatest reads the account's coins at the head, with each coin's on-chain metadata.
+// readWalletLatest reads the account's coins at the head, with each coin's on-chain metadata.
 // Coins without usable metadata are omitted and reported, because a balance without decimals
 // cannot be shown as an amount.
-func readSuiWalletLatest(ctx context.Context, owner SuiAddress, reader SuiReader) (suiPositions, error) {
+func (e *SuiEngine) readWalletLatest(ctx context.Context, owner SuiAddress, reader SuiReader) (suiPositions, error) {
 	holdings, err := reader.Holdings(ctx, owner, nil)
 	if err != nil {
 		return suiPositions{}, fmt.Errorf("failed to read Sui holdings: %w", err)
@@ -58,7 +58,7 @@ func readSuiWalletLatest(ctx context.Context, owner SuiAddress, reader SuiReader
 	for _, balance := range holdings.Balances {
 		coins = append(coins, balance.CoinType)
 	}
-	metadata, unusable, err := reader.CoinMetadata(ctx, coins)
+	metadata, unusable, err := e.coinMetadata(ctx, reader, coins)
 	if err != nil {
 		return suiPositions{}, fmt.Errorf("failed to read Sui coin metadata: %w", err)
 	}
@@ -211,14 +211,21 @@ func (e *SuiEngine) readWalletHistory(ctx, readCtx context.Context, owner SuiAdd
 	return reads
 }
 
-// suiMetadataCache remembers usable coin metadata, up to suiWalletMetadataCacheSize coins.
+// suiMetadataCache remembers usable coin metadata, up to suiWalletMetadataCacheSize coins. A coin
+// whose metadata was unusable is asked again: the chain may yet publish it.
 type suiMetadataCache struct {
 	mu      sync.Mutex
 	entries map[string]SuiCoinMetadata
 }
 
-// walletCoinMetadata is CoinMetadata through the node, remembering usable metadata between scans.
+// walletCoinMetadata is coinMetadata through the node, dialled only when the cache lacks a coin.
 func (e *SuiEngine) walletCoinMetadata(ctx context.Context, coins []string) (map[string]SuiCoinMetadata, map[string]error, error) {
+	return e.coinMetadata(ctx, nil, coins)
+}
+
+// coinMetadata is CoinMetadata through reader, or through the node when reader is nil,
+// remembering usable metadata between scans.
+func (e *SuiEngine) coinMetadata(ctx context.Context, reader SuiReader, coins []string) (map[string]SuiCoinMetadata, map[string]error, error) {
 	metadata := map[string]SuiCoinMetadata{}
 	missing := []string{}
 	e.metadata.mu.Lock()
@@ -233,9 +240,11 @@ func (e *SuiEngine) walletCoinMetadata(ctx context.Context, coins []string) (map
 	if len(missing) == 0 {
 		return metadata, map[string]error{}, nil
 	}
-	reader, err := e.node.get(ctx)
-	if err != nil {
-		return nil, nil, fmt.Errorf("Sui node is unavailable: %w", err)
+	if reader == nil {
+		var err error
+		if reader, err = e.node.get(ctx); err != nil {
+			return nil, nil, fmt.Errorf("Sui node is unavailable: %w", err)
+		}
 	}
 	read, unusable, err := reader.CoinMetadata(ctx, missing)
 	if err != nil {

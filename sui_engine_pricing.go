@@ -107,10 +107,14 @@ func (e *SuiEngine) quote(ctx context.Context, wanted map[time.Time][]string) su
 	return quotes
 }
 
-// at returns the quotes for coins at instant, and the failures about any of them.
+// at returns the quotes for coins at instant, and the failures about any of them. A route that
+// holds nothing is told of no failure.
 func (q suiQuotes) at(instant time.Time, coins []string) (map[string]float64, []error) {
 	key := suiQuoteKey(instant)
 	prices := map[string]float64{}
+	if len(coins) == 0 {
+		return prices, nil
+	}
 	for _, coin := range coins {
 		if price, ok := q.prices[key][coin]; ok {
 			prices[coin] = price
