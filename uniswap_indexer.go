@@ -4,14 +4,10 @@ import (
 	"context"
 	"fmt"
 	"math/big"
-	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 )
-
-const uniswapIndexerPageSize = 500
 
 type uniswapGeneration string
 
@@ -42,28 +38,29 @@ type uniswapIndexedNFT struct {
 }
 
 type uniswapIndexedNFTs struct {
-	CheckpointBlock uint64
-	NFTs            []uniswapIndexedNFT
-	// Lag notes a live read that trails its pin by more than indexMaxLag.
-	Lag *indexLagNote
+	// IndexerBlock is the block the index was read at.
+	IndexerBlock uint64
+	NFTs         []uniswapIndexedNFT
 }
 
+// uniswapIndexer reads the live position NFTs of each Uniswap generation, a project of its own.
 type uniswapIndexer struct {
-	api     *sentioAPIClient
-	configs map[uniswapGeneration]SentioIndexerConfig
+	indexes map[uniswapGeneration]*sentioIndex
 }
 
 func newUniswapIndexer(
 	v3Config SentioIndexerConfig,
 	v4Config SentioIndexerConfig,
 ) *uniswapIndexer {
-	return &uniswapIndexer{
-		api: newSentioAPIClient(),
-		configs: map[uniswapGeneration]SentioIndexerConfig{
-			uniswapV3: v3Config,
-			uniswapV4: v4Config,
-		},
+	api := newSentioAPIClient()
+	indexes := make(map[uniswapGeneration]*sentioIndex, 2)
+	for version, config := range map[uniswapGeneration]SentioIndexerConfig{uniswapV3: v3Config, uniswapV4: v4Config} {
+		chains, _ := uniswapIndexerChains(version)
+		indexes[version] = &sentioIndex{
+			name: "uniswap-" + string(version), api: api, config: config, chains: chains, probe: true,
+		}
 	}
+	return &uniswapIndexer{indexes: indexes}
 }
 
 func uniswapIndexerChains(version uniswapGeneration) ([]ChainID, error) {
@@ -77,94 +74,65 @@ func uniswapIndexerChains(version uniswapGeneration) ([]ChainID, error) {
 	}
 }
 
-func (i *uniswapIndexer) chainStatuses(
-	ctx context.Context,
-	definition uniswapIndexerDefinition,
-	chainID ChainID,
-	forceRefresh bool,
-) (map[ChainID]sentioChainStatus, error) {
-	chains, err := uniswapIndexerChains(definition.version)
-	if err != nil {
-		return nil, err
-	}
-	return i.api.chainStatusesForScan(ctx, i.configs[definition.version], chains, chainID, forceRefresh)
+type uniswapPositionRow struct {
+	ChainID int    `json:"chainId"`
+	Owner   string `json:"owner"`
+	TokenID string `json:"tokenId"`
+	Manager string `json:"manager"`
+	Balance string `json:"balance"`
 }
 
-// presenceProbe asks every chain of one Uniswap generation at once whether the account holds any
-// live position NFT, so a scan queries only the chains where it does. A chain the probe proves
-// empty is done.
-func (i *uniswapIndexer) presenceProbe(
-	definition uniswapIndexerDefinition,
-	account common.Address,
-) presenceProbe {
-	chains, _ := uniswapIndexerChains(definition.version)
+// uniswapPositionStream reads the position NFTs account holds of one generation. The index keeps
+// a row per NFT the account ever held, so only those with a balance are live.
+func uniswapPositionStream(definition uniswapIndexerDefinition, account common.Address) *indexStream[uniswapPositionRow, uniswapIndexedNFT] {
 	owner := strings.ToLower(account.Hex())
-	return presenceProbe{
-		name:           "uniswap-" + string(definition.version),
-		config:         i.configs[definition.version],
-		requiredChains: chains,
-		fields: []presenceField{{
-			entity: "positions",
-			where: func(chainID ChainID) string {
-				return fmt.Sprintf("id_starts_with: \"%d:%s:\", balance_not: 0", chainID, owner)
-			},
-		}},
+	return &indexStream[uniswapPositionRow, uniswapIndexedNFT]{
+		Entity: "positions", Account: account, MaxRows: definition.maxIndexedNFTs,
+		Where: func(chainID ChainID) indexWhere {
+			return indexWhere{Prefix: indexAccountPrefix(chainID, account), Terms: []indexTerm{{"balance_not", 0}}}
+		},
+		Decode: func(chainID ChainID, id string, row uniswapPositionRow) (uniswapIndexedNFT, error) {
+			expectedManager, exists := uniswapExpectedManager(definition.version, chainID)
+			if !exists {
+				return uniswapIndexedNFT{}, fmt.Errorf("Uniswap %s has no deployment on chain %d", definition.version, chainID)
+			}
+			if nft, valid := uniswapLivePosition(chainID, account, owner, expectedManager, id, row); valid {
+				return nft, nil
+			}
+			return uniswapIndexedNFT{}, fmt.Errorf("GraphQL returned malformed position row %q", id)
+		},
 	}
 }
 
-const uniswapWalletQuery = `
-query WalletPositions(
-  $prefix: String!
-  $after: ID!
-  $checkpoint: ID!
-  $first: Int!
-  $block: BigInt!
-) {
-  indexerCheckpoints(first: 2, block: { number: $block }, where: { id: $checkpoint }) {
-    blockNumber
-    timestampMs
-  }
-  positions(
-    first: $first
-    orderBy: id
-    orderDirection: asc
-    block: { number: $block }
-    where: { id_starts_with: $prefix, id_gt: $after, balance_not: 0 }
-  ) {
-    id
-    chainId
-    owner
-    tokenId
-    manager
-    balance
-  }
-}`
-
-type uniswapGraphQLResponse struct {
-	Data struct {
-		Checkpoints []struct {
-			BlockNumber string `json:"blockNumber"`
-			TimestampMS string `json:"timestampMs"`
-		} `json:"indexerCheckpoints"`
-		Positions []struct {
-			ID      string `json:"id"`
-			ChainID int    `json:"chainId"`
-			Owner   string `json:"owner"`
-			TokenID string `json:"tokenId"`
-			Manager string `json:"manager"`
-			Balance string `json:"balance"`
-		} `json:"positions"`
-	} `json:"data"`
-	Errors []struct {
-		Message string `json:"message"`
-	} `json:"errors"`
-}
-
-type uniswapGraphQLPage struct {
-	CheckpointBlock uint64
-	CheckpointMS    uint64
-	Positions       []uniswapIndexedNFT
-	IDs             []string
+// uniswapLivePosition reads a position row as the live NFT it must be: owner's, of the deployment's
+// manager, held with a balance of one, under the id its fields rebuild.
+func uniswapLivePosition(
+	chainID ChainID,
+	account common.Address,
+	owner string,
+	expectedManager common.Address,
+	id string,
+	row uniswapPositionRow,
+) (uniswapIndexedNFT, bool) {
+	if row.ChainID != int(chainID) || row.Owner != owner || !common.IsHexAddress(row.Manager) {
+		return uniswapIndexedNFT{}, false
+	}
+	tokenID, ok := new(big.Int).SetString(row.TokenID, 10)
+	if !ok || tokenID.Sign() < 0 || tokenID.BitLen() > 256 || row.TokenID != tokenID.String() {
+		return uniswapIndexedNFT{}, false
+	}
+	manager := common.HexToAddress(row.Manager)
+	if row.Manager != strings.ToLower(manager.Hex()) || manager != expectedManager {
+		return uniswapIndexedNFT{}, false
+	}
+	balance, ok := new(big.Int).SetString(row.Balance, 10)
+	if !ok || row.Balance != balance.String() || balance.Cmp(big.NewInt(1)) != 0 {
+		return uniswapIndexedNFT{}, false
+	}
+	if id != uniswapPositionRowID(chainID, account, manager, tokenID) {
+		return uniswapIndexedNFT{}, false
+	}
+	return uniswapIndexedNFT{TokenID: tokenID, Manager: manager}, true
 }
 
 func uniswapPositionRowID(
@@ -198,110 +166,14 @@ func uniswapExpectedManager(
 	}
 }
 
-func (i *uniswapIndexer) graphqlPage(
-	ctx context.Context,
-	definition uniswapIndexerDefinition,
-	chainID ChainID,
-	owner common.Address,
-	prefix string,
-	after string,
-	first int,
-	block uint64,
-) (uniswapGraphQLPage, error) {
-	var payload uniswapGraphQLResponse
-	err := i.api.doJSON(
-		ctx,
-		http.MethodPost,
-		i.configs[definition.version].GraphQLURL,
-		map[string]any{
-			"query": uniswapWalletQuery,
-			"variables": map[string]any{
-				"prefix":     prefix,
-				"after":      after,
-				"checkpoint": strconv.FormatUint(uint64(chainID), 10),
-				"first":      first,
-				"block":      strconv.FormatUint(block, 10),
-			},
-		},
-		&payload,
-	)
-	if err != nil {
-		return uniswapGraphQLPage{}, err
-	}
-	if len(payload.Errors) > 0 {
-		messages := make([]string, 0, len(payload.Errors))
-		for _, graphQLError := range payload.Errors {
-			messages = append(messages, graphQLError.Message)
-		}
-		return uniswapGraphQLPage{}, fmt.Errorf("GraphQL: %s", strings.Join(messages, "; "))
-	}
-	if len(payload.Data.Checkpoints) != 1 {
-		return uniswapGraphQLPage{}, fmt.Errorf(
-			"GraphQL returned %d checkpoints",
-			len(payload.Data.Checkpoints),
-		)
-	}
-	checkpointBlock, err := strconv.ParseUint(payload.Data.Checkpoints[0].BlockNumber, 10, 64)
-	if err != nil {
-		return uniswapGraphQLPage{}, fmt.Errorf("invalid checkpoint block: %w", err)
-	}
-	checkpointMS, err := strconv.ParseUint(payload.Data.Checkpoints[0].TimestampMS, 10, 64)
-	if err != nil {
-		return uniswapGraphQLPage{}, fmt.Errorf("invalid checkpoint timestamp: %w", err)
-	}
-	page := uniswapGraphQLPage{
-		CheckpointBlock: checkpointBlock,
-		CheckpointMS:    checkpointMS,
-		Positions:       make([]uniswapIndexedNFT, 0, len(payload.Data.Positions)),
-		IDs:             make([]string, 0, len(payload.Data.Positions)),
-	}
-	expectedOwner := strings.ToLower(owner.Hex())
-	expectedManager, exists := uniswapExpectedManager(definition.version, chainID)
-	if !exists {
-		return uniswapGraphQLPage{}, fmt.Errorf(
-			"Uniswap %s has no deployment on chain %d",
-			definition.version,
-			chainID,
-		)
-	}
-	for _, row := range payload.Data.Positions {
-		if row.ChainID != int(chainID) || row.Owner != expectedOwner || row.ID <= after {
-			return uniswapGraphQLPage{}, fmt.Errorf("GraphQL returned malformed position row %q", row.ID)
-		}
-		tokenID, ok := new(big.Int).SetString(row.TokenID, 10)
-		if !ok || tokenID.Sign() < 0 || tokenID.BitLen() > 256 || row.TokenID != tokenID.String() {
-			return uniswapGraphQLPage{}, fmt.Errorf("GraphQL returned malformed position row %q", row.ID)
-		}
-		if !common.IsHexAddress(row.Manager) {
-			return uniswapGraphQLPage{}, fmt.Errorf("GraphQL returned malformed position row %q", row.ID)
-		}
-		manager := common.HexToAddress(row.Manager)
-		if row.Manager != strings.ToLower(manager.Hex()) || manager != expectedManager {
-			return uniswapGraphQLPage{}, fmt.Errorf("GraphQL returned malformed position row %q", row.ID)
-		}
-		balance, ok := new(big.Int).SetString(row.Balance, 10)
-		if !ok || row.Balance != balance.String() || balance.Cmp(big.NewInt(1)) != 0 {
-			return uniswapGraphQLPage{}, fmt.Errorf("GraphQL returned malformed position row %q", row.ID)
-		}
-		if row.ID != uniswapPositionRowID(chainID, owner, manager, tokenID) ||
-			!strings.HasPrefix(row.ID, prefix) {
-			return uniswapGraphQLPage{}, fmt.Errorf("GraphQL returned malformed position row %q", row.ID)
-		}
-		page.IDs = append(page.IDs, row.ID)
-		page.Positions = append(page.Positions, uniswapIndexedNFT{
-			TokenID: tokenID,
-			Manager: manager,
-		})
-	}
-	return page, nil
-}
-
+// prefetchPresence asks every chain of one Uniswap generation at once whether the account holds
+// any live position NFT, so a scan queries only the chains where it does.
 func (i *uniswapIndexer) prefetchPresence(ctx context.Context, version uniswapGeneration, account common.Address) {
 	definition, exists := uniswapIndexerDefinitions[version]
 	if !exists {
 		return
 	}
-	i.api.prefetchPresence(ctx, i.presenceProbe(definition, account), strings.ToLower(account.Hex()))
+	i.indexes[version].prefetchPresence(ctx, uniswapPositionStream(definition, account))
 }
 
 func (i *uniswapIndexer) indexedNFTs(
@@ -314,93 +186,10 @@ func (i *uniswapIndexer) indexedNFTs(
 	if !exists {
 		return uniswapIndexedNFTs{}, fmt.Errorf("unknown Uniswap generation %q", version)
 	}
-
-	i.api.awaitPresence(ctx, i.presenceProbe(definition, account), strings.ToLower(account.Hex()))
-	statuses, _, err := indexQueryBlock(block, func(forceRefresh bool) (map[ChainID]sentioChainStatus, error) {
-		return i.chainStatuses(ctx, definition, block.ChainID, forceRefresh)
-	})
+	positions := uniswapPositionStream(definition, account)
+	at, err := i.indexes[version].read(ctx, nil, block, positions)
 	if err != nil {
-		return uniswapIndexedNFTs{}, err
+		return uniswapIndexedNFTs{}, fmt.Errorf("Uniswap %s index query: %w", version, err)
 	}
-
-	proof, empty := i.api.chainProvenEmpty(
-		ctx, i.presenceProbe(definition, account), block, strings.ToLower(account.Hex()), statuses,
-	)
-	if empty {
-		return uniswapIndexedNFTs{CheckpointBlock: proof.Checkpoint, NFTs: make([]uniswapIndexedNFT, 0)}, nil
-	}
-	// Only the pages take a lane slot: the status read needs none, and a chain the probe proved
-	// empty sends nothing.
-	release, err := lockSentioLane(ctx)
-	if err != nil {
-		return uniswapIndexedNFTs{}, err
-	}
-	defer release()
-
-	prefix := fmt.Sprintf("%d:%s:", block.ChainID, strings.ToLower(account.Hex()))
-	after := prefix
-	queryBlock := block.Number
-	result := make([]uniswapIndexedNFT, 0)
-	var checkpointBlock uint64
-	var checkpointMS uint64
-	var lag *indexLagNote
-	firstRequest := true
-	for len(result) <= definition.maxIndexedNFTs {
-		first := min(uniswapIndexerPageSize, definition.maxIndexedNFTs+1-len(result))
-		requestedBlock := queryBlock
-		page, err := i.graphqlPage(
-			ctx,
-			definition,
-			block.ChainID,
-			account,
-			prefix,
-			after,
-			first,
-			queryBlock,
-		)
-		if err != nil {
-			return uniswapIndexedNFTs{}, fmt.Errorf("Uniswap %s index query: %w", version, err)
-		}
-		note, err := checkIndexCheckpoint(block, page.CheckpointBlock, page.CheckpointMS)
-		if err != nil {
-			return uniswapIndexedNFTs{}, fmt.Errorf("Uniswap %s: %w", version, err)
-		}
-		if checkpointBlock == 0 {
-			lag = note
-			checkpointBlock = page.CheckpointBlock
-			checkpointMS = page.CheckpointMS
-			queryBlock = checkpointBlock
-		} else if page.CheckpointBlock != checkpointBlock || page.CheckpointMS != checkpointMS {
-			return uniswapIndexedNFTs{}, fmt.Errorf("Uniswap %s pagination changed checkpoint", version)
-		}
-		for index, id := range page.IDs {
-			if id <= after {
-				return uniswapIndexedNFTs{}, fmt.Errorf("Uniswap %s rows are not ordered", version)
-			}
-			after = id
-			result = append(result, page.Positions[index])
-		}
-		if len(page.Positions) > first {
-			return uniswapIndexedNFTs{}, fmt.Errorf("Uniswap %s exceeded GraphQL page size", version)
-		}
-		if len(result) > definition.maxIndexedNFTs {
-			break
-		}
-		if firstRequest && len(page.Positions) == first && requestedBlock != checkpointBlock {
-			// Restart at the timer checkpoint so a multi-page response never mixes snapshots.
-			result = result[:0]
-			after = prefix
-			firstRequest = false
-			continue
-		}
-		firstRequest = false
-		if len(page.Positions) < first {
-			return uniswapIndexedNFTs{CheckpointBlock: checkpointBlock, NFTs: result, Lag: lag}, nil
-		}
-	}
-	return uniswapIndexedNFTs{}, fmt.Errorf(
-		"Uniswap %s account has more than %d indexed positions",
-		version,
-		definition.maxIndexedNFTs,
-	)
+	return uniswapIndexedNFTs{IndexerBlock: at.QueryBlock, NFTs: positions.Rows()}, nil
 }

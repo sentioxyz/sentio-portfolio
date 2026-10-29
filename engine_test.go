@@ -60,49 +60,49 @@ func TestEngineWiresRuntimeSentioIndexerConfig(t *testing.T) {
 	for _, adapter := range engine.adapters {
 		switch typed := adapter.(type) {
 		case *AsterAdapter:
-			if typed.indexer.config != configs["aster"] {
+			if typed.indexer.index.config != configs["aster"] {
 				t.Fatalf("Aster indexer config was not wired")
 			}
 			found["aster"] = true
 		case *EtherfiAdapter:
-			if typed.indexer.config != configs["etherfi"] {
+			if typed.indexer.index.config != configs["etherfi"] {
 				t.Fatalf("Ether.fi indexer config was not wired")
 			}
 			found["etherfi"] = true
 		case *EulerV2Adapter:
 			indexer, ok := typed.indexer.(*eulerIndexer)
-			if !ok || indexer.config != configs["euler-v2"] {
+			if !ok || indexer.index.config != configs["euler-v2"] {
 				t.Fatalf("Euler V2 indexer config was not wired")
 			}
 			found["euler-v2"] = true
 		case *FraxEtherAdapter:
-			if typed.indexer.config != configs["frax-ether"] {
+			if typed.indexer.index.config != configs["frax-ether"] {
 				t.Fatalf("Frax Ether indexer config was not wired")
 			}
 			found["frax-ether"] = true
 		case *MethAdapter:
-			if typed.indexer != configs["meth-protocol"] {
-				t.Fatalf("mETH indexer config = %+v, want %+v", typed.indexer, configs["meth-protocol"])
+			if typed.index.config != configs["meth-protocol"] {
+				t.Fatalf("mETH indexer config = %+v, want %+v", typed.index.config, configs["meth-protocol"])
 			}
 			found["meth-protocol"] = true
 		case *MorphoAdapter:
 			indexer, ok := typed.indexer.(*morphoIndexer)
-			if !ok || indexer.config != configs["morpho-blue"] {
+			if !ok || indexer.index.config != configs["morpho-blue"] {
 				t.Fatalf("Morpho indexer config was not wired")
 			}
 			found["morpho-blue"] = true
 		case *RenzoAdapter:
-			if typed.indexer.config != configs["renzo"] {
+			if typed.indexer.index.config != configs["renzo"] {
 				t.Fatalf("Renzo indexer config was not wired")
 			}
 			found["renzo"] = true
 		case *UniswapV3Adapter:
-			if typed.indexer.configs[uniswapV3] != configs["uniswap-v3"] {
+			if typed.indexer.indexes[uniswapV3].config != configs["uniswap-v3"] {
 				t.Fatalf("Uniswap V3 indexer config was not wired")
 			}
 			found["uniswap-v3"] = true
 		case *UniswapV4Adapter:
-			if typed.indexer.configs[uniswapV4] != configs["uniswap-v4"] {
+			if typed.indexer.indexes[uniswapV4].config != configs["uniswap-v4"] {
 				t.Fatalf("Uniswap V4 indexer config was not wired")
 			}
 			found["uniswap-v4"] = true

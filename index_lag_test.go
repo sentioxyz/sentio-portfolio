@@ -3,7 +3,6 @@ package portfolio
 import (
 	"context"
 	"errors"
-	"fmt"
 	"math/big"
 	"strings"
 	"testing"
@@ -132,46 +131,7 @@ func TestIndexQueryBlock(t *testing.T) {
 	}
 }
 
-func TestSplitCoverageNotes(t *testing.T) {
-	note := &indexLagNote{checkpoint: 90, lag: 2 * time.Hour}
-	failure := errors.New("vault read failed")
-	for _, test := range []struct {
-		name        string
-		err         error
-		wantNotes   []string
-		wantFailure string
-	}{
-		{name: "nothing"},
-		{name: "a failure", err: failure, wantFailure: failure.Error()},
-		{name: "a wrapped note", err: fmt.Errorf("index query: %w", note), wantNotes: []string{"index query: " + note.Error()}},
-		{
-			name: "a note joined to a failure", err: errors.Join(failure, note.err()),
-			wantNotes: []string{note.Error()}, wantFailure: failure.Error(),
-		},
-		{
-			name: "a wrapped join", err: fmt.Errorf("reads: %w", errors.Join(note, failure)),
-			wantNotes: []string{note.Error()}, wantFailure: failure.Error(),
-		},
-		{name: "a nil note", err: errors.Join(failure, (*indexLagNote)(nil).err()), wantFailure: failure.Error()},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			notes, err := splitCoverageNotes(test.err)
-			if len(notes) != len(test.wantNotes) {
-				t.Fatalf("notes = %v, want %v", notes, test.wantNotes)
-			}
-			for index, want := range test.wantNotes {
-				if notes[index].Error() != want {
-					t.Fatalf("note %d = %q, want %q", index, notes[index], want)
-				}
-			}
-			if (err == nil) != (test.wantFailure == "") || (err != nil && err.Error() != test.wantFailure) {
-				t.Fatalf("failure = %v, want %q", err, test.wantFailure)
-			}
-		})
-	}
-}
-
-// laggingTestAdapter reads its group from an index that trails the pin, and may fail beside it.
+// laggingTestAdapter reads its group from an index that trails the pin, and may fail after it.
 type laggingTestAdapter struct {
 	*deadlineTestAdapter
 	failure error
@@ -184,12 +144,12 @@ func (a *laggingTestAdapter) Positions(
 	account common.Address,
 ) ([]Group, error) {
 	groups, _ := a.deadlineTestAdapter.Positions(ctx, client, block, account)
-	note := &indexLagNote{checkpoint: 900, lag: 2*time.Hour + 30*time.Second}
-	return groups, errors.Join(a.failure, fmt.Errorf("index query: %w", note))
+	noteCoverage(ctx, &indexLagNote{checkpoint: 900, lag: 2*time.Hour + 30*time.Second})
+	return groups, a.failure
 }
 
 // A lagging index keeps what was read and says what may be missing, as a coverage note, apart from
-// any failure of the same read.
+// any failure of the same deployment: the note reaches the scan however the adapter's read ends.
 func TestEngineReportsIndexLagAsCoverage(t *testing.T) {
 	engine := newDeadlineTestEngine(t, availabilityRPCServer{t: t, block: 1_000}, &deadlineTestPrices{}, nil,
 		&laggingTestAdapter{deadlineTestAdapter: newDeadlineTestAdapter("lagging", false)},
@@ -210,7 +170,7 @@ func TestEngineReportsIndexLagAsCoverage(t *testing.T) {
 	if !read["lagging"] || !read["failing"] {
 		t.Fatalf("snapshots = %+v, want both groups kept", response.Snapshots)
 	}
-	want := "index query: indexer trails the pinned block by 2h0m0s: positions opened after block 900 may be missing"
+	want := "indexer trails the pinned block by 2h0m0s: positions opened after block 900 may be missing"
 	coverage := scanErrorsIn(response, "coverage")
 	if len(coverage) != 2 {
 		t.Fatalf("coverage = %+v, want one note per adapter", coverage)
@@ -224,60 +184,6 @@ func TestEngineReportsIndexLagAsCoverage(t *testing.T) {
 	if len(failures) != 1 || failures[0].ProtocolID != "failing" || failures[0].Message != "vault read failed" {
 		t.Fatalf("protocol errors = %+v, want the failing adapter's failure alone", failures)
 	}
-}
-
-func TestPendleReturnsTheIndexLagWithItsGroups(t *testing.T) {
-	note := &indexLagNote{checkpoint: 900, lag: 2 * time.Hour}
-	adapter := newPendleAdapterWithIndexer(&stubPendleIndexer{lag: note})
-	block := BlockRef{ChainID: Ethereum, Number: pendleChainConfigs[Ethereum].ActivationBlock + 1}
-	groups, err := adapter.Positions(context.Background(), nil, block, presenceTestAccount)
-	if len(groups) != 0 || !errors.Is(err, note) {
-		t.Fatalf("groups = %d err = %v, want no groups and the lag note", len(groups), err)
-	}
-}
-
-// Morpho and Lista carry the note on their indexers' results rather than in a return value, so
-// nothing but these tests makes their adapters pass it on. An account with no positions is the
-// case that matters most: the position the lagging index missed is the one it has.
-func TestMorphoReturnsTheIndexLagWithItsGroups(t *testing.T) {
-	note := &indexLagNote{checkpoint: 900, lag: 2 * time.Hour}
-	adapter := newMorphoAdapterWithIndexer(fixedMorphoLiveIndexer{refs: morphoPositionRefs{IndexerBlock: 900, Lag: note}})
-	block := BlockRef{ChainID: Ethereum, Number: morphoDeployments[Ethereum].Window.ActivationBlock + 1}
-	groups, err := adapter.Positions(context.Background(), nil, block, presenceTestAccount)
-	if len(groups) != 0 || !errors.Is(err, note) {
-		t.Fatalf("groups = %d err = %v, want no groups and the lag note", len(groups), err)
-	}
-}
-
-func TestListaReturnsTheIndexLagWithItsGroups(t *testing.T) {
-	note := &indexLagNote{checkpoint: 900, lag: 2 * time.Hour}
-	adapter := newListaAdapterWithIndexer(fixedListaLiveIndexer{refs: listaPositionRefs{IndexerBlock: 900, Lag: note}})
-	block := BlockRef{ChainID: Ethereum, Number: listaMoolahDeployments[Ethereum].ActivationBlock + 1}
-	if block.ChainID == adapter.cdp.ChainID {
-		t.Fatal("the test needs a chain without the Lista CDP, which is not index-backed")
-	}
-	groups, err := adapter.Positions(context.Background(), nil, block, presenceTestAccount)
-	if len(groups) != 0 || !errors.Is(err, note) {
-		t.Fatalf("groups = %d err = %v, want no groups and the lag note", len(groups), err)
-	}
-}
-
-func TestEulerReturnsTheIndexLagWithItsGroups(t *testing.T) {
-	note := &indexLagNote{checkpoint: 900, lag: 2 * time.Hour}
-	adapter := newEulerV2AdapterWithIndexer(laggingEulerIndexer{lag: note})
-	block := BlockRef{ChainID: Ethereum, Number: eulerV2ChainConfigs[Ethereum].ActivationBlock + 1}
-	groups, err := adapter.Positions(context.Background(), nil, block, presenceTestAccount)
-	if len(groups) != 0 || !errors.Is(err, note) {
-		t.Fatalf("groups = %d err = %v, want no groups and the lag note", len(groups), err)
-	}
-}
-
-type laggingEulerIndexer struct{ lag *indexLagNote }
-
-func (i laggingEulerIndexer) PositionRefs(
-	context.Context, *RPCClient, BlockRef, common.Address,
-) ([]eulerPositionRef, *indexLagNote, error) {
-	return nil, i.lag, nil
 }
 
 // Without an RPC tail, an index read lists what the account held as of its checkpoint. A request

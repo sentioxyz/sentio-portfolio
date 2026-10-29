@@ -17,17 +17,37 @@ single processor:
   configuration — never an extra contract binding inside another protocol's
   processor.
 
+### Indexed reads
+
+An adapter reads a Sentio index only through the indexed read module (`sentio_index.go`). A
+`sentioIndex` is one deployed index — a protocol's project at its processor version — declared
+once with the chains it indexes, whether it probes, and the start block that stands in for an
+unwritten checkpoint. A read declares **entity streams** (`indexStream`): one GraphQL entity each,
+paged by `id` under its own cursor, with its where clause (`indexWhere`), its row bound, and a
+`Decode` that checks what only the protocol knows of a row. The module owns everything else, in
+this order: the processor status (`indexQueryBlock`), the presence proof, the pages — every stream
+of the read in one request per page, rows in `id` order within the stream's prefix — and the
+checkpoint that certifies them (`checkIndexCheckpoint`). A read returns an `indexAt`, where it
+answered; a lookup that depends on what the read found (Pendle's token and market lookups) reads
+at that `indexAt`, at the same block and held to the same checkpoint. Do not send an indexer
+request beside the module, and do not move a rule below into a client: each lives in the module
+once.
+
 ### Indexer requests
 
 Every GraphQL query and SQL statement passes through one `indexerLane` per engine
 (`sentio_lane.go`), sized by `EngineConfig.IndexerConcurrency`: the adapters share one API key,
 so admission is bounded per engine, not per protocol. Do not add a second lock or a per-adapter
-limiter in front of it. A SQL statement holds its slot from submission until it finishes, polls
-included, since the statement is what occupies the key's server-side queue. Processor status
+limiter in front of it. A GraphQL request — a page, a lookup or a presence probe — holds its slot
+for one attempt's round trip and gives it back before a retry backs off
+(`sentioAPIClient.graphql`). A SQL statement holds its slot from submission until it finishes,
+polls included, since the statement is what occupies the key's server-side queue. Nothing else
+holds a slot: not a status read, not a wait for a presence proof, not a stand-in's block read.
+Never hold one across anything but a request: a read may wait for a probe that needs a slot to
+send, and with a lane of one a waiter holding the slot would deadlock the scan. Processor status
 reads take no slot: they ask the processor status API, which runs none of the key's queries, and
-normally once per indexer per `sentioStatusCacheTTL`. Never make them need one — most callers read
-the status cache while holding a slot, so with a lane of one a refresh waiting for another slot
-would deadlock the scan.
+normally once per indexer per `sentioStatusCacheTTL`; every chain job of a processor waits on the
+same read, so never put it behind the lane.
 
 `sentioAPIClient` keeps one `http.Client` that is never replaced and never locked, on a transport
 restricted to HTTP/1.1 and offering only http/1.1 through ALPN (`newSentioTransport`; a clone of the
@@ -42,9 +62,8 @@ that needs it while it runs, failure included; a failure is not cached. The read
 no caller owns, bounded by `sentioStatusRefreshTimeout`, and each caller waits for it or for its own
 context, whichever ends first, so the caller that happened to start it can leave without failing
 the others. The mutex in front of the cache is held only to read or swap an entry. Keep both
-properties: a waiter usually holds a lane slot, and a scan's collection deadline is only a bound if
-every wait under it ends with its context — so never send the read under that mutex, nor on a
-caller's context. mETH reads its status through the same client.
+properties: a scan's collection deadline is only a bound if every wait under it ends with its
+context — so never send the read under that mutex, nor on a caller's context. mETH reads its status through the same client.
 
 A scan with `ScanOptions.CollectDeadline` stops reading at that time and reports each chain or
 deployment it did not finish as an `incomplete` error rather than a failure; pricing then runs on
@@ -54,7 +73,8 @@ errors: a token the provider refuses is unquotable, a token it never reached is 
 on the scan path must select on its context for that to hold.
 
 An indexer query keyed by an account also bounds `id` by the account's row prefix
-(`id_starts_with`), on its pages and in its presence probe alike. A time-travel query narrows the
+(`id_starts_with`), on its pages and in its presence probe alike: a stream declares it as
+`indexWhere.Prefix`, and the module renders the pages and the probe from that one clause. A time-travel query narrows the
 rows the GraphQL server reads only through `id`: filtered on `account` or `ownerPrefix` alone,
 every query reads the whole table — seconds of CPU per query on tables of tens of millions of
 rows — to return a handful of them, and an `id_gt` cursor alone still reads everything that sorts
@@ -67,26 +87,27 @@ An adapter whose protocol spans several chains should answer "which chains hold 
 this account" with one request rather than one per chain: `sentio_presence.go` aliases a
 time-travel query per chain, at that chain's own indexed block, and the per-chain flow skips
 only chains the probe proved empty. The proof must stay exact — same block, same checkpoint
-validation, same where clause or a superset of it — and a chain whose page would carry a lag
-note is not proven, so its page runs and the scan reports the lag. Refs are deleted when
+validation, the same where clause, rendered from the read's own streams — and a chain whose page
+would carry a lag note is not proven, so its page runs and the scan reports the lag. Only an index
+declared to probe, read through streams each keyed by the account alone (`indexStream.Account`)
+under a prefix, can be proven empty; a read that includes any other stream, such as a chain's
+Morpho fee markets, sends its pages. Refs are deleted when
 positions close, so never decide presence from the latest state of the index.
 
 The probe costs one request that the GraphQL server executes alias by alias, so it is slower
 than a single-chain page. The engine therefore runs it ahead of the workers
 (`presencePrefetcher`, started right after chain setup) rather than on the first chain job; an
-adapter that adds a probe must implement `prefetchPresence` so its cost stays off the critical
-path. A proof established at an earlier indexed block still holds, and the chain job reports
+adapter that adds a probe must implement `prefetchPresence`, passing `sentioIndex.prefetchPresence`
+the streams its reads use, so its cost stays off the critical path. A proof established at an earlier indexed block still holds, and the chain job reports
 that block as its indexed block; at a fixed pin the proof must be at the pin itself.
 
 A probe asks only about the chains the scan reads its account on, so an account attributed
 through Instadapp, read on Ethereum alone, is never probed, ahead of the workers or inline. The
 engine ends a protocol's prefetched probes once no deployment of the protocol in the scan is left
 to use them — each finished, skipped as inactive at its pin, or never dispatched — instead of
-leaving a probe nobody waits for to hold its slots and run its queries to the end. A chain job of
-a probing indexer reads its status and checks the proof before it takes a lane slot, and takes
-one only for its pages, so a chain the probe proved empty takes none; the probe takes a slot of
-its own, only to send. Never ask for the proof while holding a slot: the call may compute the
-probe itself, and with a lane of one the probe would never get its slot.
+leaving a probe nobody waits for to hold its slots and run its queries to the end. A read checks
+the proof before it sends anything, so a chain the probe proved empty takes no slot at all; the
+probe takes one only to send.
 
 ### Indexer checkpoints
 
@@ -96,15 +117,19 @@ read at the pin. Nothing tops an index read up from the chain — do not add an 
 reached. `indexQueryBlock` (`sentio_checkpoint.go`) applies the status rules: the chain must be
 at `PROCESSING_LATEST`; a live read queries `min(pin, processed)` wherever the processor is; a
 read at a fixed pin needs the processor at or past the pin and otherwise fails as a `protocol`
-error, so a host that keeps historical scans retries it rather than storing a short answer.
+error, so a host that keeps historical scans retries it rather than storing a short answer. Every
+page and every lookup of a read asks at that one block, Uniswap's included.
 
-An index read is certified by the index's `IndexerCheckpoint` row for the chain, read by the
-same time-travel query at the query block and validated by `checkIndexCheckpoint` against the
-pin: never ahead of it; at a fixed pin no older than the backfill lag; on a live read any age,
-but past `indexMaxLag` (an hour) the read returns an `indexLagNote` with what it read. Adapters
-join that note into their result, and the engine reports it as a `coverage` note on the
-protocol and chain rather than a failure. Keep every lag rule in that one function and its
-constants; do not reintroduce per-indexer lag constants.
+An index read is certified by the index's `IndexerCheckpoint` row for the chain, carried by every
+page of the read at the query block and validated once by `checkIndexCheckpoint` against the pin:
+never past the query block; at a fixed pin no older than the backfill lag; on a live read any age,
+but past `indexMaxLag` (an hour) the read returns what it read with an `indexLagNote`. Every later
+page, and every lookup at the read's `indexAt`, must carry the same row, or the read fails. A read
+that succeeds records its note in the deployment's coverage sink (`withCoverage`, opened by the
+engine per deployment), however the adapter's own read then ends, and the engine reports it as a
+`coverage` note on the protocol and chain rather than a failure; adapters never handle it. Keep
+every lag rule in that one function and its constants; do not reintroduce per-indexer lag
+constants.
 
 Since the index lags the pin, the refs it lists may have been settled after the indexed block.
 An adapter must read a ref the account no longer holds at the pin as nothing, never as a
@@ -116,18 +141,19 @@ Processors write the checkpoint row on a time interval, every ten minutes once l
 long while they backfill, and the driver fires the interval on weekly boundaries rather than at
 the processor's start block, so the first row lands up to seven days after the index starts. A
 query block before it finds no checkpoint, although the chain status proves the processor has
-passed it. `indexStart` (`sentio_checkpoint.go`) then stands the start block in as the
-checkpoint, with that block's time, and the usual validation decides: at a fixed pin the
+passed it. An index declared with a `start` (`sentio_index.go`) then stands the start block in as
+the checkpoint, with that block's time, read from the chain with no lane slot held, and the usual
+validation decides: at a fixed pin the
 stand-in passes only within the backfill lag of the start, and a checkpoint still missing after
 that fails as a stale one.
 
-The start block an adapter passes must be the block the processor's checkpoint binding starts
+The start block an index declares must be the block the processor's checkpoint binding starts
 at on that chain, which is also the adapter's own activation for the index. An index that started
 later than the adapter's window would read as empty there for up to the backfill lag instead of
 failing, so keep the two equal when adding a chain. The presence probe never uses the stand-in: a
 chain without a checkpoint is not proven empty and runs its own pages. The Lista, Morpho, Pendle
-and Euler indexers stand the start in; the owner-token, account-request, mETH and Uniswap
-indexers still require a written checkpoint.
+and Euler indexes declare a start; the owner-token, account-request, mETH and Uniswap indexes
+require a written checkpoint.
 
 ## Wallet holdings
 

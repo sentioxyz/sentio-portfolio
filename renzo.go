@@ -2,7 +2,6 @@ package portfolio
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -285,7 +284,7 @@ func (a *RenzoAdapter) readEigenWithdrawals(
 	client *RPCClient,
 	block BlockRef,
 	account common.Address,
-) ([]Group, *indexLagNote, error) {
+) ([]Group, error) {
 	contracts := make([]common.Address, 0, len(a.vaults))
 	for _, vault := range a.vaults {
 		if block.Number >= vault.ActivationBlock {
@@ -294,13 +293,12 @@ func (a *RenzoAdapter) readEigenWithdrawals(
 	}
 	snapshot, err := a.indexer.IndexedRefs(ctx, block, account, contracts)
 	if err != nil {
-		return nil, nil, fmt.Errorf("Eigen vault withdrawal index: %w", err)
+		return nil, fmt.Errorf("Eigen vault withdrawal index: %w", err)
 	}
 	if len(snapshot.Refs) > renzoMaxEigenWithdrawals {
-		return nil, nil, fmt.Errorf("Eigen withdrawal count exceeds %d", renzoMaxEigenWithdrawals)
+		return nil, fmt.Errorf("Eigen withdrawal count exceeds %d", renzoMaxEigenWithdrawals)
 	}
-	groups, err := a.eigenWithdrawalGroups(ctx, client, block, account, snapshot.Refs)
-	return groups, snapshot.Lag, err
+	return a.eigenWithdrawalGroups(ctx, client, block, account, snapshot.Refs)
 }
 
 func (a *RenzoAdapter) eigenWithdrawalGroups(
@@ -620,25 +618,17 @@ func (a *RenzoAdapter) Positions(
 	if block.ChainID != Ethereum {
 		return groups, nil
 	}
-	var lag *indexLagNote
-	readEigenWithdrawals := func(
-		ctx context.Context, client *RPCClient, block BlockRef, account common.Address,
-	) ([]Group, error) {
-		positions, note, err := a.readEigenWithdrawals(ctx, client, block, account)
-		lag = note
-		return positions, err
-	}
 	for _, reader := range []func(context.Context, *RPCClient, BlockRef, common.Address) ([]Group, error){
 		a.readEigenVaults,
-		readEigenWithdrawals,
+		a.readEigenWithdrawals,
 		a.readEZETHWithdrawals,
 		a.readLegacyStake,
 	} {
 		positions, readErr := reader(ctx, client, block, account)
 		if readErr != nil {
-			return groups, errors.Join(readErr, lag.err())
+			return groups, readErr
 		}
 		groups = append(groups, positions...)
 	}
-	return groups, lag.err()
+	return groups, nil
 }

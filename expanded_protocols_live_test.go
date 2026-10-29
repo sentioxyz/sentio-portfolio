@@ -18,8 +18,8 @@ func (i fixedEulerLiveIndexer) PositionRefs(
 	*RPCClient,
 	BlockRef,
 	common.Address,
-) ([]eulerPositionRef, *indexLagNote, error) {
-	return append([]eulerPositionRef(nil), i.refs...), nil, nil
+) ([]eulerPositionRef, error) {
+	return append([]eulerPositionRef(nil), i.refs...), nil
 }
 
 func TestExpandedProtocolsLiveNonZeroPositions(t *testing.T) {

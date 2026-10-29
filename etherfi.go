@@ -2,7 +2,6 @@ package portfolio
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/big"
 
@@ -153,20 +152,20 @@ func (a *EtherfiAdapter) Positions(
 	if vaultErr != nil {
 		return groups, fmt.Errorf("vault positions: %w", vaultErr)
 	}
-	memberships, membershipLag, membershipErr := a.readMemberships(ctx, client, block, account)
+	memberships, membershipErr := a.readMemberships(ctx, client, block, account)
 	groups = append(groups, memberships...)
 	if membershipErr != nil {
-		return groups, errors.Join(membershipErr, membershipLag.err())
+		return groups, membershipErr
 	}
 	if block.ChainID != Ethereum || block.Number < etherfiWithdrawalActivationBlock {
-		return groups, membershipLag.err()
+		return groups, nil
 	}
-	refs, withdrawalLag, err := a.indexer.PositionRefs(ctx, block, account, a.withdraws[block.ChainID])
+	refs, err := a.indexer.PositionRefs(ctx, block, account, a.withdraws[block.ChainID])
 	if err != nil {
-		return groups, errors.Join(fmt.Errorf("withdrawal enumeration: %w", err), membershipLag.err())
+		return groups, fmt.Errorf("withdrawal enumeration: %w", err)
 	}
 	withdrawals, err := a.withdrawalGroups(ctx, client, block, account, refs)
-	return append(groups, withdrawals...), errors.Join(err, membershipLag.err(), withdrawalLag.err())
+	return append(groups, withdrawals...), err
 }
 
 // withdrawalGroups values the withdrawal request NFTs the index lists for account.

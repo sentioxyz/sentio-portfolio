@@ -204,7 +204,7 @@ func TestScanMemoComputesOnce(t *testing.T) {
 }
 
 // Every indexer request must take a lane slot, including the market lookup valuation makes after
-// PositionRefs has released its own. With a single slot held elsewhere, the lookup waits.
+// PositionRefs. With a single slot held elsewhere, the lookup waits.
 func TestPendleMarketLookupWaitsForTheLane(t *testing.T) {
 	pt := common.HexToAddress("0x1111111111111111111111111111111111111111")
 	market := common.HexToAddress("0x2222222222222222222222222222222222222222")
@@ -213,6 +213,7 @@ func TestPendleMarketLookupWaitsForTheLane(t *testing.T) {
 		requests.Add(1)
 		writer.Header().Set("content-type", "application/json")
 		_ = json.NewEncoder(writer).Encode(map[string]any{"data": map[string]any{
+			"indexerCheckpoints": []map[string]any{{"blockNumber": "100", "timestampMs": "1000"}},
 			"pendleTokens": []map[string]any{{
 				"id":      pendleTokenRowID(Ethereum, market),
 				"chainId": int(Ethereum),
@@ -223,9 +224,12 @@ func TestPendleMarketLookupWaitsForTheLane(t *testing.T) {
 		}})
 	}))
 	t.Cleanup(server.Close)
-	indexer := &pendleIndexer{
-		api:    &sentioAPIClient{apiKey: "test", httpClient: server.Client(), statuses: make(map[string]sentioStatusCache)},
-		config: SentioIndexerConfig{GraphQLURL: server.URL, StatusURL: server.URL, ProcessorVersion: "2"},
+	indexer := newPendleIndexer(SentioIndexerConfig{GraphQLURL: server.URL, StatusURL: server.URL, ProcessorVersion: "2"})
+	indexer.index.api = &sentioAPIClient{apiKey: "test", httpClient: server.Client(), statuses: make(map[string]sentioStatusCache)}
+	// Where PositionRefs read: the lookup asks there, held to the same checkpoint.
+	at := indexAt{
+		index: indexer.index, block: BlockRef{ChainID: Ethereum, Number: 100}, QueryBlock: 100,
+		checkpoint: indexCheckpoint{written: true, block: 100, ms: 1000},
 	}
 
 	lane := newIndexerLane(1)
@@ -237,9 +241,7 @@ func TestPendleMarketLookupWaitsForTheLane(t *testing.T) {
 	}
 	done := make(chan outcome, 1)
 	go func() {
-		markets, err := indexer.MarketsForPT(
-			withScanLane(context.Background(), lane), BlockRef{ChainID: Ethereum, Number: 100}, []common.Address{pt},
-		)
+		markets, err := indexer.MarketsForPT(withScanLane(context.Background(), lane), at, []common.Address{pt})
 		done <- outcome{markets, err}
 	}()
 	select {
@@ -431,14 +433,14 @@ func laneOfOneCases(t *testing.T, server *httptest.Server, account common.Addres
 		{
 			name: "euler-v2", chainID: Ethereum,
 			read: func(ctx context.Context) error {
-				_, err := euler.indexedSnapshot(ctx, block(Ethereum), account, indexStart{})
+				_, err := euler.PositionRefs(ctx, nil, block(Ethereum), account)
 				return err
 			},
 		},
 		{
 			name: "owner-token", chainID: Ethereum,
 			read: func(ctx context.Context) error {
-				_, _, err := ownerTokens.PositionRefs(ctx, block(Ethereum), account, contracts)
+				_, err := ownerTokens.PositionRefs(ctx, block(Ethereum), account, contracts)
 				return err
 			},
 		},
@@ -452,7 +454,7 @@ func laneOfOneCases(t *testing.T, server *httptest.Server, account common.Addres
 		{
 			name: "meth-protocol", chainID: Ethereum,
 			read: func(ctx context.Context) error {
-				_, _, err := meth.requestIDs(ctx, block(Ethereum), account)
+				_, err := meth.requestIDs(ctx, block(Ethereum), account)
 				return err
 			},
 		},

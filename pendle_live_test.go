@@ -49,7 +49,7 @@ func TestPendleDeBankAPIReconciliation(t *testing.T) {
 		t.Skip("set PORTFOLIO_DEBANK_API_LIVE_TEST=1 to compare with DeBank Pro API")
 	}
 	indexer := newPendleIndexer(liveSentioIndexerConfig(t, "PORTFOLIO_PENDLE_INDEXER"))
-	indexer.requiredChains = []ChainID{Ethereum}
+	indexer.index.chains = []ChainID{Ethereum}
 	runDeBankAPIReconciliation(
 		t, "pendle2", newPendleAdapterWithIndexer(indexer), Ethereum, pendleDeBankAccounts,
 	)

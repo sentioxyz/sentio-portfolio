@@ -179,8 +179,8 @@ func probeEnded(index *probeTestIndex, entity string) bool {
 }
 
 // probingTestAdapter prefetches a presence probe asking about entity on every chain of the probe,
-// and on each chain does what a probing indexer's chain job does with the verdict: waits for it,
-// reads the status and checks the chain's proof. positions, when set, runs instead.
+// and on each chain does what a probing index read does with the verdict: reads the status and
+// checks the chain's proof, waiting for the probe. positions, when set, runs instead.
 type probingTestAdapter struct {
 	adapterBase
 	api       *sentioAPIClient
@@ -226,7 +226,6 @@ func (a *probingTestAdapter) Positions(
 	a.mu.Lock()
 	a.asked = append(a.asked, fmt.Sprintf("%d:%s", block.ChainID, key))
 	a.mu.Unlock()
-	a.api.awaitPresence(ctx, a.probe, key)
 	statuses, err := a.api.chainStatuses(ctx, a.probe.config, nil, false)
 	if err != nil {
 		return nil, err

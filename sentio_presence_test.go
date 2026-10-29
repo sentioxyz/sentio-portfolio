@@ -3,9 +3,11 @@ package portfolio
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -61,7 +63,7 @@ func (s *presenceTestServer) checkpoint(chainID ChainID) map[string]any {
 
 func (s *presenceTestServer) vaultRow(chainID ChainID) map[string]any {
 	return map[string]any{
-		"id":      morphoRowPrefix(chainID, presenceTestAccount) + strings.ToLower(presenceTestVault.Hex()),
+		"id":      indexAccountPrefix(chainID, presenceTestAccount) + strings.ToLower(presenceTestVault.Hex()),
 		"chainId": int(chainID),
 		"account": strings.ToLower(presenceTestAccount.Hex()),
 		"vault":   strings.ToLower(presenceTestVault.Hex()),
@@ -109,42 +111,50 @@ func (s *presenceTestServer) ServeHTTP(writer http.ResponseWriter, request *http
 		return
 	}
 	s.pages.Add(1)
-	chainID := ChainID(body.Variables["chainId"].(float64))
+	chainNumber, _ := strconv.ParseUint(presencePageChain.FindStringSubmatch(body.Query)[1], 10, 64)
+	chainID := ChainID(chainNumber)
 	s.pagedChains = append(s.pagedChains, chainID)
-	// Fee-market pages are keyed by chain alone; account pages carry the account's row prefix.
-	if account, isAccountPage := body.Variables["account"]; isAccountPage {
-		if prefix := fmt.Sprintf("%d:%s:", chainID, account); body.Variables["idPrefix"] != prefix {
-			s.t.Errorf("page idPrefix = %v, want %q", body.Variables["idPrefix"], prefix)
+	// Fee-market rows are keyed by chain alone; account rows carry the account's row prefix.
+	account := ""
+	if match := presencePageAccount.FindStringSubmatch(body.Query); match != nil {
+		account = match[1]
+		if prefix := fmt.Sprintf(`id_starts_with: "%d:%s:"`, chainID, account); !strings.Contains(body.Query, prefix) {
+			s.t.Errorf("page lacks %s:\n%s", prefix, body.Query)
 		}
 	}
 	vaults := []map[string]any{}
-	if chainID == Base && body.Variables["account"] == owner {
+	if chainID == Base && account == owner {
 		vaults = append(vaults, s.vaultRow(chainID))
 	}
 	_ = json.NewEncoder(writer).Encode(map[string]any{"data": map[string]any{
 		"indexerCheckpoints":       []map[string]any{s.checkpoint(chainID)},
 		"morphoMarketPositionRefs": []map[string]any{},
 		"morphoVaultPositionRefs":  vaults,
+		"morphoFeeMarkets":         []map[string]any{},
 	}})
 }
+
+var (
+	presencePageChain   = regexp.MustCompile(`where: \{ id: "(\d+)" \}`)
+	presencePageAccount = regexp.MustCompile(`account: "(0x[0-9a-f]+)"`)
+)
 
 func newPresenceTestMorpho(t *testing.T, server *presenceTestServer) (*morphoIndexer, *httptest.Server) {
 	t.Helper()
 	httpServer := httptest.NewServer(server)
 	t.Cleanup(httpServer.Close)
-	return &morphoIndexer{
-		api: &sentioAPIClient{
-			apiKey:     "test",
-			httpClient: httpServer.Client(),
-			statuses:   make(map[string]sentioStatusCache),
-		},
-		config: SentioIndexerConfig{
-			GraphQLURL:       httpServer.URL + "/graphql",
-			StatusURL:        httpServer.URL + "/status",
-			ProcessorVersion: "8",
-		},
-		requiredChains: deploymentChains(morphoDeployments),
-	}, httpServer
+	indexer := newMorphoIndexer(SentioIndexerConfig{})
+	indexer.index.api = &sentioAPIClient{
+		apiKey:     "test",
+		httpClient: httpServer.Client(),
+		statuses:   make(map[string]sentioStatusCache),
+	}
+	indexer.index.config = SentioIndexerConfig{
+		GraphQLURL:       httpServer.URL + "/graphql",
+		StatusURL:        httpServer.URL + "/status",
+		ProcessorVersion: "8",
+	}
+	return indexer, httpServer
 }
 
 func presenceTestPinned(chains ...ChainID) map[ChainID]BlockRef {
@@ -167,7 +177,7 @@ func TestPresenceProbeSkipsChainsProvenEmpty(t *testing.T) {
 	ctx := presenceScanContext(pinned)
 
 	for _, chainID := range chains {
-		refs, err := indexer.indexedRefs(ctx, pinned[chainID], presenceTestAccount, false, indexStart{})
+		refs, err := indexer.refs(ctx, nil, pinned[chainID], presenceTestAccount, false)
 		if err != nil {
 			t.Fatalf("chain %d: %v", chainID, err)
 		}
@@ -191,7 +201,7 @@ func TestPresenceProbeSkipsChainsProvenEmpty(t *testing.T) {
 	query := *server.lastProbeQuery.Load()
 	for _, want := range []string{
 		`cp1: indexerCheckpoints(first: 2, block: { number: 1000 }, where: { id: "1" })`,
-		`f0_8453: morphoMarketPositionRefs(first: 1, orderBy: id, orderDirection: asc, block: { number: 1000 }, where: { chainId: 8453, account: "` + strings.ToLower(presenceTestAccount.Hex()) + `", id_starts_with: "` + morphoRowPrefix(Base, presenceTestAccount) + `" }) { id }`,
+		`f0_8453: morphoMarketPositionRefs(first: 1, orderBy: id, orderDirection: asc, block: { number: 1000 }, where: { chainId: 8453, account: "` + strings.ToLower(presenceTestAccount.Hex()) + `", id_starts_with: "` + indexAccountPrefix(Base, presenceTestAccount) + `" }) { id }`,
 		`f1_42161: morphoVaultPositionRefs(`,
 	} {
 		if !strings.Contains(query, want) {
@@ -211,10 +221,10 @@ func TestPresenceProbeIsMemoizedPerAccount(t *testing.T) {
 	ctx := presenceScanContext(pinned)
 	other := common.HexToAddress("0x1111111111111111111111111111111111111111")
 	for _, chainID := range chains {
-		if _, err := indexer.indexedRefs(ctx, pinned[chainID], presenceTestAccount, false, indexStart{}); err != nil {
+		if _, err := indexer.refs(ctx, nil, pinned[chainID], presenceTestAccount, false); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := indexer.indexedRefs(ctx, pinned[chainID], other, false, indexStart{}); err != nil {
+		if _, err := indexer.refs(ctx, nil, pinned[chainID], other, false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -263,7 +273,7 @@ func TestPresenceProbeFallsBackWhenItCannotProveAnything(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			indexer, _ := newPresenceTestMorpho(t, test.server)
 			for _, chainID := range chains {
-				if _, err := indexer.indexedRefs(test.ctx, pinned[chainID], presenceTestAccount, test.feeMarkets, indexStart{}); err != nil {
+				if _, err := indexer.refs(test.ctx, nil, pinned[chainID], presenceTestAccount, test.feeMarkets); err != nil {
 					t.Fatalf("chain %d: %v", chainID, err)
 				}
 			}
@@ -284,17 +294,19 @@ func TestPresenceProbeDoesNotSkipALaggingChain(t *testing.T) {
 	server := &presenceTestServer{t: t, chains: chains, laggingChains: map[ChainID]bool{BSC: true}}
 	indexer, _ := newPresenceTestMorpho(t, server)
 	pinned := presenceTestPinned(chains...)
-	ctx := presenceScanContext(pinned)
-	refs, err := indexer.indexedRefs(ctx, pinned[Ethereum], presenceTestAccount, false, indexStart{})
-	if err != nil || refs.Lag != nil {
-		t.Fatalf("proven chain: lag = %v err = %v, want neither", refs.Lag, err)
-	}
-	refs, err = indexer.indexedRefs(ctx, pinned[BSC], presenceTestAccount, false, indexStart{})
-	if err != nil {
+	ctx, coverage := withCoverage(presenceScanContext(pinned))
+	if _, err := indexer.refs(ctx, nil, pinned[Ethereum], presenceTestAccount, false); err != nil {
 		t.Fatal(err)
 	}
-	if refs.Lag == nil || refs.Lag.lag != 2*time.Hour {
-		t.Fatalf("lagging chain note = %v, want two hours of lag", refs.Lag)
+	if notes := coverage.take(); len(notes) != 0 {
+		t.Fatalf("proven chain recorded %v, want no note", notes)
+	}
+	if _, err := indexer.refs(ctx, nil, pinned[BSC], presenceTestAccount, false); err != nil {
+		t.Fatal(err)
+	}
+	var lag *indexLagNote
+	if notes := coverage.take(); len(notes) != 1 || !errors.As(notes[0], &lag) || lag.lag != 2*time.Hour {
+		t.Fatalf("lagging chain notes = %v, want two hours of lag", notes)
 	}
 	if server.probes.Load() != 1 || len(server.pagedChains) != 1 || server.pagedChains[0] != BSC {
 		t.Fatalf("probes = %d paged = %v, want the lagging chain to reach its own page", server.probes.Load(), server.pagedChains)
@@ -338,7 +350,7 @@ func TestPrefetchedPresenceIsReusedByTheChainJobs(t *testing.T) {
 	// A second prefetch for the same account starts nothing new.
 	indexer.prefetchPresence(ctx, presenceTestAccount)
 	for _, chainID := range chains {
-		refs, err := indexer.indexedRefs(ctx, pinned[chainID], presenceTestAccount, false, indexStart{})
+		refs, err := indexer.refs(ctx, nil, pinned[chainID], presenceTestAccount, false)
 		if err != nil {
 			t.Fatalf("chain %d: %v", chainID, err)
 		}
@@ -375,7 +387,7 @@ func TestPresenceProbeReportsApartFromPages(t *testing.T) {
 		}
 		for _, chainID := range chains {
 			jobCtx := withDeployment(ctx, "morpho-blue", chainID)
-			if _, err := indexer.indexedRefs(jobCtx, pinned[chainID], presenceTestAccount, false, indexStart{}); err != nil {
+			if _, err := indexer.refs(jobCtx, nil, pinned[chainID], presenceTestAccount, false); err != nil {
 				t.Fatalf("prefetched=%t chain %d: %v", prefetched, chainID, err)
 			}
 		}
@@ -429,13 +441,13 @@ func TestPresenceProofFromAnEarlierIndexedBlockStillHolds(t *testing.T) {
 
 	// Probe at processed = 1000, then the index advances to 1010 before the chain job runs.
 	indexer.prefetchPresence(ctx, presenceTestAccount)
-	if _, err := indexer.indexedRefs(ctx, pinned[Base], presenceTestAccount, false, indexStart{}); err != nil {
+	if _, err := indexer.refs(ctx, nil, pinned[Base], presenceTestAccount, false); err != nil {
 		t.Fatal(err)
 	}
 	server.processed.Store(presenceTestBlock + 10)
-	indexer.api.statuses = make(map[string]sentioStatusCache)
+	indexer.index.api.statuses = make(map[string]sentioStatusCache)
 
-	refs, err := indexer.indexedRefs(ctx, pinned[Ethereum], presenceTestAccount, false, indexStart{})
+	refs, err := indexer.refs(ctx, nil, pinned[Ethereum], presenceTestAccount, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -450,9 +462,8 @@ func TestPresenceProofFromAnEarlierIndexedBlockStillHolds(t *testing.T) {
 // A proof from an earlier indexed block stands in for Uniswap's page as it does for every other
 // indexer: nothing tops any of them up from the chain, and the proof passed the same lag rule.
 //
-// The scan context carries a lane of one slot, so this also guards the ordering that keeps a
-// prefetch from deadlocking: the chain job waits for the probe before it takes the slot the probe
-// needs.
+// The scan context carries a lane of one slot, so this also guards that a chain job waiting for a
+// prefetched probe holds no slot the probe needs.
 func TestUniswapPresenceReusesAProofFromAnEarlierIndexedBlock(t *testing.T) {
 	chains := deploymentChains(uniswapV4Deployments)
 	var probes, pages atomic.Int32
@@ -497,16 +508,16 @@ func TestUniswapPresenceReusesAProofFromAnEarlierIndexedBlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(first.NFTs) != 0 || first.CheckpointBlock != presenceTestBlock || pages.Load() != 0 {
+	if len(first.NFTs) != 0 || first.IndexerBlock != presenceTestBlock || pages.Load() != 0 {
 		t.Fatalf("first chain = %+v pages=%d, want the proof to stand in for the page", first, pages.Load())
 	}
 	processed.Store(presenceTestBlock + 10)
-	indexer.api.statuses = make(map[string]sentioStatusCache)
+	indexer.indexes[uniswapV4].api.statuses = make(map[string]sentioStatusCache)
 	second, err := indexer.indexedNFTs(ctx, uniswapV4, pinned[chains[1]], presenceTestAccount)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(second.NFTs) != 0 || second.CheckpointBlock != presenceTestBlock || pages.Load() != 0 {
+	if len(second.NFTs) != 0 || second.IndexerBlock != presenceTestBlock || pages.Load() != 0 {
 		t.Fatalf("drifted chain = %+v pages=%d, want the earlier proof to stand in for the page", second, pages.Load())
 	}
 	if probes.Load() != 1 {
@@ -550,11 +561,11 @@ func TestPresenceProbeAsksOnlyAboutTheChainsAnAccountIsReadOn(t *testing.T) {
 	indexer.prefetchPresence(prefetchCtx, presenceTestAccount)
 	indexer.prefetchPresence(prefetchCtx, attributed)
 	for _, chainID := range []ChainID{Ethereum, BSC, Base} {
-		if _, err := indexer.indexedRefs(withDeployment(ctx, "morpho-blue", chainID), pinned[chainID], presenceTestAccount, false, indexStart{}); err != nil {
+		if _, err := indexer.refs(withDeployment(ctx, "morpho-blue", chainID), nil, pinned[chainID], presenceTestAccount, false); err != nil {
 			t.Fatalf("chain %d: %v", chainID, err)
 		}
 	}
-	refs, err := indexer.indexedRefs(withDeployment(ctx, "morpho-blue", Ethereum), pinned[Ethereum], attributed, false, indexStart{})
+	refs, err := indexer.refs(withDeployment(ctx, "morpho-blue", Ethereum), nil, pinned[Ethereum], attributed, false)
 	if err != nil || len(refs.Vaults) != 0 || len(refs.MarketIDs) != 0 {
 		t.Fatalf("attributed account refs = %+v, %v, want an empty page", refs, err)
 	}

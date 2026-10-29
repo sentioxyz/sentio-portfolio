@@ -900,7 +900,7 @@ func TestMorphoDeBankAPIReconciliation(t *testing.T) {
 		t.Skip("set PORTFOLIO_DEBANK_API_LIVE_TEST=1 to compare with DeBank Pro API")
 	}
 	indexer := newMorphoIndexer(liveSentioIndexerConfig(t, "PORTFOLIO_MORPHO_INDEXER"))
-	indexer.requiredChains = []ChainID{Ethereum}
+	indexer.index.chains = []ChainID{Ethereum}
 	runDeBankAPIReconciliation(t, "morphoblue", newMorphoAdapterWithIndexer(indexer), Ethereum, []string{
 		"0x0000005bb4df4109bf356a585c8b8ea70fcbaac0",
 		"0x01dde420d4f0b76257e4bfc9afdd5f5ffd7ec906",

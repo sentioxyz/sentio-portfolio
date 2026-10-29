@@ -2,7 +2,6 @@ package portfolio
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/big"
 	"sort"
@@ -577,8 +576,6 @@ func (a *MorphoAdapter) Positions(
 	if err != nil {
 		return nil, err
 	}
-	// However the read ends, a lagging index qualifies it.
-	defer func() { err = errors.Join(err, refs.Lag.err()) }()
 	core, err := readMorphoCorePositions(
 		ctx, client, block, account, deployment, refs.MarketIDs,
 	)

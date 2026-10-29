@@ -549,8 +549,6 @@ func (a *UniswapV3Adapter) Positions(
 		return nil, nil
 	}
 	indexed, err := a.indexer.indexedNFTs(ctx, uniswapV3, block, account)
-	// However the read ends, a lagging index qualifies it.
-	defer func() { err = errors.Join(err, indexed.Lag.err()) }()
 	enumerated := false
 	if err != nil {
 		if ctx.Err() != nil {
@@ -741,7 +739,7 @@ func (a *UniswapV3Adapter) Positions(
 				"tokenId": position.NFT.TokenID.String(), "pool": position.Pool.Hex(),
 				"fee": position.Fee, "tickLower": position.TickLower,
 				"tickUpper": position.TickUpper, "liquidity": position.Liquidity.String(),
-				"indexerBlock": indexed.CheckpointBlock,
+				"indexerBlock": indexed.IndexerBlock,
 			},
 		})
 		if enumerated {
@@ -842,8 +840,6 @@ func (a *UniswapV4Adapter) Positions(
 	if err != nil {
 		return nil, err
 	}
-	// However the read ends, a lagging index qualifies it.
-	defer func() { err = errors.Join(err, indexed.Lag.err()) }()
 	ownerCalls := make([]ContractCall, len(indexed.NFTs))
 	for index, nft := range indexed.NFTs {
 		if nft.Manager != deployment.Manager {
@@ -1048,7 +1044,7 @@ func (a *UniswapV4Adapter) Positions(
 				"tickSpacing": position.PoolKey.TickSpacing.String(),
 				"tickLower":   position.TickLower, "tickUpper": position.TickUpper,
 				"hooks": position.PoolKey.Hooks.Hex(), "liquidity": position.Liquidity.String(),
-				"indexerBlock": indexed.CheckpointBlock,
+				"indexerBlock": indexed.IndexerBlock,
 			},
 		})
 	}

@@ -146,14 +146,16 @@ func TestAsterEarnAssets(t *testing.T) {
 }
 
 func TestAccountIndexesFilterQueriesByContract(t *testing.T) {
-	if !strings.Contains(ownerTokenWalletQuery, "contract_in: $contracts") {
-		t.Fatal("owner-token query is not contract-scoped")
-	}
-	if !strings.Contains(accountRequestWalletQuery, "contract_in: $contracts") {
-		t.Fatal("account-request query is not contract-scoped")
-	}
 	first := common.HexToAddress("0x2222222222222222222222222222222222222222")
 	second := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	owner := common.HexToAddress("0x3333333333333333333333333333333333333333")
+	scoped := `contract_in: ["0x1111111111111111111111111111111111111111", "0x2222222222222222222222222222222222222222"]`
+	if where := renderIndexWhere(ownerTokenStream(owner, []common.Address{first, second}).Where(Ethereum), ""); !strings.Contains(where, scoped) {
+		t.Fatalf("owner-token query is not contract-scoped: %s", where)
+	}
+	if where := renderIndexWhere(accountRequestStream(owner, []common.Address{first, second}).Where(BSC), ""); !strings.Contains(where, scoped) {
+		t.Fatalf("account-request query is not contract-scoped: %s", where)
+	}
 	addresses := sortedAllowedAddresses(map[common.Address]struct{}{first: {}, second: {}})
 	if len(addresses) != 2 || addresses[0] != strings.ToLower(second.Hex()) ||
 		addresses[1] != strings.ToLower(first.Hex()) {

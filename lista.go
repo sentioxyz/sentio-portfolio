@@ -4,7 +4,6 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math/big"
 	"sort"
@@ -562,17 +561,14 @@ func (a *ListaAdapter) Positions(
 	account common.Address,
 ) ([]Group, error) {
 	groups := make([]Group, 0)
-	// lag qualifies the Moolah groups, which the index chose; it is reported however the read ends.
-	var lag *indexLagNote
 	if deployment, exists := a.moolah[block.ChainID]; exists && block.Number >= deployment.ActivationBlock {
 		refs, err := a.indexer.PositionRefs(ctx, client, block, account, deployment)
 		if err != nil {
 			return nil, err
 		}
-		lag = refs.Lag
 		moolah, err := a.moolahGroups(ctx, client, block, account, deployment, refs.MarketIDs)
 		if err != nil {
-			return nil, errors.Join(err, lag.err())
+			return nil, err
 		}
 		for index := range moolah {
 			if moolah[index].Metadata == nil {
@@ -583,13 +579,13 @@ func (a *ListaAdapter) Positions(
 		groups = append(groups, moolah...)
 		vaults, err := a.vaultGroups(ctx, client, block, account, refs.Vaults)
 		if err != nil {
-			return nil, errors.Join(err, lag.err())
+			return nil, err
 		}
 		groups = append(groups, vaults...)
 	}
 	cdp, err := a.cdpGroups(ctx, client, block, account)
 	if err != nil {
-		return nil, errors.Join(err, lag.err())
+		return nil, err
 	}
-	return append(groups, cdp...), lag.err()
+	return append(groups, cdp...), nil
 }

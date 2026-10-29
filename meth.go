@@ -2,12 +2,9 @@ package portfolio
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/big"
-	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -15,7 +12,6 @@ import (
 
 const (
 	methActivationBlock    = 18_290_599
-	methIndexerPageSize    = 500
 	methMaxIndexedRequests = 4_096
 )
 
@@ -62,27 +58,9 @@ var methManagerABI = MustABI(`[
   }
 ]`)
 
-type methGraphQLResponse struct {
-	Data struct {
-		Checkpoints []struct {
-			BlockNumber string `json:"blockNumber"`
-			TimestampMS string `json:"timestampMs"`
-		} `json:"indexerCheckpoints"`
-		Requests []struct {
-			ID        string `json:"id"`
-			Owner     string `json:"owner"`
-			RequestID string `json:"requestId"`
-		} `json:"withdrawalRequests"`
-	} `json:"data"`
-	Errors []struct {
-		Message string `json:"message"`
-	} `json:"errors"`
-}
-
 type MethAdapter struct {
 	adapterBase
-	indexer SentioIndexerConfig
-	api     *sentioAPIClient
+	index *sentioIndex
 }
 
 func newMethAdapter(indexer SentioIndexerConfig) Adapter {
@@ -90,178 +68,55 @@ func newMethAdapter(indexer SentioIndexerConfig) Adapter {
 		adapterBase: adapterBase{info: ProtocolInfo{
 			ID: "meth-protocol", Name: "Mantle mETH", Chains: []ChainID{Ethereum},
 		}},
-		indexer: indexer,
-		api:     newSentioAPIClient(),
-	}
-}
-
-const methWalletQuery = `
-query MethWithdrawalRequests(
-  $prefix: String!
-  $after: ID!
-  $checkpoint: ID!
-  $first: Int!
-  $block: BigInt!
-) {
-  indexerCheckpoints(first: 2, block: { number: $block }, where: { id: $checkpoint }) {
-    blockNumber
-    timestampMs
-  }
-  withdrawalRequests(
-    first: $first
-    orderBy: id
-    orderDirection: asc
-    block: { number: $block }
-    where: { id_starts_with: $prefix, id_gt: $after }
-  ) {
-    id
-    owner
-    requestId
-  }
-}`
-
-func (a *MethAdapter) graphqlPage(
-	ctx context.Context,
-	prefix string,
-	after string,
-	first int,
-	block uint64,
-) (methGraphQLResponse, error) {
-	if err := a.indexer.validate(); err != nil {
-		return methGraphQLResponse{}, err
-	}
-	var payload methGraphQLResponse
-	err := a.api.doJSON(
-		ctx,
-		http.MethodPost,
-		a.indexer.GraphQLURL,
-		map[string]any{
-			"query": methWalletQuery,
-			"variables": map[string]any{
-				"prefix":     prefix,
-				"after":      after,
-				"checkpoint": "1",
-				"first":      first,
-				"block":      strconv.FormatUint(block, 10),
-			},
+		index: &sentioIndex{
+			name:   "meth-protocol",
+			api:    newSentioAPIClient(),
+			config: indexer,
+			chains: []ChainID{Ethereum},
 		},
-		&payload,
-	)
-	if err != nil {
-		return methGraphQLResponse{}, err
 	}
-	if len(payload.Errors) > 0 {
-		messages := make([]string, 0, len(payload.Errors))
-		for _, gqlErr := range payload.Errors {
-			messages = append(messages, gqlErr.Message)
-		}
-		return methGraphQLResponse{}, fmt.Errorf("GraphQL: %s", strings.Join(messages, "; "))
-	}
-	return payload, nil
 }
 
-func validateMethCheckpoint(block BlockRef, page methGraphQLResponse) (*indexLagNote, error) {
-	if len(page.Data.Checkpoints) != 1 {
-		return nil, fmt.Errorf("GraphQL returned %d checkpoints", len(page.Data.Checkpoints))
-	}
-	checkpoint := page.Data.Checkpoints[0]
-	checkpointBlock, err := strconv.ParseUint(checkpoint.BlockNumber, 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("invalid checkpoint block %q", checkpoint.BlockNumber)
-	}
-	checkpointMS, err := strconv.ParseUint(checkpoint.TimestampMS, 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("invalid checkpoint timestamp %q", checkpoint.TimestampMS)
-	}
-	return checkIndexCheckpoint(block, checkpointBlock, checkpointMS)
+type methRequestRow struct {
+	Owner     string `json:"owner"`
+	RequestID string `json:"requestId"`
 }
 
-func (a *MethAdapter) indexedRequestIDs(
-	ctx context.Context,
-	block BlockRef,
-	account common.Address,
-	queryBlock uint64,
-) ([]*big.Int, *indexLagNote, error) {
-	prefix := fmt.Sprintf("1:%s:", strings.ToLower(account.Hex()))
-	after := prefix
-	result := make([]*big.Int, 0)
-	var checkpointBlock string
-	var checkpointTimestamp string
-	var lag *indexLagNote
-	for len(result) <= methMaxIndexedRequests {
-		first := min(methIndexerPageSize, methMaxIndexedRequests+1-len(result))
-		page, err := a.graphqlPage(ctx, prefix, after, first, queryBlock)
-		if err != nil {
-			return nil, nil, err
-		}
-		if lag, err = validateMethCheckpoint(block, page); err != nil {
-			return nil, nil, err
-		}
-		checkpoint := page.Data.Checkpoints[0]
-		if checkpointBlock == "" {
-			checkpointBlock = checkpoint.BlockNumber
-			checkpointTimestamp = checkpoint.TimestampMS
-		} else if checkpointBlock != checkpoint.BlockNumber ||
-			checkpointTimestamp != checkpoint.TimestampMS {
-			return nil, nil, errors.New("GraphQL pagination changed checkpoint")
-		}
-		for _, row := range page.Data.Requests {
-			if !strings.HasPrefix(row.ID, prefix) || row.ID <= after ||
-				!strings.EqualFold(row.Owner, account.Hex()) {
-				return nil, nil, fmt.Errorf("GraphQL returned invalid owner row %q", row.ID)
+func methRequestStream(account common.Address) *indexStream[methRequestRow, *big.Int] {
+	return &indexStream[methRequestRow, *big.Int]{
+		Entity: "withdrawalRequests", Account: account, MaxRows: methMaxIndexedRequests,
+		Where: func(chainID ChainID) indexWhere {
+			return indexWhere{Prefix: indexAccountPrefix(chainID, account)}
+		},
+		Decode: func(_ ChainID, id string, row methRequestRow) (*big.Int, error) {
+			if !strings.EqualFold(row.Owner, account.Hex()) {
+				return nil, fmt.Errorf("GraphQL returned invalid owner row %q", id)
 			}
-			requestID, parseErr := new(big.Int).SetString(row.RequestID, 10)
-			if !parseErr || requestID.Sign() < 0 {
-				return nil, nil, fmt.Errorf("GraphQL returned invalid request ID %q", row.RequestID)
+			requestID, valid := new(big.Int).SetString(row.RequestID, 10)
+			if !valid || requestID.Sign() < 0 {
+				return nil, fmt.Errorf("GraphQL returned invalid request ID %q", row.RequestID)
 			}
-			after = row.ID
-			result = append(result, requestID)
-		}
-		if len(page.Data.Requests) < first {
-			break
-		}
+			return requestID, nil
+		},
 	}
-	if len(result) > methMaxIndexedRequests {
-		return nil, nil, fmt.Errorf("account has more than %d indexed requests", methMaxIndexedRequests)
-	}
-	return result, lag, nil
 }
 
-// queryBlock is the block the withdrawal index is read at for block, from the processor status
-// read through the shared status cache under the rules every other indexer follows.
-func (a *MethAdapter) queryBlock(ctx context.Context, block BlockRef) (uint64, error) {
-	_, queryBlock, err := indexQueryBlock(block, func(forceRefresh bool) (map[ChainID]sentioChainStatus, error) {
-		return a.api.chainStatuses(ctx, a.indexer, []ChainID{Ethereum}, forceRefresh)
-	})
-	return queryBlock, err
-}
-
-// requestIDs returns the withdrawal requests the index records for account, with a lag note when
-// the index trails a live pin by more than indexMaxLag. A request claimed after the indexed block
-// is still among them and reads empty at the pin (readMethWithdrawals).
+// requestIDs returns the withdrawal requests the index records for account. A request claimed
+// after the indexed block is still among them and reads empty at the pin (readMethWithdrawals).
 func (a *MethAdapter) requestIDs(
 	ctx context.Context,
 	block BlockRef,
 	account common.Address,
-) ([]*big.Int, *indexLagNote, error) {
-	queryBlock, err := a.queryBlock(ctx, block)
-	if err != nil {
-		return nil, nil, err
+) ([]*big.Int, error) {
+	requests := methRequestStream(account)
+	if _, err := a.index.read(ctx, nil, block, requests); err != nil {
+		return nil, err
 	}
-	// Only the pages take a lane slot: the status read needs none.
-	release, err := lockSentioLane(ctx)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer release()
-	requestIDs, lag, err := a.indexedRequestIDs(ctx, block, account, queryBlock)
-	if err != nil {
-		return nil, nil, err
-	}
+	requestIDs := requests.Rows()
 	sort.Slice(requestIDs, func(left, right int) bool {
 		return requestIDs[left].Cmp(requestIDs[right]) < 0
 	})
-	return requestIDs, lag, nil
+	return requestIDs, nil
 }
 
 func assertMethWiring(
@@ -393,7 +248,7 @@ func (a *MethAdapter) Positions(
 	if err != nil {
 		return nil, err
 	}
-	requestIDs, lag, err := a.requestIDs(ctx, block, account)
+	requestIDs, err := a.requestIDs(ctx, block, account)
 	if err != nil {
 		return nil, fmt.Errorf("withdrawal index: %w", err)
 	}
@@ -434,10 +289,10 @@ func (a *MethAdapter) Positions(
 	}
 	withdrawal, err := readMethWithdrawals(ctx, client, block, account, requestIDs)
 	if err != nil {
-		return nil, errors.Join(fmt.Errorf("withdrawals: %w", err), lag.err())
+		return nil, fmt.Errorf("withdrawals: %w", err)
 	}
 	if withdrawal != nil {
 		groups = append(groups, *withdrawal)
 	}
-	return groups, lag.err()
+	return groups, nil
 }

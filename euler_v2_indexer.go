@@ -3,16 +3,13 @@ package portfolio
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 )
 
 const (
-	eulerIndexerPageSize = 500
 	eulerMaxPositionRefs = 4_096
 	eulerMaxRewardRefs   = 16_384
 )
@@ -36,84 +33,20 @@ func validEulerVaultKind(kind eulerVaultKind) bool {
 	return kind == eulerEVault || kind == eulerEarn || kind == eulerSecuritize
 }
 
+// eulerIndexer reads the Euler index, keyed by owner prefix: an EVC owner's 256 sub-accounts share
+// the first 19 bytes of their addresses, and the index lists the positions of all of them.
 type eulerIndexer struct {
-	api    *sentioAPIClient
-	config SentioIndexerConfig
+	index *sentioIndex
 }
 
 func newEulerIndexer(config SentioIndexerConfig) *eulerIndexer {
-	return &eulerIndexer{api: newSentioAPIClient(), config: config}
-}
-
-const eulerWalletQuery = `
-query EulerWalletPositions(
-  $chainId: Int!
-  $ownerPrefix: String!
-  $idPrefix: String!
-  $positionAfter: ID!
-  $rewardAfter: ID!
-  $checkpoint: ID!
-  $first: Int!
-  $block: BigInt!
-) {
-  indexerCheckpoints(first: 2, block: { number: $block }, where: { id: $checkpoint }) {
-    blockNumber
-    timestampMs
-  }
-  eulerPositionRefs(
-    first: $first
-    orderBy: id
-    orderDirection: asc
-    block: { number: $block }
-    where: { chainId: $chainId, ownerPrefix: $ownerPrefix, id_starts_with: $idPrefix, id_gt: $positionAfter }
-  ) {
-    id
-    chainId
-    ownerPrefix
-    account
-    vault
-    vaultKind
-  }
-  eulerRewardTokens(
-    first: $first
-    orderBy: id
-    orderDirection: asc
-    block: { number: $block }
-    where: { chainId: $chainId, ownerPrefix: $ownerPrefix, id_starts_with: $idPrefix, id_gt: $rewardAfter }
-  ) {
-    id
-    chainId
-    ownerPrefix
-    account
-    vault
-    reward
-  }
-}`
-
-type eulerGraphQLResponse struct {
-	Data struct {
-		Checkpoints []indexerCheckpointRow `json:"indexerCheckpoints"`
-		Positions   []struct {
-			ID, OwnerPrefix, Account, Vault, VaultKind string
-			ChainID                                    int `json:"chainId"`
-		} `json:"eulerPositionRefs"`
-		Rewards []struct {
-			ID, OwnerPrefix, Account, Vault, Reward string
-			ChainID                                 int `json:"chainId"`
-		} `json:"eulerRewardTokens"`
-	} `json:"data"`
-	Errors []struct {
-		Message string `json:"message"`
-	} `json:"errors"`
-}
-
-type eulerGraphQLPage struct {
-	CheckpointBlock uint64
-	CheckpointMS    uint64
-	Positions       []eulerPositionRef
-	PositionIDs     []string
-	Rewards         map[string][]common.Address
-	RewardIDs       []string
+	return &eulerIndexer{index: &sentioIndex{
+		name:   "euler-v2",
+		api:    newSentioAPIClient(),
+		config: config,
+		chains: deploymentChains(eulerV2ChainConfigs),
+		start:  func(chainID ChainID) uint64 { return eulerV2ChainConfigs[chainID].ActivationBlock },
+	}}
 }
 
 func eulerOwnerPrefix(account common.Address) string {
@@ -134,186 +67,106 @@ func eulerRewardRowID(chainID ChainID, account, vault, reward common.Address) st
 	return eulerPositionRowID(chainID, account, vault) + ":" + strings.ToLower(reward.Hex())
 }
 
-func (i *eulerIndexer) graphqlPage(
-	ctx context.Context,
-	chainID ChainID,
-	owner common.Address,
-	positionAfter, rewardAfter string,
-	block uint64,
-	start indexStart,
-) (eulerGraphQLPage, error) {
-	var payload eulerGraphQLResponse
-	err := i.api.doJSON(ctx, http.MethodPost, i.config.GraphQLURL, map[string]any{
-		"query": eulerWalletQuery,
-		"variables": map[string]any{
-			"chainId":       int(chainID),
-			"ownerPrefix":   eulerOwnerPrefix(owner),
-			"idPrefix":      eulerOwnerRowPrefix(chainID, owner),
-			"positionAfter": positionAfter, "rewardAfter": rewardAfter,
-			"checkpoint": strconv.FormatUint(uint64(chainID), 10), "first": eulerIndexerPageSize,
-			"block": strconv.FormatUint(block, 10),
-		},
-	}, &payload)
-	if err != nil {
-		return eulerGraphQLPage{}, err
+// eulerOwnerWhere selects the rows of every account sharing owner's prefix on a chain.
+func eulerOwnerWhere(owner common.Address) func(ChainID) indexWhere {
+	return func(chainID ChainID) indexWhere {
+		return indexWhere{Prefix: eulerOwnerRowPrefix(chainID, owner), Terms: []indexTerm{
+			{"chainId", int(chainID)}, {"ownerPrefix", eulerOwnerPrefix(owner)},
+		}}
 	}
-	if len(payload.Errors) > 0 {
-		messages := make([]string, 0, len(payload.Errors))
-		for _, graphQLError := range payload.Errors {
-			messages = append(messages, graphQLError.Message)
-		}
-		return eulerGraphQLPage{}, fmt.Errorf("GraphQL: %s", strings.Join(messages, "; "))
-	}
-	checkpointBlock, checkpointMS, err := start.checkpoint(ctx, payload.Data.Checkpoints)
-	if err != nil {
-		return eulerGraphQLPage{}, err
-	}
+}
+
+type eulerPositionRow struct {
+	ChainID     int    `json:"chainId"`
+	OwnerPrefix string `json:"ownerPrefix"`
+	Account     string `json:"account"`
+	Vault       string `json:"vault"`
+	VaultKind   string `json:"vaultKind"`
+}
+
+func eulerPositionStream(owner common.Address) *indexStream[eulerPositionRow, eulerPositionRef] {
 	prefix := eulerOwnerPrefix(owner)
-	page := eulerGraphQLPage{
-		CheckpointBlock: checkpointBlock, CheckpointMS: checkpointMS,
-		Rewards: make(map[string][]common.Address),
+	return &indexStream[eulerPositionRow, eulerPositionRef]{
+		Entity: "eulerPositionRefs", MaxRows: eulerMaxPositionRefs, Where: eulerOwnerWhere(owner),
+		Decode: func(chainID ChainID, id string, row eulerPositionRow) (eulerPositionRef, error) {
+			if row.ChainID != int(chainID) || row.OwnerPrefix != prefix ||
+				!common.IsHexAddress(row.Account) || !common.IsHexAddress(row.Vault) {
+				return eulerPositionRef{}, fmt.Errorf("GraphQL returned malformed Euler position row %q", id)
+			}
+			account := common.HexToAddress(row.Account)
+			vault := common.HexToAddress(row.Vault)
+			kind := eulerVaultKind(row.VaultKind)
+			if eulerOwnerPrefix(account) != prefix || !validEulerVaultKind(kind) ||
+				id != eulerPositionRowID(chainID, account, vault) {
+				return eulerPositionRef{}, fmt.Errorf("GraphQL returned foreign Euler position row %q", id)
+			}
+			return eulerPositionRef{Account: account, Vault: vault, Kind: kind}, nil
+		},
 	}
-	for _, row := range payload.Data.Positions {
-		if row.ChainID != int(chainID) || row.OwnerPrefix != prefix ||
-			!common.IsHexAddress(row.Account) || !common.IsHexAddress(row.Vault) || row.ID <= positionAfter {
-			return eulerGraphQLPage{}, fmt.Errorf("GraphQL returned malformed Euler position row %q", row.ID)
-		}
-		account := common.HexToAddress(row.Account)
-		vault := common.HexToAddress(row.Vault)
-		kind := eulerVaultKind(row.VaultKind)
-		if eulerOwnerPrefix(account) != prefix || !validEulerVaultKind(kind) ||
-			row.ID != eulerPositionRowID(chainID, account, vault) {
-			return eulerGraphQLPage{}, fmt.Errorf("GraphQL returned foreign Euler position row %q", row.ID)
-		}
-		page.Positions = append(page.Positions, eulerPositionRef{Account: account, Vault: vault, Kind: kind})
-		page.PositionIDs = append(page.PositionIDs, row.ID)
-	}
-	for _, row := range payload.Data.Rewards {
-		if row.ChainID != int(chainID) || row.OwnerPrefix != prefix ||
-			!common.IsHexAddress(row.Account) || !common.IsHexAddress(row.Vault) ||
-			!common.IsHexAddress(row.Reward) || row.ID <= rewardAfter {
-			return eulerGraphQLPage{}, fmt.Errorf("GraphQL returned malformed Euler reward row %q", row.ID)
-		}
-		account := common.HexToAddress(row.Account)
-		vault := common.HexToAddress(row.Vault)
-		reward := common.HexToAddress(row.Reward)
-		if eulerOwnerPrefix(account) != prefix || row.ID != eulerRewardRowID(chainID, account, vault, reward) {
-			return eulerGraphQLPage{}, fmt.Errorf("GraphQL returned foreign Euler reward row %q", row.ID)
-		}
-		key := strings.ToLower(account.Hex()) + ":" + strings.ToLower(vault.Hex())
-		page.Rewards[key] = append(page.Rewards[key], reward)
-		page.RewardIDs = append(page.RewardIDs, row.ID)
-	}
-	return page, nil
 }
 
-type eulerIndexedSnapshot struct {
-	Block     uint64
-	Positions []eulerPositionRef
-	// Lag notes a live read that trails its pin by more than indexMaxLag.
-	Lag *indexLagNote
+type eulerRewardRow struct {
+	ChainID     int    `json:"chainId"`
+	OwnerPrefix string `json:"ownerPrefix"`
+	Account     string `json:"account"`
+	Vault       string `json:"vault"`
+	Reward      string `json:"reward"`
 }
 
-func (i *eulerIndexer) indexedSnapshot(
-	ctx context.Context,
-	block BlockRef,
-	owner common.Address,
-	start indexStart,
-) (eulerIndexedSnapshot, error) {
-	release, err := lockSentioLane(ctx)
-	if err != nil {
-		return eulerIndexedSnapshot{}, err
-	}
-	defer release()
-	_, indexedBlock, err := indexQueryBlock(block, func(forceRefresh bool) (map[ChainID]sentioChainStatus, error) {
-		return i.api.chainStatuses(ctx, i.config, []ChainID{block.ChainID}, forceRefresh)
-	})
-	if err != nil {
-		return eulerIndexedSnapshot{}, err
-	}
-	result := eulerIndexedSnapshot{Block: indexedBlock}
-	positions := make(map[string]eulerPositionRef)
-	rewards := make(map[string]map[common.Address]struct{})
-	positionAfter, rewardAfter := "", ""
-	positionDone, rewardDone := false, false
-	for !positionDone || !rewardDone {
-		page, pageErr := i.graphqlPage(
-			ctx, block.ChainID, owner, positionAfter, rewardAfter, indexedBlock, start,
-		)
-		if pageErr != nil {
-			return eulerIndexedSnapshot{}, pageErr
-		}
-		if result.Lag, err = checkIndexCheckpoint(block, page.CheckpointBlock, page.CheckpointMS); err != nil {
-			return eulerIndexedSnapshot{}, err
-		}
-		for _, ref := range page.Positions {
-			positions[eulerPositionRowID(block.ChainID, ref.Account, ref.Vault)] = ref
-		}
-		for key, tokens := range page.Rewards {
-			if rewards[key] == nil {
-				rewards[key] = make(map[common.Address]struct{})
+// eulerReward is a reward token an account's position in a vault is enrolled for.
+type eulerReward struct {
+	Account common.Address
+	Vault   common.Address
+	Reward  common.Address
+}
+
+func eulerRewardStream(owner common.Address) *indexStream[eulerRewardRow, eulerReward] {
+	prefix := eulerOwnerPrefix(owner)
+	return &indexStream[eulerRewardRow, eulerReward]{
+		Entity: "eulerRewardTokens", MaxRows: eulerMaxRewardRefs, Where: eulerOwnerWhere(owner),
+		Decode: func(chainID ChainID, id string, row eulerRewardRow) (eulerReward, error) {
+			if row.ChainID != int(chainID) || row.OwnerPrefix != prefix ||
+				!common.IsHexAddress(row.Account) || !common.IsHexAddress(row.Vault) || !common.IsHexAddress(row.Reward) {
+				return eulerReward{}, fmt.Errorf("GraphQL returned malformed Euler reward row %q", id)
 			}
-			for _, reward := range tokens {
-				rewards[key][reward] = struct{}{}
+			reward := eulerReward{
+				Account: common.HexToAddress(row.Account),
+				Vault:   common.HexToAddress(row.Vault),
+				Reward:  common.HexToAddress(row.Reward),
 			}
-		}
-		if len(positions) > eulerMaxPositionRefs {
-			return eulerIndexedSnapshot{}, fmt.Errorf("Euler indexer result exceeds its safety bound")
-		}
-		rewardCount := 0
-		for _, entries := range rewards {
-			rewardCount += len(entries)
-		}
-		if rewardCount > eulerMaxRewardRefs {
-			return eulerIndexedSnapshot{}, fmt.Errorf("Euler reward index exceeds its safety bound")
-		}
-		positionDone = len(page.PositionIDs) < eulerIndexerPageSize
-		rewardDone = len(page.RewardIDs) < eulerIndexerPageSize
-		if !positionDone {
-			next := page.PositionIDs[len(page.PositionIDs)-1]
-			if next <= positionAfter {
-				return eulerIndexedSnapshot{}, fmt.Errorf("Euler position pagination did not advance")
+			if eulerOwnerPrefix(reward.Account) != prefix ||
+				id != eulerRewardRowID(chainID, reward.Account, reward.Vault, reward.Reward) {
+				return eulerReward{}, fmt.Errorf("GraphQL returned foreign Euler reward row %q", id)
 			}
-			positionAfter = next
-		}
-		if !rewardDone {
-			next := page.RewardIDs[len(page.RewardIDs)-1]
-			if next <= rewardAfter {
-				return eulerIndexedSnapshot{}, fmt.Errorf("Euler reward pagination did not advance")
-			}
-			rewardAfter = next
-		}
+			return reward, nil
+		},
 	}
-	for _, ref := range positions {
-		key := strings.ToLower(ref.Account.Hex()) + ":" + strings.ToLower(ref.Vault.Hex())
-		for reward := range rewards[key] {
-			ref.RewardTokens = append(ref.RewardTokens, reward)
-		}
-		sort.Slice(ref.RewardTokens, func(left, right int) bool {
-			return strings.ToLower(ref.RewardTokens[left].Hex()) < strings.ToLower(ref.RewardTokens[right].Hex())
-		})
-		result.Positions = append(result.Positions, ref)
-	}
-	sort.Slice(result.Positions, func(left, right int) bool {
-		leftID := eulerPositionRowID(block.ChainID, result.Positions[left].Account, result.Positions[left].Vault)
-		rightID := eulerPositionRowID(block.ChainID, result.Positions[right].Account, result.Positions[right].Vault)
-		return leftID < rightID
-	})
-	return result, nil
 }
 
 // PositionRefs returns the position refs of every account sharing owner's prefix on block's
-// chain, with a lag note when the index trails a live pin by more than indexMaxLag.
+// chain, each with the reward tokens it is enrolled for, in row order.
 func (i *eulerIndexer) PositionRefs(
 	ctx context.Context,
 	client *RPCClient,
 	block BlockRef,
 	owner common.Address,
-) ([]eulerPositionRef, *indexLagNote, error) {
-	start := indexStart{client: client, block: eulerV2ChainConfigs[block.ChainID].ActivationBlock}
-	snapshot, err := i.indexedSnapshot(ctx, block, owner, start)
-	if err != nil {
-		return nil, nil, err
+) ([]eulerPositionRef, error) {
+	positions, rewards := eulerPositionStream(owner), eulerRewardStream(owner)
+	if _, err := i.index.read(ctx, client, block, positions, rewards); err != nil {
+		return nil, err
 	}
-	return snapshot.Positions, snapshot.Lag, nil
+	enrolled := make(map[[2]common.Address][]common.Address)
+	for _, reward := range rewards.Rows() {
+		key := [2]common.Address{reward.Account, reward.Vault}
+		enrolled[key] = append(enrolled[key], reward.Reward)
+	}
+	refs := positions.Rows()
+	for index := range refs {
+		tokens := enrolled[[2]common.Address{refs[index].Account, refs[index].Vault}]
+		sort.Slice(tokens, func(left, right int) bool {
+			return strings.ToLower(tokens[left].Hex()) < strings.ToLower(tokens[right].Hex())
+		})
+		refs[index].RewardTokens = tokens
+	}
+	return refs, nil
 }

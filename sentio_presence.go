@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -45,10 +44,11 @@ type presenceProbe struct {
 }
 
 // presenceProof is what the probe established for one chain: no rows for the account as of
-// QueryBlock, whose checkpoint the indexer reported as Checkpoint.
+// QueryBlock, whose checkpoint the indexer reported as Checkpoint, written at CheckpointMS.
 type presenceProof struct {
-	QueryBlock uint64
-	Checkpoint uint64
+	QueryBlock   uint64
+	Checkpoint   uint64
+	CheckpointMS uint64
 }
 
 // presenceResult is the probe's verdict: a proof for every chain shown to hold nothing.
@@ -80,9 +80,10 @@ func presenceKey(probe presenceProbe, account string) string {
 // indexMaxLag, as a page the caller accepted without a note would. The caller then reports
 // proof.QueryBlock as its indexed block. At a fixed pin the proof must be at the pin itself.
 //
-// Callers ask before taking a lane slot. A probe computed here takes a slot of its own to send,
-// and the other chain jobs of the scan wait for it: one that held a slot meanwhile could starve
-// it, and with a lane of one deadlock the scan.
+// The call may wait for a prefetched probe or send the probe itself, which takes a lane slot for
+// its request. The caller must hold none while it waits: the other chain jobs of the scan wait
+// for the probe too, and with a lane of one a waiter holding the slot would deadlock the scan.
+// Index reads hold a slot only for each request's round trip, so none ever does.
 func (c *sentioAPIClient) chainProvenEmpty(
 	ctx context.Context,
 	probe presenceProbe,
@@ -102,17 +103,6 @@ func (c *sentioAPIClient) chainProvenEmpty(
 		return presenceProof{}, false
 	}
 	return proof, true
-}
-
-// awaitPresence waits for a prefetched probe to finish. Callers invoke it before taking a lane
-// slot: the probe needs a slot of its own, so a chain job that held one while waiting on the probe
-// could starve it — and with a lane of one, deadlock the scan.
-func (c *sentioAPIClient) awaitPresence(ctx context.Context, probe presenceProbe, account string) {
-	scope := scopeFrom(ctx)
-	if scope.memo == nil {
-		return
-	}
-	scope.memo.await(ctx, presenceKey(probe, account))
 }
 
 // prefetchPresence starts the probe for account in the background, taking a prefetch slot, so
@@ -153,9 +143,9 @@ func (c *sentioAPIClient) prefetchPresence(ctx context.Context, probe presencePr
 	})
 }
 
-// presence decides which chains are worth probing and, when enough of them are, sends the probe on
-// a lane slot of its own, so a probe with too few chains to ask about takes no slot at all. The
-// caller must not hold a slot while it waits for this one.
+// presence decides which chains are worth probing and, when enough of them are, sends the probe,
+// which takes a lane slot only for its request, so a probe with too few chains to ask about takes
+// none at all.
 func (c *sentioAPIClient) presence(
 	ctx context.Context,
 	probe presenceProbe,
@@ -167,11 +157,6 @@ func (c *sentioAPIClient) presence(
 	if len(targets) < presenceMinChains {
 		return presenceResult{}
 	}
-	release, err := lockSentioLane(ctx)
-	if err != nil {
-		return presenceResult{}
-	}
-	defer release()
 	return c.runPresenceProbe(ctx, probe, targets, account)
 }
 
@@ -221,11 +206,7 @@ func presenceQuery(probe presenceProbe, targets map[ChainID]presenceTarget) stri
 	query.WriteString("query Presence {\n")
 	for _, chainID := range chainIDs {
 		block := strconv.FormatUint(targets[chainID].queryBlock, 10)
-		fmt.Fprintf(
-			&query,
-			"  %s: indexerCheckpoints(first: 2, block: { number: %s }, where: { id: \"%d\" }) { blockNumber timestampMs }\n",
-			presenceAlias("cp", chainID), block, chainID,
-		)
+		query.WriteString("  " + indexCheckpointField(presenceAlias("cp", chainID), chainID, targets[chainID].queryBlock) + "\n")
 		for index, field := range probe.fields {
 			fmt.Fprintf(
 				&query,
@@ -238,18 +219,6 @@ func presenceQuery(probe presenceProbe, targets map[ChainID]presenceTarget) stri
 	return query.String()
 }
 
-type presenceResponse struct {
-	Data   map[string]json.RawMessage `json:"data"`
-	Errors []struct {
-		Message string `json:"message"`
-	} `json:"errors"`
-}
-
-type presenceCheckpoint struct {
-	BlockNumber string `json:"blockNumber"`
-	TimestampMS string `json:"timestampMs"`
-}
-
 // runPresenceProbe asks every target chain at once. A request or GraphQL failure proves nothing,
 // so it returns an empty verdict and the per-chain flow reports whatever the failure was.
 func (c *sentioAPIClient) runPresenceProbe(
@@ -258,56 +227,47 @@ func (c *sentioAPIClient) runPresenceProbe(
 	targets map[ChainID]presenceTarget,
 	account string,
 ) presenceResult {
-	var payload presenceResponse
-	err := c.doJSON(ctx, http.MethodPost, probe.config.GraphQLURL, map[string]any{
-		"query": presenceQuery(probe, targets),
-	}, &payload)
-	if err != nil || len(payload.Errors) > 0 {
+	var data map[string]json.RawMessage
+	if err := c.graphql(ctx, probe.config.GraphQLURL, presenceQuery(probe, targets), &data); err != nil {
 		return presenceResult{}
 	}
 	proofs := make(map[ChainID]presenceProof, len(targets))
 	for chainID, target := range targets {
-		if checkpoint, proven := presenceChainEmpty(probe, payload.Data, chainID, target); proven {
-			proofs[chainID] = presenceProof{QueryBlock: target.queryBlock, Checkpoint: checkpoint}
+		if checkpoint, checkpointMS, proven := presenceChainEmpty(probe, data, chainID, target); proven {
+			proofs[chainID] = presenceProof{QueryBlock: target.queryBlock, Checkpoint: checkpoint, CheckpointMS: checkpointMS}
 		}
 	}
 	return presenceResult{proofs: proofs}
 }
 
 // presenceChainEmpty decides one chain: a valid checkpoint and no row in any field. It returns the
-// checkpoint block so a caller that reports it can report the same value the page would have.
+// checkpoint so a later read at the proof's block can be held to the same one.
 func presenceChainEmpty(
 	probe presenceProbe,
 	data map[string]json.RawMessage,
 	chainID ChainID,
 	target presenceTarget,
-) (uint64, bool) {
-	var checkpoints []presenceCheckpoint
+) (uint64, uint64, bool) {
+	// The probe never uses the start as a stand-in: a chain without a written checkpoint is not
+	// proven empty and runs its own pages.
 	raw, exists := data[presenceAlias("cp", chainID)]
-	if !exists || json.Unmarshal(raw, &checkpoints) != nil || len(checkpoints) != 1 {
-		return 0, false
+	if !exists {
+		return 0, 0, false
 	}
-	checkpointBlock, err := strconv.ParseUint(checkpoints[0].BlockNumber, 10, 64)
-	if err != nil {
-		return 0, false
-	}
-	checkpointMS, err := strconv.ParseUint(checkpoints[0].TimestampMS, 10, 64)
-	if err != nil {
-		return 0, false
+	checkpoint, err := parseIndexCheckpoint(raw)
+	if err != nil || !checkpoint.written || checkpoint.block > target.queryBlock {
+		return 0, 0, false
 	}
 	// A chain whose page would carry a lag note runs that page, so the scan reports the lag.
-	if checkpointBlock > target.queryBlock {
-		return 0, false
-	}
-	if note, err := checkIndexCheckpoint(target.block, checkpointBlock, checkpointMS); err != nil || note != nil {
-		return 0, false
+	if note, err := checkIndexCheckpoint(target.block, checkpoint.block, checkpoint.ms); err != nil || note != nil {
+		return 0, 0, false
 	}
 	for index := range probe.fields {
 		var rows []json.RawMessage
 		raw, exists := data[presenceAlias(fmt.Sprintf("f%d_", index), chainID)]
 		if !exists || json.Unmarshal(raw, &rows) != nil || len(rows) != 0 {
-			return 0, false
+			return 0, 0, false
 		}
 	}
-	return checkpointBlock, true
+	return checkpoint.block, checkpoint.ms, true
 }
