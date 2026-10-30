@@ -15,8 +15,9 @@ once per engine, which keeps it for every later scan.
 The RPC-settled block remains authoritative. Provider amounts are used directly
 when their block number and hash match that pin, or on a live scan when the
 provider's block time is within `LiveWalletSampleWindow` of the pin's
-(`LiveWalletSample`); otherwise every discovered balance is re-read at the
-settled block, including provider rows reporting zero.
+(`LiveWalletSample`), unless the provider marks the account `DiscoveryOnly`
+because its amounts are not a block's balances; otherwise every discovered
+balance is re-read at the settled block, including provider rows reporting zero.
 Providers may supply per-account block metadata when address batches sample
 different blocks. A candidate whose successful `balanceOf` returns empty data
 is omitted, and so, at a fixed pin, is a candidate with no code at that block:
