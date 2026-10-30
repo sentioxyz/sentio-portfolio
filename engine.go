@@ -82,7 +82,6 @@ type ScanOptions struct {
 	ProtocolIDs map[string]struct{}
 	ChainIDs    map[ChainID]struct{}
 	BlockNumber map[ChainID]uint64
-	SkipPrices  bool
 	// CollectDeadline, when set, is when the scan stops reading positions. Chain setup, wallet
 	// discovery, presence probes and adapters still running are canceled, deployments not yet
 	// started are skipped, and each is reported as an "incomplete" error; the scan then values
@@ -785,18 +784,16 @@ sendJobs:
 	})
 
 	pricingStartedAt := time.Now()
-	if !options.SkipPrices {
-		pricingCtx, cancelPricing := withOptionalDeadline(ctx, options.PricingDeadline)
-		prices, priceErrors := fetchPrices(pricingCtx, e.priceProvider, response.Snapshots)
-		// Failures once the pricing context has ended mean pricing was cut short, not that tokens
-		// cannot be quoted; say so, or the holdings it never priced pass for unquotable ones.
-		if len(priceErrors) > 0 && pricingCtx.Err() != nil {
-			response.Errors = append(response.Errors, ScanError{Scope: incompleteScope, Message: pricesNotFetchedMessage})
-		}
-		cancelPricing()
-		response.Prices = prices
-		response.Errors = append(response.Errors, priceErrors...)
+	pricingCtx, cancelPricing := withOptionalDeadline(ctx, options.PricingDeadline)
+	prices, priceErrors := fetchPrices(pricingCtx, e.priceProvider, response.Snapshots)
+	// Failures once the pricing context has ended mean pricing was cut short, not that tokens
+	// cannot be quoted; say so, or the holdings it never priced pass for unquotable ones.
+	if len(priceErrors) > 0 && pricingCtx.Err() != nil {
+		response.Errors = append(response.Errors, ScanError{Scope: incompleteScope, Message: pricesNotFetchedMessage})
 	}
+	cancelPricing()
+	response.Prices = prices
+	response.Errors = append(response.Errors, priceErrors...)
 	summaries, valuationErr := applyValuations(
 		response.Snapshots,
 		response.Prices,
@@ -824,9 +821,7 @@ sendJobs:
 		return leftError.Message < rightError.Message
 	})
 	response.CompletedAt = time.Now().UTC()
-	if !options.SkipPrices {
-		observation.Pricing = time.Since(pricingStartedAt)
-	}
+	observation.Pricing = time.Since(pricingStartedAt)
 	observation.Duration = time.Since(scanStartedAt)
 	observation.Snapshots = len(response.Snapshots)
 	observation.Errors = response.Errors

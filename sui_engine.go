@@ -269,8 +269,6 @@ type SuiScanOptions struct {
 	ProtocolIDs map[string]struct{}
 	// Pin is the state to read; the zero value reads the latest.
 	Pin SuiPin
-	// SkipPrices values nothing and asks for no quote.
-	SkipPrices bool
 }
 
 func (o SuiScanOptions) selected() []suiRoute {
@@ -384,11 +382,11 @@ func (e *SuiEngine) ScanWithOptions(ctx context.Context, owner SuiAddress, optio
 	switch options.Pin.kind {
 	case suiPinCheckpoint:
 		checkpoint := options.Pin.checkpoint
-		return e.scanSamples(ctx, owner, routes, suiSamplePlan{instants: []time.Time{{}}, checkpoint: &checkpoint, skipPrices: options.SkipPrices})[0].Response
+		return e.scanSamples(ctx, owner, routes, suiSamplePlan{instants: []time.Time{{}}, checkpoint: &checkpoint})[0].Response
 	case suiPinTime:
-		return e.scanSamples(ctx, owner, routes, suiSamplePlan{instants: []time.Time{options.Pin.at}, skipPrices: options.SkipPrices})[0].Response
+		return e.scanSamples(ctx, owner, routes, suiSamplePlan{instants: []time.Time{options.Pin.at}})[0].Response
 	}
-	return e.scanLatest(ctx, owner, routes, options.SkipPrices)
+	return e.scanLatest(ctx, owner, routes)
 }
 
 // suiIndexedLatestMaxAge bounds how old the sample answering a latest indexed read may be.
@@ -409,7 +407,7 @@ type suiLatestRead struct {
 
 // scanLatest reads every route at once, then prices what they hold together. Reads stop short of
 // ctx's deadline, so a route that runs out of time does not cost the others their valuation.
-func (e *SuiEngine) scanLatest(ctx context.Context, owner SuiAddress, routes []suiRoute, skipPrices bool) *SuiResponse {
+func (e *SuiEngine) scanLatest(ctx context.Context, owner SuiAddress, routes []suiRoute) *SuiResponse {
 	response := e.newResponse(owner, routes)
 	readCtx, cancelReads := withSuiPriceReserve(ctx)
 	defer cancelReads()
@@ -427,14 +425,11 @@ func (e *SuiEngine) scanLatest(ctx context.Context, owner SuiAddress, routes []s
 			wanted[read.valuedAt] = mergeSortedStrings(wanted[read.valuedAt], suiPositionCoins(read.positions))
 		}
 	}
-	quotes := suiQuotes{}
-	if !skipPrices {
-		quotes = e.quote(ctx, wanted)
-	}
+	quotes := e.quote(ctx, wanted)
 	for i, route := range routes {
 		read := &reads[i]
 		if read.ok {
-			e.valueRead(owner, route, read, quotes, skipPrices)
+			e.valueRead(owner, route, read, quotes)
 		}
 		response.add(&read.result)
 	}
@@ -511,25 +506,21 @@ func checkSuiSample(route suiRoute, positions suiPositions, checkpoint *uint64, 
 
 // valueRead prices one latest read and turns it into the route's snapshot. A head read holding
 // nothing has no snapshot; an indexed read always has one, at its sample.
-func (e *SuiEngine) valueRead(owner SuiAddress, route suiRoute, read *suiLatestRead, quotes suiQuotes, skipPrices bool) {
+func (e *SuiEngine) valueRead(owner SuiAddress, route suiRoute, read *suiLatestRead, quotes suiQuotes) {
 	positions := read.positions
 	read.result.checkpoint = positions.Checkpoint
 	for _, err := range positions.Errors {
 		read.result.fail(route, "protocol", err)
 	}
 	coins := suiPositionCoins(positions)
-	var prices map[string]float64
-	if !skipPrices {
-		var failures []error
-		prices, failures = quotes.at(read.valuedAt, coins)
-		// The wallet holds unsolicited coins nothing quotes, which the host hides after valuation;
-		// every other unpriced coin is a gap the response reports.
-		if route.id != "wallet" {
-			failures = append(failures, quotes.gaps(read.valuedAt, coins, prices)...)
-		}
-		for _, failure := range failures {
-			read.result.fail(route, "pricing", failure)
-		}
+	prices, failures := quotes.at(read.valuedAt, coins)
+	// The wallet holds unsolicited coins nothing quotes, which the host hides after valuation;
+	// every other unpriced coin is a gap the response reports.
+	if route.id != "wallet" {
+		failures = append(failures, quotes.gaps(read.valuedAt, coins, prices)...)
+	}
+	for _, failure := range failures {
+		read.result.fail(route, "pricing", failure)
 	}
 	snapshot, summary, err := suiValuedSnapshot(owner, positions, prices)
 	if err != nil {

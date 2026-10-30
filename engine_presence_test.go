@@ -279,7 +279,6 @@ func pinnedScan(rpcs []*scanTestChain) ScanOptions {
 	options := ScanOptions{
 		ChainIDs:    make(map[ChainID]struct{}, len(rpcs)),
 		BlockNumber: make(map[ChainID]uint64, len(rpcs)),
-		SkipPrices:  true,
 	}
 	for _, rpc := range rpcs {
 		options.ChainIDs[rpc.chainID] = struct{}{}

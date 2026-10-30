@@ -169,7 +169,6 @@ func TestEngineScanSkipsDisabledChains(t *testing.T) {
 	engine := NewEngineWithConfig(nil, nil, EngineConfig{DisabledChains: []ChainID{Polygon, Plasma}})
 	response := engine.ScanWithOptions(context.Background(), common.HexToAddress("0x1"), ScanOptions{
 		ProtocolIDs: map[string]struct{}{"aave-v3": {}},
-		SkipPrices:  true,
 	})
 	if len(response.Errors) != len(SupportedChainIDs)-2 {
 		t.Fatalf("errors = %+v, want one per enabled chain", response.Errors)

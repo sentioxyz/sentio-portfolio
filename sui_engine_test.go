@@ -416,7 +416,7 @@ func TestSuiPinnedScanNeverReadsNodeState(t *testing.T) {
 
 	// Without the wallet, a pinned scan does not even dial.
 	test := &suiEngineTest{t: t, nodeErr: errors.New("must not dial"), indexes: []*fakeSuiIndex{{id: "suilend", samples: hourlySamples("suilend", 1000, 3)}}}
-	response := test.engine().ScanWithOptions(context.Background(), owner, SuiScanOptions{Pin: SuiAtCheckpoint(1001), ProtocolIDs: map[string]struct{}{"suilend": {}, "cetus": {}}, SkipPrices: true})
+	response := test.engine().ScanWithOptions(context.Background(), owner, SuiScanOptions{Pin: SuiAtCheckpoint(1001), ProtocolIDs: map[string]struct{}{"suilend": {}, "cetus": {}}})
 	if test.dials.Load() != 0 || suiSnapshotOf(response, "suilend") == nil {
 		t.Fatalf("dials %d, response %+v", test.dials.Load(), response)
 	}
@@ -432,14 +432,14 @@ func TestSuiLatestReadsEachProtocolFromItsOwnSource(t *testing.T) {
 
 	// Indexed alone, with no node configured at all.
 	test := &suiEngineTest{t: t, indexes: []*fakeSuiIndex{suilend, navi}, now: suiEngineTestBase.Add(time.Hour)}
-	response := test.engine().ScanWithOptions(context.Background(), owner, SuiScanOptions{ProtocolIDs: map[string]struct{}{"suilend": {}}, SkipPrices: true})
+	response := test.engine().ScanWithOptions(context.Background(), owner, SuiScanOptions{ProtocolIDs: map[string]struct{}{"suilend": {}}})
 	if snapshot := suiSnapshotOf(response, "suilend"); snapshot == nil || snapshot.Checkpoint != sample || response.Checkpoint != sample {
 		t.Fatalf("indexed latest: %+v", response)
 	}
 
 	// A failed NAVI node read stays a failure: its index answers for a different checkpoint.
 	test = &suiEngineTest{t: t, node: &fakeSuiNode{head: suiEngineCheckpoint(2000, suiEngineTestBase)}, nodes: &fakeSuiNodeProtocols{err: errors.New("object read failed")}, indexes: []*fakeSuiIndex{suilend, navi}, now: suiEngineTestBase.Add(time.Hour)}
-	response = test.engine().ScanWithOptions(context.Background(), owner, SuiScanOptions{ProtocolIDs: map[string]struct{}{"navi": {}}, SkipPrices: true})
+	response = test.engine().ScanWithOptions(context.Background(), owner, SuiScanOptions{ProtocolIDs: map[string]struct{}{"navi": {}}})
 	if latest, checkpoint, ranges := navi.reads(); latest+checkpoint+ranges != 0 {
 		t.Fatalf("NAVI's index was read for a latest request: %d %d %d", latest, checkpoint, ranges)
 	}
@@ -465,7 +465,7 @@ func TestSuiIndexedLatestIsGatedByFreshness(t *testing.T) {
 	}{{2 * time.Hour, true}, {2*time.Hour + 2*time.Minute, false}, {-time.Minute, false}} {
 		suilend := &fakeSuiIndex{id: "suilend", latest: suiEnginePositions("suilend", sample, map[string]string{suiLongType: "1"})}
 		engine := (&suiEngineTest{t: t, indexes: []*fakeSuiIndex{suilend}, now: suiEngineTestBase.Add(test.age)}).engine()
-		response := engine.ScanWithOptions(context.Background(), owner, SuiScanOptions{ProtocolIDs: map[string]struct{}{"suilend": {}}, SkipPrices: true})
+		response := engine.ScanWithOptions(context.Background(), owner, SuiScanOptions{ProtocolIDs: map[string]struct{}{"suilend": {}}})
 		if fresh := suiSnapshotOf(response, "suilend") != nil; fresh != test.fresh {
 			t.Fatalf("age %s: read %v, errors %+v", test.age, fresh, response.Errors)
 		}
@@ -504,7 +504,7 @@ func TestSuiPinnedScanRejectsSamplesPastThePin(t *testing.T) {
 	for name, positions := range map[string]suiPositions{"after the pin": late, "without a digest": noDigest} {
 		engine := (&suiEngineTest{t: t}).engine()
 		engine.indexes["suilend"] = suiIndexAnswering{positions}
-		response := engine.ScanWithOptions(context.Background(), owner, SuiScanOptions{Pin: SuiAtCheckpoint(1005), ProtocolIDs: map[string]struct{}{"suilend": {}}, SkipPrices: true})
+		response := engine.ScanWithOptions(context.Background(), owner, SuiScanOptions{Pin: SuiAtCheckpoint(1005), ProtocolIDs: map[string]struct{}{"suilend": {}}})
 		if suiSnapshotOf(response, "suilend") != nil || !suiHasError(response, "suilend", "protocol", "invalid sample") {
 			t.Fatalf("%s: %+v", name, response)
 		}
@@ -788,7 +788,7 @@ func TestSuiEngineWiresIndexesAndObserverFromItsEngine(t *testing.T) {
 		t.Fatal(err)
 	}
 	fastSQL(sui.indexes["suilend"].(*suiHistoryIndex).api)
-	response := sui.ScanWithOptions(context.Background(), owner, SuiScanOptions{ProtocolIDs: map[string]struct{}{"wallet": {}, "suilend": {}}, SkipPrices: true})
+	response := sui.ScanWithOptions(context.Background(), owner, SuiScanOptions{ProtocolIDs: map[string]struct{}{"wallet": {}, "suilend": {}}})
 	if snapshot := suiSnapshotOf(response, "suilend"); snapshot == nil || snapshot.Checkpoint != fixture.pin || fixture.calls != 1 {
 		t.Fatalf("suilend through the configured index: %+v %+v", snapshot, response.Errors)
 	}

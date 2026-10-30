@@ -55,12 +55,11 @@ func (p awaitingWalletProvider) WalletBalances(ctx context.Context, _ WalletBala
 	}
 }
 
-// pinnedBSCScan scans BSC alone, fixed at block, without pricing.
+// pinnedBSCScan scans BSC alone, fixed at block.
 func pinnedBSCScan(block uint64) ScanOptions {
 	return ScanOptions{
 		ChainIDs:    map[ChainID]struct{}{BSC: {}},
 		BlockNumber: map[ChainID]uint64{BSC: block},
-		SkipPrices:  true,
 	}
 }
 
@@ -85,7 +84,7 @@ func TestScanReadsProtocolsWhileWalletDiscoveryRuns(t *testing.T) {
 		}}},
 	}}}}
 	recorder := &recordingObserver{}
-	engine := newDeadlineTestEngine(t, availabilityRPCServer{t: t, block: pin}, nil, recorder,
+	engine := newDeadlineTestEngine(t, availabilityRPCServer{t: t, block: pin}, &recordingPriceProvider{}, recorder,
 		vault,
 		newDeadlineTestAdapter(walletProtocolID, false),
 	)
@@ -123,7 +122,7 @@ func TestScanReadsProtocolsWhileWalletDiscoveryRuns(t *testing.T) {
 // failed.
 func TestScanReportsTheWalletUnreadWhenDiscoveryOutlastsTheDeadline(t *testing.T) {
 	recorder := &recordingObserver{}
-	engine := newDeadlineTestEngine(t, availabilityRPCServer{t: t, block: 1_000}, nil, recorder,
+	engine := newDeadlineTestEngine(t, availabilityRPCServer{t: t, block: 1_000}, &recordingPriceProvider{}, recorder,
 		newDeadlineTestAdapter("quick", false),
 		newDeadlineTestAdapter(walletProtocolID, false),
 	)

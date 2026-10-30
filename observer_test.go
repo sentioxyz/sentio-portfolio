@@ -305,7 +305,6 @@ func TestEngineReportsScanObservation(t *testing.T) {
 	options := ScanOptions{
 		ChainIDs:    map[ChainID]struct{}{Ethereum: {}, Base: {}},
 		ProtocolIDs: map[string]struct{}{"aave-v3": {}},
-		SkipPrices:  true,
 	}
 	response := engine.ScanWithOptions(context.Background(), common.HexToAddress("0x1"), options)
 
@@ -324,10 +323,10 @@ func TestEngineReportsScanObservation(t *testing.T) {
 	if scan.Duration <= 0 || scan.ChainSetup <= 0 {
 		t.Fatalf("scan observation lacks durations: %+v", scan)
 	}
-	if scan.WalletDiscovery != 0 || scan.Pricing != 0 {
+	if scan.WalletDiscovery != 0 {
 		t.Fatalf("excluded phases reported durations: %+v", scan)
 	}
-	if !scan.Options.SkipPrices || len(scan.Options.ProtocolIDs) != 1 {
+	if len(scan.Options.ChainIDs) != 2 || len(scan.Options.ProtocolIDs) != 1 {
 		t.Fatalf("scan observation lost its options: %+v", scan.Options)
 	}
 	if len(recorder.protocols) != 0 {

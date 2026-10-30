@@ -264,24 +264,20 @@ func (e *SuiEngine) coinMetadata(ctx context.Context, reader SuiReader, coins []
 
 // walletResult adds one instant's wallet to its response, valued at its pin's timestamp, and
 // returns why the instant should be asked again, if a source did not answer.
-func (e *SuiEngine) walletResult(result *suiProtocolResult, owner SuiAddress, route suiRoute, read suiWalletRead, quotes suiQuotes, skipPrices bool) error {
+func (e *SuiEngine) walletResult(result *suiProtocolResult, owner SuiAddress, route suiRoute, read suiWalletRead, quotes suiQuotes) error {
 	if read.err != nil {
 		result.fail(route, "protocol", read.err)
 		return read.retry
 	}
 	var retry error
-	var prices map[string]float64
-	var failures []error
-	if !skipPrices {
-		if failure, ok := quotes.unavailable(read.pin.Timestamp); ok {
-			retry = fmt.Errorf("wallet prices at %s: %s", suiQuoteKey(read.pin.Timestamp).Format(time.RFC3339), failure)
-		}
-		coins := make([]string, len(read.balances))
-		for i, balance := range read.balances {
-			coins[i] = balance.CoinType
-		}
-		prices, failures = quotes.at(read.pin.Timestamp, coins)
+	if failure, ok := quotes.unavailable(read.pin.Timestamp); ok {
+		retry = fmt.Errorf("wallet prices at %s: %s", suiQuoteKey(read.pin.Timestamp).Format(time.RFC3339), failure)
 	}
+	coins := make([]string, len(read.balances))
+	for i, balance := range read.balances {
+		coins[i] = balance.CoinType
+	}
+	prices, failures := quotes.at(read.pin.Timestamp, coins)
 	positions := suiWalletPositions(read.pin, read.balances, read.metadata, map[string]any{"holding": "coin"})
 	snapshot, summary, err := suiValuedSnapshot(owner, positions, prices)
 	if err != nil {

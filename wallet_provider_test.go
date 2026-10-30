@@ -457,7 +457,7 @@ func TestEngineReportsHistoricalDiscoveryAsCoverage(t *testing.T) {
 	}}}}
 	engine := NewEngineWithConfig(
 		map[ChainID]string{Ethereum: server.URL},
-		nil,
+		&recordingPriceProvider{},
 		EngineConfig{WalletBalanceProvider: provider},
 	)
 
@@ -465,7 +465,6 @@ func TestEngineReportsHistoricalDiscoveryAsCoverage(t *testing.T) {
 		ProtocolIDs: map[string]struct{}{walletProtocolID: {}},
 		ChainIDs:    map[ChainID]struct{}{Ethereum: {}},
 		BlockNumber: map[ChainID]uint64{Ethereum: pinNumber},
-		SkipPrices:  true,
 	})
 
 	if len(provider.requests) != 1 {
