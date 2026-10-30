@@ -161,17 +161,26 @@ A host-injected `WalletBalanceProvider` is the only ERC-20 discovery source for
 live and historical scans. Do not add static token lists, token-list unions,
 static metadata lookups, or an ERC-20 fallback when discovery fails.
 
-The RPC-settled block remains authoritative. Provider amounts may be used only
-when the provider block number and hash exactly match that pin. Per-account
-block metadata overrides the shared chain sample when accounts were queried in
-separate batches. Otherwise re-read native and every discovered ERC-20 balance
-at the settled block, including provider rows whose latest amount is zero.
-Never label a latest provider amount with an earlier `BlockRef`.
+The RPC-settled block remains authoritative. Provider amounts may be used
+directly when the provider block number and hash exactly match that pin, or, on
+a live scan only, when `LiveWalletSample` accepts the sample: both block times
+known and no more than `LiveWalletSampleWindow` apart. A live answer is as of
+now, so the wallet is then read as of the provider's block, a few blocks from
+the protocols read at the pin. Keep that tolerance to live pins; a fixed pin
+takes provider amounts only at its own block. Per-account block metadata
+overrides the shared chain sample when accounts were queried in separate
+batches. Otherwise re-read native and every discovered ERC-20 balance at the
+settled block, including provider rows whose latest amount is zero. Never label
+a latest provider amount with an earlier fixed `BlockRef`.
 
-Filter zero amounts before metadata enrichment when blocks match. When they
-differ, first re-read the balance, then enrich non-zero results from provider
+Filter zero amounts before metadata enrichment when amounts are used directly.
+Otherwise first re-read the balance, then enrich non-zero results from provider
 metadata or on-chain `symbol` and `decimals` (including bytes32 symbols). Never
-invent either field or obtain it from a static token registry.
+invent either field or obtain it from a static token registry. What the wallet
+reads on-chain the engine keeps for its lifetime (`walletTokenCache`, by chain
+and address, with no expiry): a token's decimals and symbol do not change, and a
+provider that reports amounts without metadata would otherwise cost every scan
+those reads for every token it holds.
 
 An empty successful `balanceOf` return disqualifies a discovery candidate for
 that scan. At a fixed pin, a candidate with no code at the pinned block is

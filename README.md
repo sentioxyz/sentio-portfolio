@@ -9,11 +9,14 @@ Plain holdings — the native coin and ERC-20s an account holds outside any
 protocol — are reported by the `wallet` adapter. A host-injected
 `WalletBalanceProvider` is the sole source of ERC-20 candidates for both live
 and fixed-block scans. There is no static token list or metadata registry.
-Provider metadata is used when complete; otherwise metadata is read on-chain.
+Provider metadata is used when complete; otherwise metadata is read on-chain,
+once per engine, which keeps it for every later scan.
 
 The RPC-settled block remains authoritative. Provider amounts are used directly
-only when their block number and hash match that pin; otherwise every discovered
-balance is re-read at the settled block, including provider rows reporting zero.
+when their block number and hash match that pin, or on a live scan when the
+provider's block time is within `LiveWalletSampleWindow` of the pin's
+(`LiveWalletSample`); otherwise every discovered balance is re-read at the
+settled block, including provider rows reporting zero.
 Providers may supply per-account block metadata when address batches sample
 different blocks. A candidate whose successful `balanceOf` returns empty data
 is omitted, and so, at a fixed pin, is a candidate with no code at that block:
