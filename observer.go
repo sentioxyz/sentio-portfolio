@@ -42,7 +42,7 @@ type ScanObservation struct {
 	// Protocols is the adapter fan-out: every (protocol, chain) deployment, from the start of
 	// wallet discovery and the workers to the end of the last deployment.
 	Protocols time.Duration
-	// Pricing is the PriceProvider round trip plus valuation. Zero when prices were skipped.
+	// Pricing is the PriceProvider round trip plus valuation.
 	Pricing time.Duration
 
 	// Chains is how many chains were pinned successfully and therefore scanned.

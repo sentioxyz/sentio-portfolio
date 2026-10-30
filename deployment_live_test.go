@@ -105,7 +105,7 @@ func TestProtocolAvailabilityBoundariesLive(t *testing.T) {
 
 	account := common.HexToAddress("0x000000000000000000000000000000000000dEaD")
 	t.Run("all-protocols/pre-Instadapp", func(t *testing.T) {
-		engine := NewEngine(rpcURLs, nil)
+		engine := NewEngine(rpcURLs, &recordingPriceProvider{})
 		spies := make(map[string]*liveAvailabilityAdapterSpy)
 		for _, adapter := range engine.adapters {
 			protocolID := adapter.Info().ID
@@ -120,7 +120,6 @@ func TestProtocolAvailabilityBoundariesLive(t *testing.T) {
 			ScanOptions{
 				ChainIDs:    map[ChainID]struct{}{Ethereum: {}},
 				BlockNumber: map[ChainID]uint64{Ethereum: block},
-				SkipPrices:  true,
 			},
 		)
 		if len(response.Errors) != 0 {
@@ -135,7 +134,7 @@ func TestProtocolAvailabilityBoundariesLive(t *testing.T) {
 	for _, expected := range verifiedProtocolAvailabilityWindows {
 		expected := expected
 		t.Run(fmt.Sprintf("%s/chain-%d", expected.protocolID, expected.chainID), func(t *testing.T) {
-			engine := NewEngine(rpcURLs, nil)
+			engine := NewEngine(rpcURLs, &recordingPriceProvider{})
 			registration, exists := engine.registrations[expected.protocolID]
 			if !exists {
 				t.Fatalf("protocol %q has no validated registration", expected.protocolID)
@@ -166,7 +165,6 @@ func TestProtocolAvailabilityBoundariesLive(t *testing.T) {
 					ProtocolIDs: map[string]struct{}{expected.protocolID: {}},
 					ChainIDs:    map[ChainID]struct{}{expected.chainID: {}},
 					BlockNumber: map[ChainID]uint64{expected.chainID: expected.activationBlock - 1},
-					SkipPrices:  true,
 				},
 			)
 			if len(before.Errors) != 0 {
@@ -183,7 +181,6 @@ func TestProtocolAvailabilityBoundariesLive(t *testing.T) {
 					ProtocolIDs: map[string]struct{}{expected.protocolID: {}},
 					ChainIDs:    map[ChainID]struct{}{expected.chainID: {}},
 					BlockNumber: map[ChainID]uint64{expected.chainID: expected.activationBlock},
-					SkipPrices:  true,
 				},
 			)
 			if len(at.Errors) != 0 {

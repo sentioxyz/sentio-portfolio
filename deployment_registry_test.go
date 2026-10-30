@@ -356,7 +356,6 @@ func TestEngineSkipsAdapterOutsideCentralAvailability(t *testing.T) {
 				ScanOptions{
 					ChainIDs:    map[ChainID]struct{}{BSC: {}},
 					BlockNumber: map[ChainID]uint64{BSC: test.block},
-					SkipPrices:  true,
 				},
 			)
 			if len(response.Errors) != 0 {

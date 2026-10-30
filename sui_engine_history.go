@@ -68,7 +68,6 @@ type suiSamplePlan struct {
 	instants []time.Time
 	// checkpoint, when set, pins the scan's single instant to a checkpoint rather than a time.
 	checkpoint *uint64
-	skipPrices bool
 	observe    func(SuiRangePhaseObservation)
 }
 
@@ -163,24 +162,22 @@ func (e *SuiEngine) scanSamples(ctx context.Context, owner SuiAddress, routes []
 	}
 	// Wallet coins are priced apart from the protocols' so each keeps its own failures, and at the
 	// same time, so neither waits on the other.
-	var quotes, walletQuotes suiQuotes
-	if !plan.skipPrices {
-		wanted := map[time.Time][]string{}
-		for i := range plan.instants {
-			for _, route := range read {
-				if answer := answers[i][route.id]; answer.err == nil {
-					key := suiQuoteKey(answer.positions.Checkpoint.Timestamp)
-					wanted[key] = mergeSortedStrings(wanted[key], suiPositionCoins(answer.positions))
-				}
+	wanted := map[time.Time][]string{}
+	for i := range plan.instants {
+		for _, route := range read {
+			if answer := answers[i][route.id]; answer.err == nil {
+				key := suiQuoteKey(answer.positions.Checkpoint.Timestamp)
+				wanted[key] = mergeSortedStrings(wanted[key], suiPositionCoins(answer.positions))
 			}
 		}
-		priced := time.Now()
-		var pricing sync.WaitGroup
-		pricing.Go(func() { quotes = e.quote(ctx, wanted) })
-		pricing.Go(func() { walletQuotes = e.quote(ctx, suiWalletQuotes(wallets)) })
-		pricing.Wait()
-		plan.phase("pricing", "", priced, nil)
 	}
+	priced := time.Now()
+	var quotes, walletQuotes suiQuotes
+	var pricing sync.WaitGroup
+	pricing.Go(func() { quotes = e.quote(ctx, wanted) })
+	pricing.Go(func() { walletQuotes = e.quote(ctx, suiWalletQuotes(wallets)) })
+	pricing.Wait()
+	plan.phase("pricing", "", priced, nil)
 	out := make([]SuiRangeScan, len(plan.instants))
 	for i := range plan.instants {
 		response := e.newResponse(owner, routes)
@@ -191,7 +188,7 @@ func (e *SuiEngine) scanSamples(ctx context.Context, owner SuiAddress, routes []
 			case route.pinned == suiFromWalletHistory && walletErr != nil:
 				result.fail(route, "protocol", walletErr)
 			case route.pinned == suiFromWalletHistory:
-				retry = e.walletResult(&result, owner, route, wallets[i], walletQuotes, plan.skipPrices)
+				retry = e.walletResult(&result, owner, route, wallets[i], walletQuotes)
 			case route.pinned == suiUnread:
 				result.fail(route, "protocol", errSuiHistoryUnsupported)
 			case e.indexes[route.id] == nil:
@@ -293,16 +290,12 @@ func (e *SuiEngine) sampleResult(result *suiProtocolResult, owner SuiAddress, ro
 	}
 	sample := positions.Checkpoint
 	var retry error
-	var prices map[string]float64
-	var failures []error
-	if !plan.skipPrices {
-		if failure, ok := quotes.unavailable(sample.Timestamp); ok {
-			retry = fmt.Errorf("%s prices at %s: %s", route.id, suiQuoteKey(sample.Timestamp).Format(time.RFC3339), failure)
-		}
-		coins := suiPositionCoins(positions)
-		prices, failures = quotes.at(sample.Timestamp, coins)
-		failures = append(failures, quotes.gaps(sample.Timestamp, coins, prices)...)
+	if failure, ok := quotes.unavailable(sample.Timestamp); ok {
+		retry = fmt.Errorf("%s prices at %s: %s", route.id, suiQuoteKey(sample.Timestamp).Format(time.RFC3339), failure)
 	}
+	coins := suiPositionCoins(positions)
+	prices, failures := quotes.at(sample.Timestamp, coins)
+	failures = append(failures, quotes.gaps(sample.Timestamp, coins, prices)...)
 	snapshot, summary, err := suiValuedSnapshot(owner, positions, prices)
 	if err != nil {
 		result.fail(route, "protocol", err)
