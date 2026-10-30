@@ -61,6 +61,20 @@ type suiQuotes struct {
 // instant always finds the same entry.
 func suiQuoteKey(at time.Time) time.Time { return at.UTC().Round(0) }
 
+// suiPriceReserve is the part of a scan's deadline kept for pricing, at most a quarter of the time
+// left: reads that run out of time end early, and what they did read is still priced.
+const suiPriceReserve = 90 * time.Second
+
+// withSuiPriceReserve is the context a scan reads under: ctx, ending suiPriceReserve before it when
+// ctx has a deadline, so pricing keeps the rest.
+func withSuiPriceReserve(ctx context.Context) (context.Context, context.CancelFunc) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return ctx, func() {}
+	}
+	return context.WithDeadline(ctx, deadline.Add(-min(suiPriceReserve, time.Until(deadline)/4)))
+}
+
 // quote asks the price source for every coin of wanted at its instant, in one call.
 func (e *SuiEngine) quote(ctx context.Context, wanted map[time.Time][]string) suiQuotes {
 	quotes := suiQuotes{prices: map[time.Time]map[string]float64{}, failures: map[time.Time][]SuiPriceFailure{}}

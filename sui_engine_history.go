@@ -22,11 +22,6 @@ type SuiRangeScan struct {
 // ErrSuiRangeUnread is an instant a range scan ran out of time before reading.
 var ErrSuiRangeUnread = errors.New("the range scan ran out of time before reading this instant")
 
-// suiRangePriceReserve is the part of a sampled scan's deadline kept for pricing, at most a
-// quarter of the time left: reads that run out of time end early, and what they did read is still
-// priced.
-const suiRangePriceReserve = 90 * time.Second
-
 // SuiRangePhaseObservation is one phase of a Sui range scan: "index_read" once per protocol index
 // (ProtocolID set), then "align", "wallet_read" and "pricing".
 type SuiRangePhaseObservation struct {
@@ -102,10 +97,7 @@ func (e *SuiEngine) scanSamples(ctx context.Context, owner SuiAddress, routes []
 	if len(plan.instants) == 0 {
 		return nil
 	}
-	readCtx, cancelReads := ctx, context.CancelFunc(func() {})
-	if deadline, ok := ctx.Deadline(); ok {
-		readCtx, cancelReads = context.WithDeadline(ctx, deadline.Add(-min(suiRangePriceReserve, time.Until(deadline)/4)))
-	}
+	readCtx, cancelReads := withSuiPriceReserve(ctx)
 	defer cancelReads()
 	unread := func(err error) error {
 		if err != nil && errors.Is(err, context.DeadlineExceeded) && readCtx.Err() != nil && ctx.Err() == nil {
