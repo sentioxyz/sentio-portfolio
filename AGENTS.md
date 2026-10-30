@@ -249,10 +249,12 @@ A host reads Sui only through the Sui engine (`sui_engine*.go`): `NewSuiEngine` 
   never substitute one for the other. An unquoted protocol coin is a reported gap; an unquoted
   wallet coin is left for the host to hide, as on EVM chains. A `SuiPriceFailure` marked
   `Unavailable` makes a range instant retry; a missing quote does not.
+- Every scan's reads, latest or ranged, stop short of its deadline (`suiPriceReserve`, at most a
+  quarter of what is left), so what they read is still priced: a protocol that runs out of time
+  costs no other protocol its valuation.
 - A range instant retries only when a source did not answer. An index that answered — even with a
-  sample it could not certify — is final. Reads stop short of the deadline (`suiRangePriceReserve`,
-  at most a quarter of what is left) so what they read is still priced, and what they did not reach
-  wraps `ErrSuiRangeUnread`.
+  sample it could not certify — is final. What a range scan's reads did not reach wraps
+  `ErrSuiRangeUnread`.
 - Test these rules through the engine (`sui_engine_test.go`): the index, node, price and wallet
   sources are fakes behind their seams, and a test asserts on the `SuiResponse` and on what each
   source was asked.

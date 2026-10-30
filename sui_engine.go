@@ -407,14 +407,17 @@ type suiLatestRead struct {
 	ok       bool
 }
 
-// scanLatest reads every route at once, then prices what they hold together.
+// scanLatest reads every route at once, then prices what they hold together. Reads stop short of
+// ctx's deadline, so a route that runs out of time does not cost the others their valuation.
 func (e *SuiEngine) scanLatest(ctx context.Context, owner SuiAddress, routes []suiRoute, skipPrices bool) *SuiResponse {
 	response := e.newResponse(owner, routes)
+	readCtx, cancelReads := withSuiPriceReserve(ctx)
+	defer cancelReads()
 	reads := make([]suiLatestRead, len(routes))
 	var group sync.WaitGroup
 	for i, route := range routes {
 		group.Go(func() {
-			reads[i] = e.readLatest(withDeployment(ctx, route.id, 0), owner, route)
+			reads[i] = e.readLatest(withDeployment(readCtx, route.id, 0), owner, route)
 		})
 	}
 	group.Wait()

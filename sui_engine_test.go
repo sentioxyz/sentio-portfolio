@@ -193,19 +193,25 @@ func (f *fakeSuiNode) counts() (state, metadata int) {
 	return f.stateReads, f.metadataReads
 }
 
-// fakeSuiNodeProtocols answers node protocol reads with positions, or err.
+// fakeSuiNodeProtocols answers node protocol reads with positions, or err. A read of stall waits
+// for its context, as object reads against a slow node do.
 type fakeSuiNodeProtocols struct {
 	positions map[string]suiPositions
 	err       error
+	stall     string
 
 	mu    sync.Mutex
 	reads []string
 }
 
-func (f *fakeSuiNodeProtocols) ReadLatest(_ context.Context, id string, _ SuiAddress, reader SuiReader) (suiPositions, error) {
+func (f *fakeSuiNodeProtocols) ReadLatest(ctx context.Context, id string, _ SuiAddress, reader SuiReader) (suiPositions, error) {
 	f.mu.Lock()
 	f.reads = append(f.reads, id)
 	f.mu.Unlock()
+	if id == f.stall {
+		<-ctx.Done()
+		return suiPositions{ProtocolID: id}, fmt.Errorf("object read failed: %w", ctx.Err())
+	}
 	if f.err != nil {
 		return suiPositions{ProtocolID: id}, f.err
 	}
@@ -217,8 +223,8 @@ func (f *fakeSuiNodeProtocols) ReadLatest(_ context.Context, id string, _ SuiAdd
 }
 
 // fakeSuiPrices prices SUI by the instant asked about, so a quote at the wrong instant shows, and
-// USDC at one dollar. It answers nothing at an instant in unavailable, as a price service that is
-// down does.
+// USDC at one dollar. It answers nothing at an instant in unavailable, or once its context is done,
+// as a price service that is down does.
 type fakeSuiPrices struct {
 	unavailable map[time.Time]bool
 	admit       func([]string) []string
@@ -234,13 +240,13 @@ func suiEngineTestPrice(at time.Time) float64 {
 	return 1 + float64(at.Unix()%10_000)/100
 }
 
-func (f *fakeSuiPrices) SuiUSDPrices(_ context.Context, queries []SuiPriceQuery) SuiPriceResult {
+func (f *fakeSuiPrices) SuiUSDPrices(ctx context.Context, queries []SuiPriceQuery) SuiPriceResult {
 	f.mu.Lock()
 	f.queries = append(f.queries, queries...)
 	f.mu.Unlock()
 	result := SuiPriceResult{Prices: make([]map[string]float64, len(queries))}
 	for i, query := range queries {
-		if f.unavailable[query.At] {
+		if f.unavailable[query.At] || ctx.Err() != nil {
 			result.Failures = append(result.Failures, SuiPriceFailure{Query: i, Message: "price service is down", Unavailable: true})
 			continue
 		}
@@ -569,6 +575,26 @@ func TestSuiLatestValuation(t *testing.T) {
 	}
 	if response.Checkpoint != head || response.Prices["sui:"+suiEngineTestUSDC] != 1 {
 		t.Fatalf("response checkpoint %+v prices %v", response.Checkpoint, response.Prices)
+	}
+}
+
+// A protocol that runs out of time on a live scan does not cost the others their valuation: reads
+// stop short of the deadline, and what they read is still priced.
+func TestSuiLatestOutOfTimeStillPricesWhatWasRead(t *testing.T) {
+	owner := suiEngineOwner(t)
+	node := &fakeSuiNode{head: suiEngineCheckpoint(2000, suiEngineTestBase),
+		balances: []SuiCoinBalance{{CoinType: suiLongType, Amount: big.NewInt(500_000_000)}},
+		metadata: map[string]SuiCoinMetadata{suiLongType: suiEngineCoin(suiLongType)}}
+	test := &suiEngineTest{t: t, node: node, nodes: &fakeSuiNodeProtocols{stall: "navi"}, prices: &fakeSuiPrices{}, now: suiEngineTestBase}
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	response := test.engine().ScanWithOptions(ctx, owner, SuiScanOptions{ProtocolIDs: map[string]struct{}{"wallet": {}, "navi": {}}})
+	wallet := suiSnapshotOf(response, "wallet")
+	if wallet == nil || wallet.Groups[0].Components[0].PriceUSD == nil || len(suiErrorsOf(response, "wallet", "pricing")) != 0 {
+		t.Fatalf("the wallet read was not priced: %+v %+v", wallet, response.Errors)
+	}
+	if !suiHasError(response, "navi", "protocol", context.DeadlineExceeded.Error()) {
+		t.Fatalf("NAVI ran out of time unreported: %+v", response.Errors)
 	}
 }
 
