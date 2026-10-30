@@ -914,6 +914,28 @@ func TestConfigureWalletBalancesHonorsPerAccountBlockSamples(t *testing.T) {
 	}
 }
 
+// Amounts marked DiscoveryOnly are read again even when sampled at the pin itself or next to a
+// live one.
+func TestConfigureWalletBalancesReReadsDiscoveryOnlyAmounts(t *testing.T) {
+	owner, other := common.HexToAddress("0x1"), common.HexToAddress("0x2")
+	pin := BlockRef{ChainID: Ethereum, Number: 996, Hash: common.HexToHash("0x996"), Timestamp: 9_960}
+	next := BlockRef{ChainID: Ethereum, Number: 999, Hash: common.HexToHash("0x999"), Timestamp: 9_990}
+	provider := &recordingWalletBalanceProvider{result: WalletBalanceResult{Chains: []WalletBalanceChain{{
+		Block: pin,
+		Accounts: []WalletBalanceAccount{
+			{Account: owner, DiscoveryOnly: true},
+			{Account: other, Block: &next, DiscoveryOnly: true},
+		},
+	}}}}
+	chain := &chainScan{block: pin, accounts: []attributedAccount{{Address: owner}, {Address: other}}}
+	configureWalletBalances(context.Background(), provider, owner, map[ChainID]*chainScan{Ethereum: chain})
+	if len(chain.walletProviderAccounts) != 2 || chain.walletProviderAccounts[owner].direct ||
+		chain.walletProviderAccounts[other].direct || len(chain.walletProviderErrors) != 0 {
+		t.Fatalf("discovery-only samples used directly: accounts=%+v errors=%v",
+			chain.walletProviderAccounts, chain.walletProviderErrors)
+	}
+}
+
 func TestWalletWithoutDiscoveryReturnsOnlyNativeAndCoverageError(t *testing.T) {
 	owner := common.HexToAddress("0x1")
 	for _, provider := range []WalletBalanceProvider{nil, &recordingWalletBalanceProvider{err: errors.New("provider unavailable")}} {

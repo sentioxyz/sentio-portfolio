@@ -22,8 +22,8 @@ import (
 // The engine's RPC-settled block remains canonical. Implementations must return the exact block
 // number and hash for each account's sample, and should return its time: the kernel uses amounts
 // directly when that block is its settled pin, or on a live scan when LiveWalletSample accepts
-// it, which needs the time. Otherwise the result is token discovery and every discovered amount
-// is re-read through RPC at the settled block.
+// it, which needs the time. Otherwise, or when the account is marked DiscoveryOnly, the result is
+// token discovery and every discovered amount is re-read through RPC at the settled block.
 type WalletBalanceProvider interface {
 	WalletBalances(context.Context, WalletBalanceRequest) (WalletBalanceResult, error)
 }
@@ -66,9 +66,13 @@ type WalletBalanceChain struct {
 type WalletBalanceAccount struct {
 	// Block overrides the chain's shared sample when accounts were fetched in
 	// separate batches. Nil uses WalletBalanceChain.Block.
-	Block    *BlockRef
-	Account  common.Address
-	Balances []WalletBalance
+	Block *BlockRef
+	// DiscoveryOnly marks amounts that are not the account's balances at Block, such as an
+	// index's event-derived quantities, which miss rebases and accrued interest. They only
+	// discover tokens: every balance is read again at the settled block, whatever Block is.
+	DiscoveryOnly bool
+	Account       common.Address
+	Balances      []WalletBalance
 }
 
 // WalletBalance is a non-negative integer amount in the token's smallest unit. For Native
@@ -128,9 +132,9 @@ type walletProviderAccount struct {
 
 // configureWalletBalances installs live or historical provider results as either direct balances or discovery.
 // The RPC-settled block remains authoritative: only a provider result with the same number and
-// hash, or on a live scan one LiveWalletSample accepts, may supply amounts directly. Results from
-// any other block still discover token addresses, whose balances the wallet adapter re-reads at
-// the settled block.
+// hash, or on a live scan one LiveWalletSample accepts, may supply amounts directly, and only when
+// the provider did not mark them DiscoveryOnly. Any other result still discovers token addresses,
+// whose balances the wallet adapter re-reads at the settled block.
 func configureWalletBalances(
 	ctx context.Context,
 	provider WalletBalanceProvider,
@@ -333,7 +337,7 @@ func configureWalletBalances(
 					continue
 				}
 			}
-			direct := walletProviderAmountsUsable(chain, providerBlock)
+			direct := walletProviderAmountsUsable(chain, providerBlock) && !resultAccount.DiscoveryOnly
 			providerAccounts[account] = walletProviderAccount{
 				balances: resultAccount.Balances, direct: direct,
 			}
