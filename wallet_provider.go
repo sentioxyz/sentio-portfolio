@@ -7,6 +7,8 @@ import (
 	"math/big"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -18,9 +20,10 @@ import (
 // pagination, retries and rate limits.
 //
 // The engine's RPC-settled block remains canonical. Implementations must return the exact block
-// number and hash for each account's sample: the kernel uses amounts directly
-// only when that block matches its settled pin. Otherwise the result is token discovery and every
-// discovered amount is re-read through RPC at the settled block.
+// number and hash for each account's sample, and should return its time: the kernel uses amounts
+// directly when that block is its settled pin, or on a live scan when LiveWalletSample accepts
+// it, which needs the time. Otherwise the result is token discovery and every discovered amount
+// is re-read through RPC at the settled block.
 type WalletBalanceProvider interface {
 	WalletBalances(context.Context, WalletBalanceRequest) (WalletBalanceResult, error)
 }
@@ -97,15 +100,37 @@ type WalletBalanceFailure struct {
 	Unsupported bool
 }
 
-type walletProviderAccount struct {
-	balances   []WalletBalance
-	exactBlock bool
+// LiveWalletSampleWindow is how far apart a provider sample's block time and a live pin's may be
+// for the sample's amounts to stand for the pin's. A live answer is as of now, and a sample this
+// close is as current as the pin, which itself trails the head: on Ethereum by four 12-second
+// blocks.
+const LiveWalletSampleWindow = 2 * time.Minute
+
+// LiveWalletSample reports whether a provider sample at block, other than the pin itself, may
+// supply a live scan's amounts: the pin is live and both block times are known and no further
+// apart than LiveWalletSampleWindow. The wallet is then read as of the provider's block, a few
+// blocks from the protocols read at the pin. A host that keeps samples between scans can ask it
+// whether one still answers a live scan as it is.
+func LiveWalletSample(block, pin BlockRef) bool {
+	if pin.Fixed || block.Timestamp == 0 || pin.Timestamp == 0 {
+		return false
+	}
+	gap := max(block.Timestamp, pin.Timestamp) - min(block.Timestamp, pin.Timestamp)
+	return time.Duration(gap)*time.Second <= LiveWalletSampleWindow
 }
 
-// configureWalletBalances installs live or historical provider results as either exact balances or discovery.
+type walletProviderAccount struct {
+	balances []WalletBalance
+	// direct marks amounts that stand for the scan's: sampled at the pin, or close enough to a
+	// live one. Other amounts only discover tokens.
+	direct bool
+}
+
+// configureWalletBalances installs live or historical provider results as either direct balances or discovery.
 // The RPC-settled block remains authoritative: only a provider result with the same number and
-// hash may supply amounts directly. Results from a newer block still discover token addresses,
-// whose balances the wallet adapter re-reads at the settled block.
+// hash, or on a live scan one LiveWalletSample accepts, may supply amounts directly. Results from
+// any other block still discover token addresses, whose balances the wallet adapter re-reads at
+// the settled block.
 func configureWalletBalances(
 	ctx context.Context,
 	provider WalletBalanceProvider,
@@ -308,11 +333,11 @@ func configureWalletBalances(
 					continue
 				}
 			}
-			exactBlock := walletProviderBlockMatches(chain, providerBlock)
+			direct := walletProviderAmountsUsable(chain, providerBlock)
 			providerAccounts[account] = walletProviderAccount{
-				balances: resultAccount.Balances, exactBlock: exactBlock,
+				balances: resultAccount.Balances, direct: direct,
 			}
-			historicalCoverageGap = historicalCoverageGap || (chain.block.Fixed && !exactBlock)
+			historicalCoverageGap = historicalCoverageGap || (chain.block.Fixed && !direct)
 		}
 		if historicalCoverageGap {
 			chain.walletCoverage = append(chain.walletCoverage,
@@ -340,16 +365,18 @@ func configureWalletBalances(
 
 }
 
-// walletProviderBlockMatches validates metadata independently for each account,
-// since a provider may batch accounts in separate requests sampled at different blocks.
-func walletProviderBlockMatches(chain *chainScan, block BlockRef) bool {
+// walletProviderAmountsUsable reports whether an account's provider amounts stand for the scan's:
+// sampled at the pin, number and hash alike, or at another block LiveWalletSample accepts. It
+// validates metadata independently for each account, since a provider may batch accounts in
+// separate requests sampled at different blocks.
+func walletProviderAmountsUsable(chain *chainScan, block BlockRef) bool {
 	if block.Number == 0 || block.Hash == (common.Hash{}) {
 		chain.walletProviderErrors = append(chain.walletProviderErrors,
 			errors.New("wallet balance provider returned incomplete block metadata"))
 		return false
 	}
 	if block.Number != chain.block.Number {
-		return false
+		return LiveWalletSample(block, chain.block)
 	}
 	if block.Hash != chain.block.Hash {
 		chain.walletProviderErrors = append(chain.walletProviderErrors,
@@ -386,9 +413,10 @@ func providerWalletGroups(
 	chainID ChainID,
 	accountAddress common.Address,
 	account walletProviderAccount,
+	tokens *walletTokenCache,
 ) ([]Group, error) {
-	if account.exactBlock {
-		return directProviderWalletGroups(ctx, client, block, chainID, account)
+	if account.direct {
+		return directProviderWalletGroups(ctx, client, block, chainID, account, tokens)
 	}
 	return discoveredProviderWalletGroups(
 		ctx,
@@ -397,6 +425,7 @@ func providerWalletGroups(
 		chainID,
 		accountAddress,
 		account,
+		tokens,
 	)
 }
 
@@ -406,6 +435,7 @@ func directProviderWalletGroups(
 	block BlockRef,
 	chainID ChainID,
 	account walletProviderAccount,
+	tokens *walletTokenCache,
 ) ([]Group, error) {
 	groups := make([]Group, 0, len(account.balances))
 	failures := make([]error, 0)
@@ -479,6 +509,7 @@ func directProviderWalletGroups(
 			block,
 			balance.Token,
 			balance.MetadataComplete,
+			tokens,
 		)
 		if metadataErr != nil {
 			failures = append(failures, fmt.Errorf(
@@ -514,6 +545,7 @@ func discoveredProviderWalletGroups(
 	chainID ChainID,
 	accountAddress common.Address,
 	account walletProviderAccount,
+	tokens *walletTokenCache,
 ) ([]Group, error) {
 	groups := make([]Group, 0, len(account.balances))
 	failures := make([]error, 0)
@@ -659,6 +691,7 @@ func discoveredProviderWalletGroups(
 			block,
 			candidate.Token,
 			candidate.MetadataComplete,
+			tokens,
 		)
 		if metadataErr != nil {
 			failures = append(failures, fmt.Errorf(
@@ -686,12 +719,52 @@ func discoveredProviderWalletGroups(
 
 const maxWalletTokenSymbolBytes = 64
 
+// walletTokenCacheEntries bounds the tokens a walletTokenCache keeps. Once it is full, a token not
+// yet kept is read on-chain each time it is needed.
+const walletTokenCacheEntries = 100_000
+
+// walletTokenCache keeps, for an engine's lifetime, the ERC-20 metadata its wallet read on-chain,
+// by chain and address. A token's decimals and symbol do not change, so one read serves every
+// later scan, live or pinned, at any block, and a provider that reports amounts without metadata
+// costs on-chain reads only for tokens no scan has seen yet. Only metadata that passed validation
+// is kept. A nil cache keeps nothing.
+type walletTokenCache struct {
+	mu     sync.Mutex
+	tokens map[AssetID]Token
+}
+
+func newWalletTokenCache() *walletTokenCache {
+	return &walletTokenCache{tokens: make(map[AssetID]Token)}
+}
+
+func (c *walletTokenCache) load(asset AssetID) (Token, bool) {
+	if c == nil {
+		return Token{}, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	token, ok := c.tokens[asset]
+	return token, ok
+}
+
+func (c *walletTokenCache) store(token Token) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.tokens) < walletTokenCacheEntries {
+		c.tokens[AssetForToken(token)] = token
+	}
+}
+
 func providerWalletToken(
 	ctx context.Context,
 	client *RPCClient,
 	block BlockRef,
 	provided Token,
 	metadataComplete bool,
+	tokens *walletTokenCache,
 ) (Token, error) {
 	if metadataComplete && provided.Decimals <= 36 {
 		symbol, err := validatedWalletTokenSymbol(provided.Symbol)
@@ -699,6 +772,9 @@ func providerWalletToken(
 			provided.Symbol = symbol
 			return provided, nil
 		}
+	}
+	if token, ok := tokens.load(AssetForToken(provided)); ok {
+		return token, nil
 	}
 	if client == nil {
 		return Token{}, errors.New("RPC client is not configured for metadata enrichment")
@@ -714,6 +790,7 @@ func providerWalletToken(
 	if err != nil {
 		return Token{}, fmt.Errorf("on-chain token symbol: %w", err)
 	}
+	tokens.store(token)
 	return token, nil
 }
 

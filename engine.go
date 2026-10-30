@@ -26,6 +26,8 @@ type Engine struct {
 	indexerLane           *indexerLane
 	disabledChains        map[ChainID]struct{}
 	scanWorkers           int
+	// walletTokens keeps the wallet token metadata read on-chain, for every scan of the engine.
+	walletTokens *walletTokenCache
 	// sentioIndexers is the host's index configuration, kept for the Sui engine built from this one.
 	sentioIndexers map[string]SentioIndexerConfig
 }
@@ -198,6 +200,7 @@ func NewEngineWithConfig(
 		registrations:         registrations,
 		priceProvider:         priceProvider,
 		walletBalanceProvider: config.WalletBalanceProvider,
+		walletTokens:          newWalletTokenCache(),
 		headLagBlocks:         config.headLagBlocks(),
 		observer:              config.Observer,
 		indexerLane:           newIndexerLane(config.IndexerConcurrency),
@@ -585,6 +588,7 @@ func (e *Engine) ScanWithOptions(
 					job.chainID,
 					account.Address,
 					providerAccount,
+					e.walletTokens,
 				)
 			} else {
 				accountGroups, err = job.Positions(

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 )
@@ -42,7 +43,7 @@ func TestProviderWalletGroupsPreservesHoldingShape(t *testing.T) {
 		Ethereum,
 		common.HexToAddress("0xabc"),
 		walletProviderAccount{
-			exactBlock: true,
+			direct: true,
 			balances: []WalletBalance{
 				{
 					Token:     Token{ChainID: Ethereum, Symbol: "Ether", Decimals: 18},
@@ -64,6 +65,7 @@ func TestProviderWalletGroupsPreservesHoldingShape(t *testing.T) {
 				},
 			},
 		},
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -174,12 +176,43 @@ func TestProviderWalletTokenReadsIncompleteLongTailMetadataAtTheCanonicalBlock(t
 		BlockRef{ChainID: Ethereum, Number: 999},
 		Token{ChainID: Ethereum, Address: longTail},
 		false,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if token != (Token{ChainID: Ethereum, Address: longTail, Symbol: "LONG", Decimals: 9}) {
 		t.Fatalf("enriched token = %+v", token)
+	}
+
+	// An engine keeps what it read: the next scan, at any block, needs no client for it.
+	tokens := newWalletTokenCache()
+	for _, read := range []struct {
+		client *RPCClient
+		block  uint64
+	}{{client, 999}, {nil, 1_200}} {
+		kept, err := providerWalletToken(
+			context.Background(),
+			read.client,
+			BlockRef{ChainID: Ethereum, Number: read.block},
+			Token{ChainID: Ethereum, Address: longTail},
+			false,
+			tokens,
+		)
+		if err != nil || kept != token {
+			t.Fatalf("token at block %d = %+v, err = %v; want %+v", read.block, kept, err, token)
+		}
+	}
+	// Another chain's token at the same address is not the kept one.
+	if _, err := providerWalletToken(
+		context.Background(),
+		nil,
+		BlockRef{ChainID: Base, Number: 1_200},
+		Token{ChainID: Base, Address: longTail},
+		false,
+		tokens,
+	); err == nil {
+		t.Fatal("a token kept for Ethereum answered for Base")
 	}
 }
 
@@ -190,7 +223,7 @@ func TestProviderWalletGroupsKeepsValidBalancesAlongsideFailures(t *testing.T) {
 		BlockRef{},
 		Ethereum,
 		common.HexToAddress("0xabc"),
-		walletProviderAccount{exactBlock: true, balances: []WalletBalance{
+		walletProviderAccount{direct: true, balances: []WalletBalance{
 			{
 				Token: Token{
 					ChainID: Ethereum, Address: walletTestUSDC, Symbol: "USDC", Decimals: 6,
@@ -206,6 +239,7 @@ func TestProviderWalletGroupsKeepsValidBalancesAlongsideFailures(t *testing.T) {
 				MetadataComplete: true,
 			},
 		}},
+		nil,
 	)
 	if err == nil || !strings.Contains(err.Error(), "invalid raw amount") {
 		t.Fatalf("error = %v, want the malformed amount reported", err)
@@ -238,6 +272,7 @@ func TestProviderWalletGroupsReReadsZeroDiscoveryRowsAtSettledBlock(t *testing.T
 			AmountRaw:        "0",
 			MetadataComplete: true,
 		}}},
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -267,6 +302,7 @@ func TestDiscoveryOnlyPathDoesNotInventUndiscoveredTokens(t *testing.T) {
 		Ethereum,
 		common.HexToAddress("0xabc"),
 		walletProviderAccount{balances: nil},
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -307,6 +343,7 @@ func TestDiscoveryOnlyPathClassifiesInvalidBalanceResults(t *testing.T) {
 				context.Background(), newWalletTestClient(t, server),
 				BlockRef{ChainID: Ethereum, Number: 996}, Ethereum,
 				common.HexToAddress("0xabc"), account,
+				nil,
 			)
 			if (err != nil) != test.wantError {
 				t.Fatalf("error = %v, wantError = %t", err, test.wantError)
@@ -325,8 +362,12 @@ func TestDiscoveryOnlyPathClassifiesInvalidBalanceResults(t *testing.T) {
 	}
 }
 
-func TestConfigureWalletBalancesUsesNewerProviderBlockForDiscovery(t *testing.T) {
-	client, _ := newLaggingPoolClient(t, 1_000, 1_000)
+// liveSampleScan configures one live Ethereum chain pinned at 996 whose provider answers from
+// block 999, with blocks secondsPerBlock apart.
+func liveSampleScan(t *testing.T, secondsPerBlock uint64) (*recordingWalletBalanceProvider, *chainScan, common.Address) {
+	t.Helper()
+	client, pool := newLaggingPoolClient(t, 1_000, 1_000)
+	pool.blockTimestamp = func(number uint64) uint64 { return number * secondsPerBlock }
 	initial, err := client.BlockByNumber(context.Background(), 996)
 	if err != nil {
 		t.Fatal(err)
@@ -341,45 +382,113 @@ func TestConfigureWalletBalancesUsesNewerProviderBlockForDiscovery(t *testing.T)
 			Block: providerBlock,
 			Accounts: []WalletBalanceAccount{{
 				Account: owner,
-				Balances: []WalletBalance{{
-					Token: Token{
-						ChainID:  Ethereum,
-						Address:  walletTestUSDC,
-						Symbol:   "USDC",
-						Decimals: 6,
+				Balances: []WalletBalance{
+					{Token: Token{ChainID: Ethereum}, AmountRaw: "5", Native: true},
+					{
+						Token: Token{
+							ChainID:  Ethereum,
+							Address:  walletTestUSDC,
+							Symbol:   "USDC",
+							Decimals: 6,
+						},
+						AmountRaw:        "7",
+						MetadataComplete: true,
 					},
-					AmountRaw: "7",
-				}},
+				},
 			}},
 		}},
 	}}
-	chains := map[ChainID]*chainScan{
-		Ethereum: {
-			client: client,
-			block:  initial,
-			accounts: []attributedAccount{{
-				Address: owner, Attribution: "wallet", Source: "direct",
-			}},
-		},
+	chain := &chainScan{
+		client: client,
+		block:  initial,
+		accounts: []attributedAccount{{
+			Address: owner, Attribution: "wallet", Source: "direct",
+		}},
 	}
-
-	configureWalletBalances(context.Background(), provider, owner, chains)
-
+	configureWalletBalances(context.Background(), provider, owner, map[ChainID]*chainScan{Ethereum: chain})
 	if len(provider.requests) != 1 || provider.requests[0].RootAccount != owner ||
 		len(provider.requests[0].Targets) != 1 ||
 		provider.requests[0].Targets[0] != (WalletBalanceTarget{ChainID: Ethereum, Account: owner}) {
 		t.Fatalf("provider requests = %+v", provider.requests)
 	}
-	chain := chains[Ethereum]
 	if chain.block != initial {
-		t.Fatalf("provider latest replaced settled block: %+v", chain.block)
+		t.Fatalf("provider sample replaced settled block: %+v", chain.block)
 	}
+	if len(chain.walletProviderErrors) != 0 || len(chain.walletCoverage) != 0 {
+		t.Fatalf("provider errors = %v, coverage = %v", chain.walletProviderErrors, chain.walletCoverage)
+	}
+	return provider, chain, owner
+}
+
+// A live scan takes the amounts of a sample a few blocks from its pin as they are: no balance,
+// native or ERC-20, is read again.
+func TestConfigureWalletBalancesUsesACurrentLiveSampleDirectly(t *testing.T) {
+	_, chain, owner := liveSampleScan(t, 12)
 	account, exists := chain.walletProviderAccounts[owner]
-	if !exists || len(account.balances) != 1 || account.exactBlock {
+	if !exists || len(account.balances) != 2 || !account.direct {
 		t.Fatalf("installed provider account = %+v", account)
 	}
-	if len(chain.walletProviderErrors) != 0 {
-		t.Fatalf("provider errors = %v", chain.walletProviderErrors)
+	// No client: any balance read would fail the scan.
+	groups, err := providerWalletGroups(context.Background(), nil, chain.block, Ethereum, owner, account, nil)
+	if err != nil || len(groups) != 2 {
+		t.Fatalf("groups = %+v, err = %v", groups, err)
+	}
+	native, _ := groupByID(groups, walletNativeGroupID)
+	token, _ := groupByID(groups, walletTokenGroupID(walletTestUSDC))
+	if native.Components[0].AmountRaw != "5" || token.Components[0].AmountRaw != "7" {
+		t.Fatalf("provider amounts were not used: %+v", groups)
+	}
+}
+
+// A live sample further than LiveWalletSampleWindow from the pin only discovers tokens.
+func TestConfigureWalletBalancesDiscoversFromAStaleLiveSample(t *testing.T) {
+	_, chain, owner := liveSampleScan(t, 60)
+	account, exists := chain.walletProviderAccounts[owner]
+	if !exists || len(account.balances) != 2 || account.direct {
+		t.Fatalf("installed provider account = %+v", account)
+	}
+	server := &walletTestServer{
+		t: t, native: big.NewInt(11),
+		balances: map[common.Address]*big.Int{walletTestUSDC: big.NewInt(13)},
+	}
+	groups, err := providerWalletGroups(context.Background(), newWalletTestClient(t, server), chain.block, Ethereum, owner, account, nil)
+	if err != nil || len(groups) != 2 || server.calls != 1 {
+		t.Fatalf("groups = %+v, calls = %d, err = %v", groups, server.calls, err)
+	}
+	native, _ := groupByID(groups, walletNativeGroupID)
+	token, _ := groupByID(groups, walletTokenGroupID(walletTestUSDC))
+	if native.Components[0].AmountRaw != "11" || token.Components[0].AmountRaw != "13" {
+		t.Fatalf("balances were not re-read at the pin: %+v", groups)
+	}
+}
+
+func TestLiveWalletSample(t *testing.T) {
+	window := uint64(LiveWalletSampleWindow / time.Second)
+	pin := BlockRef{ChainID: Ethereum, Number: 996, Timestamp: 10_000}
+	at := func(timestamp uint64) BlockRef {
+		return BlockRef{ChainID: Ethereum, Number: 999, Timestamp: timestamp}
+	}
+	fixed := pin
+	fixed.Fixed = true
+	untimed := pin
+	untimed.Timestamp = 0
+	for _, test := range []struct {
+		name   string
+		sample BlockRef
+		pin    BlockRef
+		want   bool
+	}{
+		{"newer within the window", at(10_000 + window), pin, true},
+		{"older within the window", at(10_000 - window), pin, true},
+		{"newer past the window", at(10_000 + window + 1), pin, false},
+		{"older past the window", at(10_000 - window - 1), pin, false},
+		{"fixed pin", at(10_000), fixed, false},
+		{"untimed sample", at(0), pin, false},
+		{"untimed pin", at(10_000), untimed, false},
+	} {
+		if got := LiveWalletSample(test.sample, test.pin); got != test.want {
+			t.Errorf("%s: LiveWalletSample = %t, want %t", test.name, got, test.want)
+		}
 	}
 }
 
@@ -529,7 +638,7 @@ func TestConfigureWalletBalancesReportsSameHeightHashMismatch(t *testing.T) {
 		t.Fatalf("unverified provider block became canonical: %+v", chain.block)
 	}
 	account, exists := chain.walletProviderAccounts[owner]
-	if !exists || account.exactBlock {
+	if !exists || account.direct {
 		t.Fatalf("same-height fork must be discovery-only: %+v", chain.walletProviderAccounts)
 	}
 	joined := errors.Join(chain.walletProviderErrors...)
@@ -692,9 +801,10 @@ func TestConfigureWalletBalancesAssetFailureReportsIncompleteAccount(t *testing.
 
 func TestConfigureWalletBalancesUsesDiscoveryForHistoricalBlocks(t *testing.T) {
 	owner := common.HexToAddress("0x1")
-	pin := BlockRef{ChainID: Ethereum, Number: 996, Hash: common.HexToHash("0x996"), Fixed: true}
+	// Close enough in time to answer a live pin: only the fixed pin rules the amounts out.
+	pin := BlockRef{ChainID: Ethereum, Number: 996, Hash: common.HexToHash("0x996"), Timestamp: 11_952, Fixed: true}
 	provider := &recordingWalletBalanceProvider{result: WalletBalanceResult{Chains: []WalletBalanceChain{{
-		Block: BlockRef{ChainID: Ethereum, Number: 1000, Hash: common.HexToHash("0x1000")},
+		Block: BlockRef{ChainID: Ethereum, Number: 1000, Hash: common.HexToHash("0x1000"), Timestamp: 12_000},
 		Accounts: []WalletBalanceAccount{{Account: owner, Balances: []WalletBalance{{
 			Token:     Token{ChainID: Ethereum, Address: walletTestUSDC, Symbol: "USDC", Decimals: 6},
 			AmountRaw: "123", MetadataComplete: true,
@@ -709,7 +819,7 @@ func TestConfigureWalletBalancesUsesDiscoveryForHistoricalBlocks(t *testing.T) {
 		t.Fatalf("provider was asked for pin %+v, want %+v", got, pin)
 	}
 	account, ok := chain.walletProviderAccounts[owner]
-	if !ok || account.exactBlock {
+	if !ok || account.direct {
 		t.Fatal("current provider balance accepted as historical")
 	}
 	if err := errors.Join(chain.walletCoverage...); err == nil || !strings.Contains(err.Error(), "historical wallet token discovery is incomplete") {
@@ -723,7 +833,7 @@ func TestConfigureWalletBalancesUsesDiscoveryForHistoricalBlocks(t *testing.T) {
 		balances: map[common.Address]*big.Int{walletTestUSDC: big.NewInt(7)},
 		code:     map[common.Address]struct{}{walletTestUSDC: {}},
 	}
-	groups, err := providerWalletGroups(context.Background(), newWalletTestClient(t, server), pin, Ethereum, owner, account)
+	groups, err := providerWalletGroups(context.Background(), newWalletTestClient(t, server), pin, Ethereum, owner, account, nil)
 	if err != nil || len(groups) != 1 || groups[0].Components[0].AmountRaw != "7" || server.calls != 1 {
 		t.Fatalf("historical balance was not re-read: groups=%+v calls=%d err=%v", groups, server.calls, err)
 	}
@@ -750,7 +860,7 @@ func TestHistoricalDiscoverySkipsTokensWithoutCodeAtThePin(t *testing.T) {
 
 	pinned := newServer()
 	pin := BlockRef{ChainID: Ethereum, Number: 996, Hash: common.HexToHash("0x996"), Fixed: true}
-	groups, err := providerWalletGroups(context.Background(), newWalletTestClient(t, pinned), pin, Ethereum, owner, account)
+	groups, err := providerWalletGroups(context.Background(), newWalletTestClient(t, pinned), pin, Ethereum, owner, account, nil)
 	if err != nil || len(groups) != 1 || groups[0].ID != walletTokenGroupID(walletTestUSDC) || groups[0].Components[0].AmountRaw != "7" {
 		t.Fatalf("groups=%+v err=%v, want USDC alone and no error", groups, err)
 	}
@@ -760,7 +870,7 @@ func TestHistoricalDiscoverySkipsTokensWithoutCodeAtThePin(t *testing.T) {
 
 	live := newServer()
 	latest := BlockRef{ChainID: Ethereum, Number: 996, Hash: common.HexToHash("0x996")}
-	if _, err := providerWalletGroups(context.Background(), newWalletTestClient(t, live), latest, Ethereum, owner, account); err == nil ||
+	if _, err := providerWalletGroups(context.Background(), newWalletTestClient(t, live), latest, Ethereum, owner, account, nil); err == nil ||
 		!strings.Contains(err.Error(), "reverted") {
 		t.Fatalf("live discovery err = %v, want the revert reported", err)
 	}
@@ -799,7 +909,7 @@ func TestConfigureWalletBalancesHonorsPerAccountBlockSamples(t *testing.T) {
 	}}}}
 	chain := &chainScan{block: pin, accounts: []attributedAccount{{Address: owner}, {Address: other}}}
 	configureWalletBalances(context.Background(), provider, owner, map[ChainID]*chainScan{Ethereum: chain})
-	if !chain.walletProviderAccounts[owner].exactBlock || chain.walletProviderAccounts[other].exactBlock || len(chain.walletProviderErrors) != 0 {
+	if !chain.walletProviderAccounts[owner].direct || chain.walletProviderAccounts[other].direct || len(chain.walletProviderErrors) != 0 {
 		t.Fatalf("per-account samples lost: accounts=%+v errors=%v", chain.walletProviderAccounts, chain.walletProviderErrors)
 	}
 }
