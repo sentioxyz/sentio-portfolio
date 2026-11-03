@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
@@ -315,8 +316,8 @@ func readLidoEarnETH(
 	if err != nil {
 		return nil, err
 	}
-	if report.PriceD18.Sign() == 0 || report.IsSuspicious {
-		return nil, fmt.Errorf("earnETH wstETH report is unusable")
+	if report.PriceD18.Sign() == 0 {
+		return nil, fmt.Errorf("earnETH wstETH report has no price")
 	}
 	wad := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
 	wstETHAmount := new(big.Int).Quo(new(big.Int).Mul(shares, wad), report.PriceD18)
@@ -349,6 +350,17 @@ func readLidoEarnETH(
 		},
 	)
 	component.Metadata = map[string]any{"shares": shares.String(), "oracle": oracle}
+	// The oracle stores a report past its suspicious deviation, flagged until an admin accepts it,
+	// and reverts one past its maximum deviation. Acceptance can take hours, and a flag at a past
+	// block never clears, so failing on it would leave every scan pinned inside that window
+	// unanswerable for good. The flagged price is still the oracle's latest read of the vault:
+	// value at it, and say so.
+	if report.IsSuspicious {
+		noteCoverage(ctx, fmt.Errorf(
+			"earnETH valued at a wstETH oracle report still awaiting acceptance (reported %s)",
+			time.Unix(int64(report.Timestamp), 0).UTC().Format(time.RFC3339),
+		))
+	}
 	return &Group{
 		ID:         "earn-eth",
 		MarketID:   "earn-eth",
