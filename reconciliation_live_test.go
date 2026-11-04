@@ -58,6 +58,8 @@ var reconciliationChainNames = map[ChainID]string{
 	Plasma:    "plasma",
 	Avalanche: "avax",
 	Optimism:  "op",
+	HyperEVM:  "hyper",
+	Robinhood: "hood",
 }
 
 var reconciliationNativeTokens = map[ChainID]common.Address{
@@ -70,6 +72,8 @@ var reconciliationNativeTokens = map[ChainID]common.Address{
 	Plasma:    common.HexToAddress("0x6100E367285b01F48D07953803A2d8dCA5D19873"),
 	Avalanche: common.HexToAddress("0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7"),
 	Optimism:  common.HexToAddress("0x4200000000000000000000000000000000000006"),
+	HyperEVM:  common.HexToAddress("0x5555555555555555555555555555555555555555"),
+	Robinhood: common.HexToAddress("0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"),
 }
 
 var reconciliationNativeAliases = map[ChainID]map[string]struct{}{
@@ -82,6 +86,8 @@ var reconciliationNativeAliases = map[ChainID]map[string]struct{}{
 	Plasma:    {"xpl": {}, "plasma": {}},
 	Avalanche: {"avax": {}},
 	Optimism:  {"eth": {}, "op": {}},
+	HyperEVM:  {"hype": {}, "hyper": {}},
+	Robinhood: {"eth": {}, "hood": {}},
 }
 
 func TestFiveChainDeBankReconciliationAliases(t *testing.T) {

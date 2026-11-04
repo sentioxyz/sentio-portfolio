@@ -554,6 +554,8 @@ var verifiedProtocolAvailabilityWindows = []expectedProtocolAvailabilityWindow{
 	{protocolID: "wallet", chainID: Plasma, fromGenesis: true},
 	{protocolID: "wallet", chainID: Avalanche, fromGenesis: true},
 	{protocolID: "wallet", chainID: Optimism, fromGenesis: true},
+	{protocolID: "wallet", chainID: HyperEVM, fromGenesis: true},
+	{protocolID: "wallet", chainID: Robinhood, fromGenesis: true},
 }
 
 func TestProtocolAvailabilityMatchesVerifiedBoundaries(t *testing.T) {

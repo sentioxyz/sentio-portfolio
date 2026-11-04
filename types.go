@@ -22,6 +22,8 @@ const (
 	Plasma    ChainID = 9745
 	Avalanche ChainID = 43114
 	Optimism  ChainID = 10
+	HyperEVM  ChainID = 999
+	Robinhood ChainID = 4663
 )
 
 var SupportedChainIDs = []ChainID{
@@ -34,6 +36,8 @@ var SupportedChainIDs = []ChainID{
 	Plasma,
 	Avalanche,
 	Optimism,
+	HyperEVM,
+	Robinhood,
 }
 
 type BlockRef struct {

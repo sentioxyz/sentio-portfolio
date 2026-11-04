@@ -31,6 +31,8 @@ var walletNativeCoin = map[ChainID]struct {
 	Plasma:    {Symbol: "XPL", Wrapped: common.HexToAddress("0x6100E367285b01F48D07953803A2d8dCA5D19873")},
 	Avalanche: {Symbol: "AVAX", Wrapped: common.HexToAddress("0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7")},
 	Optimism:  {Symbol: "ETH", Wrapped: common.HexToAddress("0x4200000000000000000000000000000000000006")},
+	HyperEVM:  {Symbol: "HYPE", Wrapped: common.HexToAddress("0x5555555555555555555555555555555555555555")},
+	Robinhood: {Symbol: "ETH", Wrapped: common.HexToAddress("0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73")},
 }
 
 // WalletAdapter reads native balances. ERC-20 candidates are supplied exclusively
