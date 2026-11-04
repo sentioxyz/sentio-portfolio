@@ -54,6 +54,8 @@ var chainPriceNames = map[ChainID]string{
 	Plasma:    "plasma",
 	Avalanche: "avalanche",
 	Optimism:  "optimism",
+	HyperEVM:  "hyperevm",
+	Robinhood: "robinhood",
 }
 
 func AssetForToken(token Token) AssetID {

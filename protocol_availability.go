@@ -254,5 +254,7 @@ var protocolAvailabilityByID = map[string]chainAvailability{
 		Plasma:    {availableFromGenesis()},
 		Avalanche: {availableFromGenesis()},
 		Optimism:  {availableFromGenesis()},
+		HyperEVM:  {availableFromGenesis()},
+		Robinhood: {availableFromGenesis()},
 	},
 }

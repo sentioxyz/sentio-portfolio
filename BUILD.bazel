@@ -205,6 +205,7 @@ go_test(
         "wallet_test.go",
         "wallet_holds_test.go",
         "wallet_provider_test.go",
+        "wallet_only_chains_test.go",
         "yearn_v3_test.go",
     ],
     embed = [":portfolio"],
