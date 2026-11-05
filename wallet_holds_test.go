@@ -137,6 +137,9 @@ func (s *contractStub) respond(call rpcTestRequest) map[string]any {
 	case "eth_chainId":
 		response["result"] = hexutil.EncodeUint64(uint64(s.chainID))
 		return response
+	case "eth_getBalance":
+		response["result"] = "0x0"
+		return response
 	case "eth_call":
 		var input struct {
 			To   common.Address `json:"to"`

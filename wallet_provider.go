@@ -104,6 +104,29 @@ type WalletBalanceFailure struct {
 	Unsupported bool
 }
 
+// WalletTokenBlocklist keeps the ERC-20 tokens the wallet stopped reading because a call to one of
+// them reverted. A listed token's rows are dropped before anything is read, for every account and
+// block, so the host decides how long an entry lasts: a token that still reverts once its entry has
+// gone is simply listed again. Without a blocklist, a reverting token is skipped by the scan that
+// read it and read again by the next.
+//
+// Both methods run on the scan path, so they must return within ctx and must not fail a scan. A
+// store that cannot be reached lists nothing.
+type WalletTokenBlocklist interface {
+	// BlockedWalletTokens returns which of tokens are listed.
+	BlockedWalletTokens(ctx context.Context, tokens []AssetID) map[AssetID]struct{}
+	// BlockWalletToken lists a token.
+	BlockWalletToken(ctx context.Context, blocked BlockedWalletToken)
+}
+
+// BlockedWalletToken names a token to list and the read that reverted, so an entry can be audited.
+type BlockedWalletToken struct {
+	Token   AssetID
+	Account common.Address
+	Block   BlockRef
+	Reason  string
+}
+
 // LiveWalletSampleWindow is how far apart a provider sample's block time and a live pin's may be
 // for the sample's amounts to stand for the pin's. A live answer is as of now, and a sample this
 // close is as current as the pin, which itself trails the head: on Ethereum by four 12-second
@@ -419,8 +442,9 @@ func providerWalletGroups(
 	account walletProviderAccount,
 	tokens *walletTokenCache,
 ) ([]Group, error) {
+	account.balances = tokens.withoutBlocked(ctx, account.balances)
 	if account.direct {
-		return directProviderWalletGroups(ctx, client, block, chainID, account, tokens)
+		return directProviderWalletGroups(ctx, client, block, chainID, accountAddress, account, tokens)
 	}
 	return discoveredProviderWalletGroups(
 		ctx,
@@ -438,6 +462,7 @@ func directProviderWalletGroups(
 	client *RPCClient,
 	block BlockRef,
 	chainID ChainID,
+	accountAddress common.Address,
 	account walletProviderAccount,
 	tokens *walletTokenCache,
 ) ([]Group, error) {
@@ -516,6 +541,10 @@ func directProviderWalletGroups(
 			tokens,
 		)
 		if metadataErr != nil {
+			if executionReverted(metadataErr) {
+				tokens.blockReverted(ctx, block, accountAddress, balance.Token, metadataErr)
+				continue
+			}
 			failures = append(failures, fmt.Errorf(
 				"wallet token %s metadata: %w",
 				balance.Token.Address.Hex(),
@@ -665,9 +694,14 @@ func discoveredProviderWalletGroups(
 		if row.Error != nil {
 			// Discovery can include contracts that emit token-like events but do
 			// not implement balanceOf. Empty successful calls disqualify only
-			// these unverified candidates; other failures must still report gaps
-			// rather than silently shrinking the portfolio.
+			// these unverified candidates. A revert is the token's own answer,
+			// so the token is listed and its gap noted; any other failure must
+			// still report a gap rather than silently shrinking the portfolio.
 			if errors.Is(row.Error, errEmptyContractResult) {
+				continue
+			}
+			if executionReverted(row.Error) {
+				tokens.blockReverted(ctx, block, accountAddress, candidate.Token, row.Error)
 				continue
 			}
 			failures = append(failures, fmt.Errorf(
@@ -698,6 +732,10 @@ func discoveredProviderWalletGroups(
 			tokens,
 		)
 		if metadataErr != nil {
+			if executionReverted(metadataErr) {
+				tokens.blockReverted(ctx, block, accountAddress, candidate.Token, metadataErr)
+				continue
+			}
 			failures = append(failures, fmt.Errorf(
 				"wallet token %s metadata: %w",
 				candidate.Token.Address.Hex(),
@@ -731,14 +769,69 @@ const walletTokenCacheEntries = 100_000
 // by chain and address. A token's decimals and symbol do not change, so one read serves every
 // later scan, live or pinned, at any block, and a provider that reports amounts without metadata
 // costs on-chain reads only for tokens no scan has seen yet. Only metadata that passed validation
-// is kept. A nil cache keeps nothing.
+// is kept. A nil cache keeps nothing. It also carries the host's blocklist, nil when there is none.
 type walletTokenCache struct {
-	mu     sync.Mutex
-	tokens map[AssetID]Token
+	mu        sync.Mutex
+	tokens    map[AssetID]Token
+	blocklist WalletTokenBlocklist
 }
 
-func newWalletTokenCache() *walletTokenCache {
-	return &walletTokenCache{tokens: make(map[AssetID]Token)}
+func newWalletTokenCache(blocklist WalletTokenBlocklist) *walletTokenCache {
+	return &walletTokenCache{tokens: make(map[AssetID]Token), blocklist: blocklist}
+}
+
+// withoutBlocked drops the rows of listed tokens, noting each as a gap in the wallet's coverage.
+func (c *walletTokenCache) withoutBlocked(ctx context.Context, balances []WalletBalance) []WalletBalance {
+	if c == nil || c.blocklist == nil {
+		return balances
+	}
+	assets := make([]AssetID, 0, len(balances))
+	for _, balance := range balances {
+		if !balance.Native {
+			assets = append(assets, AssetForToken(balance.Token))
+		}
+	}
+	if len(assets) == 0 {
+		return balances
+	}
+	blocked := c.blocklist.BlockedWalletTokens(ctx, assets)
+	if len(blocked) == 0 {
+		return balances
+	}
+	kept := make([]WalletBalance, 0, len(balances))
+	for _, balance := range balances {
+		if _, listed := blocked[AssetForToken(balance.Token)]; listed && !balance.Native {
+			noteCoverage(ctx, walletTokenSkippedNote(balance.Token.Address))
+			continue
+		}
+		kept = append(kept, balance)
+	}
+	return kept
+}
+
+// blockReverted lists a token one of whose calls reverted and notes the gap this leaves. A coverage
+// note, not an error: the wallet was read as asked and every balance it reports is the pin's, so a
+// host that stores only scans without errors stores this one.
+func (c *walletTokenCache) blockReverted(
+	ctx context.Context,
+	block BlockRef,
+	account common.Address,
+	token Token,
+	cause error,
+) {
+	noteCoverage(ctx, walletTokenSkippedNote(token.Address))
+	if c == nil || c.blocklist == nil {
+		return
+	}
+	c.blocklist.BlockWalletToken(ctx, BlockedWalletToken{
+		Token: AssetForToken(token), Account: account, Block: block, Reason: PublicError(cause),
+	})
+}
+
+// walletTokenSkippedNote says the same of a token that has just reverted and of one already listed,
+// so every scan that lacks the token reports it alike.
+func walletTokenSkippedNote(token common.Address) error {
+	return fmt.Errorf("wallet token %s is not reported: a call to it reverted", token.Hex())
 }
 
 func (c *walletTokenCache) load(asset AssetID) (Token, bool) {

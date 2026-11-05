@@ -187,9 +187,17 @@ that scan. At a fixed pin, a candidate with no code at the pinned block is
 skipped before it is read: the token did not exist then, so the account could
 not hold it, and its `balanceOf` may revert rather than return empty data (a
 precompile-backed token does until it is activated). Live pins sit next to the
-provider's sample and skip the check. Reverts of deployed tokens, RPC
-failures, and malformed non-empty results remain errors. Do not implement an
-address blacklist or silently turn failed reads into zero.
+provider's sample and skip the check. RPC failures and malformed non-empty
+results remain errors; do not silently turn a failed read into zero.
+
+A deployed token whose own `balanceOf`, `decimals` or `symbol` reverts is skipped
+with a `coverage` note and listed on the host's `WalletTokenBlocklist`. While it
+is listed, every scan, live or pinned, drops its rows before reading anything and
+notes the same gap, for every account. Only `executionReverted` lists a token,
+because one entry applies to every account and block: a node's transient failure
+must stay an error. The list holds only what reverted, and the host decides how
+long an entry lasts; do not seed it or add a static list of tokens. It covers
+what discovery found, never a token a protocol adapter reads.
 
 Provider failures and missing account results are errors (`protocol` scope):
 the wallet was not read as asked. A target the provider marks `Unsupported` (a

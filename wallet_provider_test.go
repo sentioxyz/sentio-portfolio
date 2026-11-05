@@ -8,7 +8,9 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -186,7 +188,7 @@ func TestProviderWalletTokenReadsIncompleteLongTailMetadataAtTheCanonicalBlock(t
 	}
 
 	// An engine keeps what it read: the next scan, at any block, needs no client for it.
-	tokens := newWalletTokenCache()
+	tokens := newWalletTokenCache(nil)
 	for _, read := range []struct {
 		client *RPCClient
 		block  uint64
@@ -323,7 +325,7 @@ func TestDiscoveryOnlyPathClassifiesInvalidBalanceResults(t *testing.T) {
 	}{
 		{name: "empty discovered candidate", candidate: longTail, raw: "0x"},
 		{name: "malformed discovered balance", candidate: longTail, raw: "0x01", wantError: true},
-		{name: "reverting discovered candidate", candidate: longTail, revert: true, wantError: true},
+		{name: "reverting discovered candidate", candidate: longTail, revert: true},
 		{name: "empty previously listed token", candidate: walletTestWBTC, raw: "0x"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -868,11 +870,268 @@ func TestHistoricalDiscoverySkipsTokensWithoutCodeAtThePin(t *testing.T) {
 		t.Fatalf("eth_call count = %d, want only the deployed token read", pinned.calls)
 	}
 
+	// A live pin skips the code check, so it reads the token and sees the revert itself.
 	live := newServer()
 	latest := BlockRef{ChainID: Ethereum, Number: 996, Hash: common.HexToHash("0x996")}
-	if _, err := providerWalletGroups(context.Background(), newWalletTestClient(t, live), latest, Ethereum, owner, account, nil); err == nil ||
-		!strings.Contains(err.Error(), "reverted") {
-		t.Fatalf("live discovery err = %v, want the revert reported", err)
+	groups, err = providerWalletGroups(context.Background(), newWalletTestClient(t, live), latest, Ethereum, owner, account, nil)
+	if err != nil || len(groups) != 1 || groups[0].ID != walletTokenGroupID(walletTestUSDC) {
+		t.Fatalf("live groups=%+v err=%v, want USDC alone and no error", groups, err)
+	}
+	if live.calls != 2 {
+		t.Fatalf("live eth_call count = %d, want both tokens read", live.calls)
+	}
+}
+
+// fakeWalletTokenBlocklist lists tokens in memory.
+type fakeWalletTokenBlocklist struct {
+	mu      sync.Mutex
+	listed  map[AssetID]struct{}
+	entries []BlockedWalletToken
+}
+
+func (f *fakeWalletTokenBlocklist) BlockedWalletTokens(_ context.Context, tokens []AssetID) map[AssetID]struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	blocked := make(map[AssetID]struct{})
+	for _, token := range tokens {
+		if _, listed := f.listed[token]; listed {
+			blocked[token] = struct{}{}
+		}
+	}
+	return blocked
+}
+
+func (f *fakeWalletTokenBlocklist) BlockWalletToken(_ context.Context, blocked BlockedWalletToken) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.listed == nil {
+		f.listed = make(map[AssetID]struct{})
+	}
+	f.listed[blocked.Token] = struct{}{}
+	f.entries = append(f.entries, blocked)
+}
+
+func walletNotes(t *testing.T, coverage *coverageSink) []string {
+	t.Helper()
+	notes := make([]string, 0)
+	for _, note := range coverage.take() {
+		notes = append(notes, note.Error())
+	}
+	return notes
+}
+
+func TestRevertingBalanceListsTheTokenAndTheNextScanNeverReadsIt(t *testing.T) {
+	owner := common.HexToAddress("0xabc")
+	server := &walletTestServer{
+		t: t, native: big.NewInt(0),
+		balances: map[common.Address]*big.Int{walletTestUSDC: big.NewInt(7)},
+		reverts:  map[common.Address]struct{}{walletTestWBTC: {}},
+	}
+	account := walletProviderAccount{balances: []WalletBalance{
+		{Token: Token{ChainID: Ethereum, Address: walletTestWBTC, Symbol: "WBTC", Decimals: 8}, AmountRaw: "1", MetadataComplete: true},
+		{Token: Token{ChainID: Ethereum, Address: walletTestUSDC, Symbol: "USDC", Decimals: 6}, AmountRaw: "7", MetadataComplete: true},
+	}}
+	block := BlockRef{ChainID: Ethereum, Number: 996}
+	blocklist := &fakeWalletTokenBlocklist{}
+	tokens := newWalletTokenCache(blocklist)
+	wantNote := "wallet token " + walletTestWBTC.Hex() + " is not reported: a call to it reverted"
+
+	for _, scan := range []struct {
+		name      string
+		wantCalls int
+	}{
+		{name: "the scan that sees the revert", wantCalls: 2},
+		{name: "the scan after it", wantCalls: 3},
+	} {
+		ctx, coverage := withCoverage(context.Background())
+		groups, err := providerWalletGroups(ctx, newWalletTestClient(t, server), block, Ethereum, owner, account, tokens)
+		if err != nil || len(groups) != 1 || groups[0].ID != walletTokenGroupID(walletTestUSDC) {
+			t.Fatalf("%s: groups=%+v err=%v, want USDC alone and no error", scan.name, groups, err)
+		}
+		if notes := walletNotes(t, coverage); !slices.Equal(notes, []string{wantNote}) {
+			t.Fatalf("%s: notes = %q, want %q", scan.name, notes, wantNote)
+		}
+		if server.calls != scan.wantCalls {
+			t.Fatalf("%s: eth_call count = %d, want %d", scan.name, server.calls, scan.wantCalls)
+		}
+	}
+	if len(blocklist.entries) != 1 {
+		t.Fatalf("entries = %+v, want the token listed once", blocklist.entries)
+	}
+	entry := blocklist.entries[0]
+	if entry.Token != (AssetID{ChainID: Ethereum, Address: walletTestWBTC}) || entry.Account != owner ||
+		entry.Block.Number != 996 || !strings.Contains(entry.Reason, "execution reverted") {
+		t.Fatalf("entry = %+v, want the token, the account and block read, and the revert", entry)
+	}
+}
+
+func TestRevertingMetadataListsTheToken(t *testing.T) {
+	owner := common.HexToAddress("0xabc")
+	reverted := Token{ChainID: Ethereum, Address: walletTestWBTC}
+	for _, test := range []struct {
+		name   string
+		direct bool
+	}{
+		{name: "amounts used directly", direct: true},
+		{name: "amounts read at the pin"},
+	} {
+		for _, method := range []string{"decimals", "symbol"} {
+			t.Run(test.name+" "+method, func(t *testing.T) {
+				stub := newContractStub(t, Ethereum, owner)
+				if !test.direct {
+					stub.balance(walletTestWBTC, big.NewInt(1))
+				}
+				if method == "decimals" {
+					stub.revert(walletTestWBTC, erc20ABI, "decimals")
+					stub.answer(walletTestWBTC, erc20ABI, "symbol", nil, "WBTC")
+				} else {
+					stub.answer(walletTestWBTC, erc20ABI, "decimals", nil, uint8(8))
+					stub.revert(walletTestWBTC, erc20ABI, "symbol")
+				}
+				blocklist := &fakeWalletTokenBlocklist{}
+				ctx, coverage := withCoverage(context.Background())
+				groups, err := providerWalletGroups(
+					ctx, stub.dial(), BlockRef{ChainID: Ethereum, Number: 996}, Ethereum, owner,
+					walletProviderAccount{direct: test.direct, balances: []WalletBalance{{Token: reverted, AmountRaw: "1"}}},
+					newWalletTokenCache(blocklist),
+				)
+				if err != nil || len(groups) != 0 {
+					t.Fatalf("groups=%+v err=%v, want nothing and no error", groups, err)
+				}
+				if len(blocklist.entries) != 1 || blocklist.entries[0].Token != AssetForToken(reverted) {
+					t.Fatalf("entries = %+v, want the token listed", blocklist.entries)
+				}
+				if notes := walletNotes(t, coverage); len(notes) != 1 {
+					t.Fatalf("notes = %q, want the gap noted", notes)
+				}
+			})
+		}
+	}
+}
+
+func TestListedTokenIsDroppedForEveryAccountAndPathBeforeAnyRead(t *testing.T) {
+	blocklist := &fakeWalletTokenBlocklist{listed: map[AssetID]struct{}{
+		{ChainID: Ethereum, Address: walletTestWBTC}: {},
+	}}
+	balances := []WalletBalance{
+		{Token: Token{ChainID: Ethereum}, AmountRaw: "5", Native: true},
+		{Token: Token{ChainID: Ethereum, Address: walletTestWBTC, Symbol: "WBTC", Decimals: 8}, AmountRaw: "1", MetadataComplete: true},
+		{Token: Token{ChainID: Ethereum, Address: walletTestUSDC, Symbol: "USDC", Decimals: 6}, AmountRaw: "7", MetadataComplete: true},
+	}
+	for _, direct := range []bool{true, false} {
+		// The listed token would not have reverted, and answering it would fail the count below.
+		server := &walletTestServer{
+			t: t, native: big.NewInt(5),
+			balances: map[common.Address]*big.Int{walletTestUSDC: big.NewInt(7), walletTestWBTC: big.NewInt(1)},
+		}
+		ctx, coverage := withCoverage(context.Background())
+		groups, err := providerWalletGroups(
+			ctx, newWalletTestClient(t, server), BlockRef{ChainID: Ethereum, Number: 996}, Ethereum,
+			common.HexToAddress("0xdef"), walletProviderAccount{direct: direct, balances: balances},
+			newWalletTokenCache(blocklist),
+		)
+		if err != nil || len(groups) != 2 {
+			t.Fatalf("direct=%t: groups=%+v err=%v, want native and USDC", direct, groups, err)
+		}
+		if _, exists := groupByID(groups, walletTokenGroupID(walletTestWBTC)); exists {
+			t.Fatalf("direct=%t: listed token reported: %+v", direct, groups)
+		}
+		if notes := walletNotes(t, coverage); len(notes) != 1 || !strings.Contains(notes[0], walletTestWBTC.Hex()) {
+			t.Fatalf("direct=%t: notes = %q, want the gap noted", direct, notes)
+		}
+		wantCalls := 1
+		if direct {
+			wantCalls = 0
+		}
+		if server.calls != wantCalls {
+			t.Fatalf("direct=%t: eth_call count = %d, want %d", direct, server.calls, wantCalls)
+		}
+	}
+}
+
+func TestNodeFailuresNeverListAToken(t *testing.T) {
+	// These answers come from an RPC node, not from the token: USDC on Polygon has failed this
+	// way, and listing it would drop it from every wallet.
+	for _, message := range []string{
+		"getStateObject (0000000000000000000000000000000000000000) error: account 0x0000000000000000000000000000000000000000 is not found",
+		"missing trie node",
+		"header not found",
+	} {
+		t.Run(message, func(t *testing.T) {
+			owner := common.HexToAddress("0xabc")
+			server := &walletTestServer{
+				t: t, native: big.NewInt(0),
+				failures: map[common.Address]string{walletTestUSDC: message},
+			}
+			blocklist := &fakeWalletTokenBlocklist{}
+			ctx, coverage := withCoverage(context.Background())
+			_, err := providerWalletGroups(
+				ctx, newWalletTestClient(t, server), BlockRef{ChainID: Ethereum, Number: 996}, Ethereum, owner,
+				walletProviderAccount{balances: []WalletBalance{
+					{Token: Token{ChainID: Ethereum, Address: walletTestUSDC, Symbol: "USDC", Decimals: 6}, AmountRaw: "7", MetadataComplete: true},
+				}},
+				newWalletTokenCache(blocklist),
+			)
+			if err == nil || !strings.Contains(err.Error(), message) {
+				t.Fatalf("err = %v, want the failure reported", err)
+			}
+			if len(blocklist.entries) != 0 {
+				t.Fatalf("entries = %+v, want nothing listed", blocklist.entries)
+			}
+			if notes := walletNotes(t, coverage); len(notes) != 0 {
+				t.Fatalf("notes = %q, want an error rather than a note", notes)
+			}
+		})
+	}
+}
+
+func TestEngineKeepsAScanWithARevertingWalletTokenFreeOfErrors(t *testing.T) {
+	const pinNumber = uint64(996)
+	pool := &laggingPool{
+		t: t, announcedHead: 1_000, servedHead: 1_000, nativeBalance: big.NewInt(5),
+		reverts: map[common.Address]string{walletTestWBTC: "execution reverted: Amount must be less than total reflections"},
+	}
+	server := httptest.NewServer(pool)
+	t.Cleanup(server.Close)
+	owner := common.HexToAddress("0x000000000000000000000000000000000000dEaD")
+	provider := &recordingWalletBalanceProvider{result: WalletBalanceResult{Chains: []WalletBalanceChain{{
+		Block: BlockRef{ChainID: Ethereum, Number: 1_000, Hash: common.HexToHash("0x1000")},
+		Accounts: []WalletBalanceAccount{{Account: owner, Balances: []WalletBalance{{
+			Token:     Token{ChainID: Ethereum, Address: walletTestWBTC, Symbol: "WBTC", Decimals: 8},
+			AmountRaw: "1", MetadataComplete: true,
+		}}}},
+	}}}}
+	blocklist := &fakeWalletTokenBlocklist{}
+	engine := NewEngineWithConfig(
+		map[ChainID]string{Ethereum: server.URL},
+		&recordingPriceProvider{},
+		EngineConfig{WalletBalanceProvider: provider, WalletTokenBlocklist: blocklist},
+	)
+
+	// The second scan finds the token listed: reading it again would list it again.
+	for scan := range 2 {
+		response := engine.ScanWithOptions(context.Background(), owner, ScanOptions{
+			ProtocolIDs: map[string]struct{}{walletProtocolID: {}},
+			ChainIDs:    map[ChainID]struct{}{Ethereum: {}},
+			BlockNumber: map[ChainID]uint64{Ethereum: pinNumber},
+		})
+		noted := false
+		for _, scanError := range response.Errors {
+			if scanError.Scope != "coverage" {
+				t.Fatalf("scan %d errors = %+v, want coverage notes alone", scan, response.Errors)
+			}
+			noted = noted || strings.Contains(scanError.Message, walletTestWBTC.Hex())
+		}
+		if !noted {
+			t.Fatalf("scan %d errors = %+v, want the token's gap noted", scan, response.Errors)
+		}
+		if len(response.Snapshots) != 1 || len(response.Snapshots[0].Groups) != 1 ||
+			response.Snapshots[0].Groups[0].ID != walletNativeGroupID {
+			t.Fatalf("scan %d snapshots = %+v, want the native balance alone", scan, response.Snapshots)
+		}
+		if len(blocklist.entries) != 1 || !strings.Contains(blocklist.entries[0].Reason, "total reflections") {
+			t.Fatalf("scan %d entries = %+v, want the one revert listed once", scan, blocklist.entries)
+		}
 	}
 }
 
