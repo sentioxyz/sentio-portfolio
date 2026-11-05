@@ -11,12 +11,10 @@ import (
 const etherfiMembershipActivationBlock = 17_664_328
 
 var (
-	etherfiMembershipNFT     = common.HexToAddress("0xb49e4420eA6e35F98060Cd133842DbeA9c27e479")
-	etherfiMembershipManager = common.HexToAddress("0x3d320286E014C3e1ce99Af6d6B00f0C1D63E3000")
-	etherfiMembershipABI     = MustABI(`[
+	etherfiMembershipNFT = common.HexToAddress("0xb49e4420eA6e35F98060Cd133842DbeA9c27e479")
+	etherfiMembershipABI = MustABI(`[
       {"type":"function","name":"balanceOf","stateMutability":"view","inputs":[{"type":"address"},{"type":"uint256"}],"outputs":[{"type":"uint256"}]},
-      {"type":"function","name":"valueOf","stateMutability":"view","inputs":[{"type":"uint256"}],"outputs":[{"type":"uint256"}]},
-      {"type":"function","name":"membershipManager","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]}
+      {"type":"function","name":"valueOf","stateMutability":"view","inputs":[{"type":"uint256"}],"outputs":[{"type":"uint256"}]}
     ]`)
 )
 
@@ -45,16 +43,6 @@ func (a *EtherfiAdapter) membershipGroups(
 ) ([]Group, error) {
 	if len(refs) == 0 {
 		return nil, nil
-	}
-	managerRow, err := client.Call(
-		ctx, block, etherfiMembershipNFT, etherfiMembershipABI, "membershipManager",
-	)
-	if err != nil {
-		return nil, fmt.Errorf("membership manager: %w", err)
-	}
-	manager, err := AddressAt(managerRow, 0)
-	if err != nil || manager != etherfiMembershipManager {
-		return nil, fmt.Errorf("membership manager identity changed")
 	}
 	calls := make([]ContractCall, 0, len(refs)*2)
 	for _, ref := range refs {
@@ -107,9 +95,7 @@ func (a *EtherfiAdapter) membershipGroups(
 		groups = append(groups, Group{
 			ID: "membership:" + ref.TokenID.String(), Label: "Membership #" + ref.TokenID.String(),
 			Components: []Component{component},
-			Metadata: map[string]any{
-				"membershipNFT": etherfiMembershipNFT, "membershipManager": manager,
-			},
+			Metadata:   map[string]any{"membershipNFT": etherfiMembershipNFT},
 		})
 	}
 	return groups, nil
