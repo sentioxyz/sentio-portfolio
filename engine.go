@@ -61,6 +61,9 @@ type EngineConfig struct {
 	// leaving out a protocol with no chain left. A scan that names one reports it as a chain
 	// error. Each entry must be in SupportedChainIDs.
 	DisabledChains []ChainID
+	// WalletTokenBlocklist keeps the tokens the wallet stopped reading because a call to one
+	// reverted, between scans. Nil keeps nothing: each scan reads such a token and skips it.
+	WalletTokenBlocklist WalletTokenBlocklist
 	// ScanWorkers bounds the (protocol, chain) deployments one scan reads at once; the wallet's
 	// own deployments run beside them. Each scan has workers of its own, while the indexer lane,
 	// the RPC endpoints and the wallet provider are shared by every scan, so more workers make a
@@ -200,7 +203,7 @@ func NewEngineWithConfig(
 		registrations:         registrations,
 		priceProvider:         priceProvider,
 		walletBalanceProvider: config.WalletBalanceProvider,
-		walletTokens:          newWalletTokenCache(),
+		walletTokens:          newWalletTokenCache(config.WalletTokenBlocklist),
 		headLagBlocks:         config.headLagBlocks(),
 		observer:              config.Observer,
 		indexerLane:           newIndexerLane(config.IndexerConcurrency),

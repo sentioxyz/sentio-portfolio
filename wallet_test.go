@@ -39,7 +39,9 @@ type walletTestServer struct {
 	reverts    map[common.Address]struct{}
 	rawResults map[common.Address]string
 	code       map[common.Address]struct{}
-	calls      int
+	// failures answers a call with this message as a node's error rather than a revert.
+	failures map[common.Address]string
+	calls    int
 }
 
 type walletTestRequest struct {
@@ -86,6 +88,10 @@ func (s *walletTestServer) answer(call walletTestRequest) map[string]any {
 		address := s.target(call.Params[0])
 		if _, reverts := s.reverts[address]; reverts {
 			response["error"] = map[string]any{"code": 3, "message": "execution reverted"}
+			break
+		}
+		if message, fails := s.failures[address]; fails {
+			response["error"] = map[string]any{"code": -32000, "message": message}
 			break
 		}
 		if raw, exists := s.rawResults[address]; exists {

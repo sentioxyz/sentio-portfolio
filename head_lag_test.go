@@ -24,6 +24,8 @@ type laggingPool struct {
 	blockTimestamp func(number uint64) uint64
 	// nativeBalance answers eth_getBalance at every block; zero when unset.
 	nativeBalance *big.Int
+	// reverts answers eth_call to a contract with its message.
+	reverts map[common.Address]string
 }
 
 func (p *laggingPool) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -76,6 +78,11 @@ func (p *laggingPool) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			if parsed.Uint64() > p.servedHead {
 				return respond(call.ID, nil, "block "+parsed.String()+
 					" is beyond the latest block "+big.NewInt(int64(p.servedHead)).String()+" of this node, retry later")
+			}
+			if to, ok := object["to"].(string); ok {
+				if message, reverts := p.reverts[common.HexToAddress(to)]; reverts {
+					return respond(call.ID, nil, message)
+				}
 			}
 			// Enough zero words to decode as whatever the caller expects. This pool exists to
 			// exercise block selection, not contract semantics.

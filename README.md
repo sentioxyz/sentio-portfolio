@@ -21,8 +21,11 @@ balance is re-read at the settled block, including provider rows reporting zero.
 Providers may supply per-account block metadata when address batches sample
 different blocks. A candidate whose successful `balanceOf` returns empty data
 is omitted, and so, at a fixed pin, is a candidate with no code at that block:
-a token that did not exist yet cannot be held. Reverts of deployed tokens, RPC
-failures, and malformed non-empty results remain errors.
+a token that did not exist yet cannot be held. A deployed token whose own
+`balanceOf`, `decimals` or `symbol` reverts is omitted with a `coverage` note and
+listed on the host's `WalletTokenBlocklist`, if it supplies one, so later scans
+omit it without reading it. RPC failures and malformed non-empty results remain
+errors.
 
 Unavailable discovery and missing account results are `protocol` errors. A
 target the provider marks unsupported, and a historical scan using a provider
