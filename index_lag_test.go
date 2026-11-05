@@ -279,7 +279,6 @@ func TestEtherfiSkipsMembershipsGoneAfterTheIndex(t *testing.T) {
 	adapter := newEtherfiAdapter(SentioIndexerConfig{}).(*EtherfiAdapter)
 	unwrapped, held := big.NewInt(6958), big.NewInt(6959)
 	stub := newContractStub(t, Ethereum, presenceTestAccount)
-	stub.answer(etherfiMembershipNFT, etherfiMembershipABI, "membershipManager", nil, etherfiMembershipManager)
 	stub.answer(etherfiMembershipNFT, etherfiMembershipABI, "balanceOf", []any{presenceTestAccount, unwrapped}, new(big.Int))
 	stub.revert(etherfiMembershipNFT, etherfiMembershipABI, "valueOf", unwrapped)
 	stub.answer(etherfiMembershipNFT, etherfiMembershipABI, "balanceOf", []any{presenceTestAccount, held}, big.NewInt(1))
