@@ -200,6 +200,7 @@ go_test(
         "uniswap_indexer_test.go",
         "uniswap_live_test.go",
         "uniswap_test.go",
+        "uniswap_v4_test.go",
         "valuation_test.go",
         "vesper_test.go",
         "wallet_test.go",

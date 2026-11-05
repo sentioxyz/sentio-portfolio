@@ -15,9 +15,11 @@ import (
 )
 
 const (
-	uniswapV3MaxActivePositions = 512
-	uniswapV4DynamicFeeFlag     = uint32(1 << 23)
-	uniswapV4MaxLPFee           = uint32(1_000_000)
+	// uniswapMaxActivePositions bounds the positions of one generation a scan values on one chain:
+	// those still holding liquidity or fees, however many closed NFTs the account also keeps.
+	uniswapMaxActivePositions = 512
+	uniswapV4DynamicFeeFlag   = uint32(1 << 23)
+	uniswapV4MaxLPFee         = uint32(1_000_000)
 )
 
 var uniswapMaxUint128 = new(big.Int).Sub(
@@ -593,10 +595,10 @@ func (a *UniswapV3Adapter) Positions(
 		}
 		positions = append(positions, position)
 	}
-	if len(positions) > uniswapV3MaxActivePositions {
+	if len(positions) > uniswapMaxActivePositions {
 		return nil, fmt.Errorf(
 			"account has more than %d economically active Uniswap v3 positions",
-			uniswapV3MaxActivePositions,
+			uniswapMaxActivePositions,
 		)
 	}
 	ownerCalls := make([]ContractCall, len(positions))
@@ -826,6 +828,46 @@ func uniswapV4LPFeeAt(values []any) (uint32, error) {
 	return fee, nil
 }
 
+// uniswapV4ActivePositions keeps the indexed NFTs that still hold liquidity at the pin, in index
+// order, each carrying the manager's liquidity. A V4 position earns fees only on its liquidity and
+// is paid them whenever that liquidity changes, so an NFT with none holds neither principal nor
+// uncollected fees: dropping it here, before its owner and pool are read, changes no group. That
+// is what lets an account keep thousands of closed NFTs and still be valued. An NFT whose
+// liquidity read reverts is one the index still lists after it was burned; a transport error
+// fails the scan. Extracted so the unit rules are testable without a live RPC client.
+func uniswapV4ActivePositions(
+	nfts []uniswapIndexedNFT,
+	rows []ContractCallResult,
+) ([]uniswapV4Position, error) {
+	if len(rows) != len(nfts) {
+		return nil, fmt.Errorf("position liquidity: got %d results for %d NFTs", len(rows), len(nfts))
+	}
+	active := make([]uniswapV4Position, 0)
+	for index, row := range rows {
+		if row.Error != nil {
+			if executionReverted(row.Error) {
+				continue
+			}
+			return nil, fmt.Errorf("getPositionLiquidity %s: %w", nfts[index].TokenID, row.Error)
+		}
+		liquidity, err := BigIntAt(row.Values, 0)
+		if err != nil {
+			return nil, fmt.Errorf("getPositionLiquidity %s: %w", nfts[index].TokenID, err)
+		}
+		if liquidity.Sign() == 0 {
+			continue
+		}
+		active = append(active, uniswapV4Position{NFT: nfts[index], ManagerLiquidity: liquidity})
+	}
+	if len(active) > uniswapMaxActivePositions {
+		return nil, fmt.Errorf(
+			"account has more than %d economically active Uniswap v4 positions",
+			uniswapMaxActivePositions,
+		)
+	}
+	return active, nil
+}
+
 func (a *UniswapV4Adapter) Positions(
 	ctx context.Context,
 	client *RPCClient,
@@ -840,51 +882,60 @@ func (a *UniswapV4Adapter) Positions(
 	if err != nil {
 		return nil, err
 	}
-	ownerCalls := make([]ContractCall, len(indexed.NFTs))
+	liquidityCalls := make([]ContractCall, len(indexed.NFTs))
 	for index, nft := range indexed.NFTs {
 		if nft.Manager != deployment.Manager {
 			return nil, fmt.Errorf("indexer returned foreign manager %s", nft.Manager)
 		}
+		liquidityCalls[index] = ContractCall{
+			Contract: deployment.Manager, ABI: uniswapV4PositionManagerABI,
+			Method: "getPositionLiquidity", Args: []any{nft.TokenID},
+		}
+	}
+	liquidityRows, err := client.ParallelCallsAllowFailure(ctx, block, liquidityCalls)
+	if err != nil {
+		return nil, fmt.Errorf("position liquidity: %w", err)
+	}
+	active, err := uniswapV4ActivePositions(indexed.NFTs, liquidityRows)
+	if err != nil {
+		return nil, err
+	}
+	ownerCalls := make([]ContractCall, len(active))
+	for index, position := range active {
 		ownerCalls[index] = ContractCall{
 			Contract: deployment.Manager, ABI: uniswapV4PositionManagerABI,
-			Method: "ownerOf", Args: []any{nft.TokenID},
+			Method: "ownerOf", Args: []any{position.NFT.TokenID},
 		}
 	}
 	ownerRows, err := client.ParallelCallsAllowFailure(ctx, block, ownerCalls)
 	if err != nil {
 		return nil, fmt.Errorf("owners: %w", err)
 	}
-	positions := make([]uniswapV4Position, 0)
+	positions := make([]uniswapV4Position, 0, len(active))
 	for index, row := range ownerRows {
 		if row.Error != nil {
 			if executionReverted(row.Error) {
 				continue
 			}
-			return nil, fmt.Errorf("ownerOf %s: %w", indexed.NFTs[index].TokenID, row.Error)
+			return nil, fmt.Errorf("ownerOf %s: %w", active[index].NFT.TokenID, row.Error)
 		}
 		owner, decodeErr := AddressAt(row.Values, 0)
 		if decodeErr != nil {
 			return nil, decodeErr
 		}
 		if owner == account {
-			positions = append(positions, uniswapV4Position{NFT: indexed.NFTs[index]})
+			positions = append(positions, active[index])
 		}
 	}
 	if len(positions) == 0 {
 		return nil, nil
 	}
-	managerCalls := make([]ContractCall, 0, len(positions)*2)
-	for _, position := range positions {
-		managerCalls = append(managerCalls,
-			ContractCall{
-				Contract: deployment.Manager, ABI: uniswapV4PositionManagerABI,
-				Method: "getPoolAndPositionInfo", Args: []any{position.NFT.TokenID},
-			},
-			ContractCall{
-				Contract: deployment.Manager, ABI: uniswapV4PositionManagerABI,
-				Method: "getPositionLiquidity", Args: []any{position.NFT.TokenID},
-			},
-		)
+	managerCalls := make([]ContractCall, len(positions))
+	for index, position := range positions {
+		managerCalls[index] = ContractCall{
+			Contract: deployment.Manager, ABI: uniswapV4PositionManagerABI,
+			Method: "getPoolAndPositionInfo", Args: []any{position.NFT.TokenID},
+		}
 	}
 	managerRows, err := client.ParallelCalls(ctx, block, managerCalls)
 	if err != nil {
@@ -892,15 +943,11 @@ func (a *UniswapV4Adapter) Positions(
 	}
 	stateCalls := make([]ContractCall, 0, len(positions)*3)
 	for index := range positions {
-		poolKey, decodeErr := decodeUniswapV4PoolKey(managerRows[index*2][0])
+		poolKey, decodeErr := decodeUniswapV4PoolKey(managerRows[index][0])
 		if decodeErr != nil {
 			return nil, decodeErr
 		}
-		packedInfo, decodeErr := BigIntAt(managerRows[index*2], 1)
-		if decodeErr != nil {
-			return nil, decodeErr
-		}
-		managerLiquidity, decodeErr := BigIntAt(managerRows[index*2+1], 0)
+		packedInfo, decodeErr := BigIntAt(managerRows[index], 1)
 		if decodeErr != nil {
 			return nil, decodeErr
 		}
@@ -916,7 +963,6 @@ func (a *UniswapV4Adapter) Positions(
 		}
 		positions[index].TickLower = uniswapDecodePackedInt24(packedInfo, 8)
 		positions[index].TickUpper = uniswapDecodePackedInt24(packedInfo, 32)
-		positions[index].ManagerLiquidity = managerLiquidity
 		poolIDArg := [32]byte(poolID)
 		salt := [32]byte(common.BigToHash(positions[index].NFT.TokenID))
 		lower := big.NewInt(int64(positions[index].TickLower))
