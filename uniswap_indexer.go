@@ -28,7 +28,7 @@ var uniswapIndexerDefinitions = map[uniswapGeneration]uniswapIndexerDefinition{
 	},
 	uniswapV4: {
 		version:        uniswapV4,
-		maxIndexedNFTs: 512,
+		maxIndexedNFTs: 4_096,
 	},
 }
 

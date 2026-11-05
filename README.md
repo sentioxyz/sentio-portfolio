@@ -71,6 +71,13 @@ and fails rather than returning a partial inventory. Its groups report
 `discoverySource: rpc-enumeration` and `discoveryBlock`, not a fabricated
 `indexerBlock`. V4 remains indexer-backed; this fallback does not apply to it.
 
+Both generations read up to 4,096 position NFTs of an account per chain and
+value at most 512 economically active ones, so an account that keeps thousands
+of closed NFTs is still valued. V4 reads every NFT's liquidity first and drops
+those with none before reading owners and pools: a V4 position earns fees only
+on its liquidity and is paid them whenever that liquidity changes, so an NFT
+without liquidity holds neither principal nor uncollected fees.
+
 Historical scans use a fail-closed availability registry in
 `protocol_availability.go`. Every adapter must declare an explicit outer window
 for every advertised chain before the engine can start; genesis support is

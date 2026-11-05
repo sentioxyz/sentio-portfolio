@@ -197,50 +197,57 @@ func TestUniswapIndexerRejectsMalformedOrNonUnitRows(t *testing.T) {
 // A generation reads no more NFTs than it may hold: past its cap the read fails rather than reading
 // on, having asked for one row past the cap.
 func TestUniswapIndexerEnforcesGenerationCap(t *testing.T) {
-	const version = "18"
-	requestCount := 0
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		writer.Header().Set("content-type", "application/json")
-		if request.Method == http.MethodGet {
-			_ = json.NewEncoder(writer).Encode(uniswapIndexerTestStatus(
-				version,
-				deploymentChains(uniswapV4Deployments),
-				100,
-			))
-			return
-		}
-		requestCount++
-		start, count := int64(100_000), int64(500)
-		if requestCount == 2 {
-			start, count = 100_500, 13
-		} else if requestCount != 1 {
-			t.Errorf("unexpected GraphQL request %d", requestCount)
-		}
-		rows := make([]map[string]any, 0, count)
-		for offset := int64(0); offset < count; offset++ {
-			rows = append(rows, uniswapIndexerTestRow(
-				uniswapV4,
-				Ethereum,
-				uniswapIndexerTestOwner,
-				big.NewInt(start+offset),
-			))
-		}
-		_ = json.NewEncoder(writer).Encode(uniswapIndexerTestResponse(100, 1_000_000_000, rows))
-	}))
-	t.Cleanup(server.Close)
+	for _, version := range []uniswapGeneration{uniswapV3, uniswapV4} {
+		t.Run(string(version), func(t *testing.T) {
+			const processorVersion = "18"
+			maximum := uniswapIndexerDefinitions[version].maxIndexedNFTs
+			chains, err := uniswapIndexerChains(version)
+			if err != nil {
+				t.Fatal(err)
+			}
+			requestCount := 0
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				writer.Header().Set("content-type", "application/json")
+				if request.Method == http.MethodGet {
+					_ = json.NewEncoder(writer).Encode(uniswapIndexerTestStatus(processorVersion, chains, 100))
+					return
+				}
+				requestCount++
+				served := (requestCount - 1) * indexPageSize
+				count := min(indexPageSize, maximum+1-served)
+				if count <= 0 {
+					t.Errorf("unexpected GraphQL request %d", requestCount)
+					count = 0
+				}
+				rows := make([]map[string]any, 0, count)
+				for offset := range count {
+					rows = append(rows, uniswapIndexerTestRow(
+						version,
+						Ethereum,
+						uniswapIndexerTestOwner,
+						big.NewInt(int64(100_000+served+offset)),
+					))
+				}
+				_ = json.NewEncoder(writer).Encode(uniswapIndexerTestResponse(100, 1_000_000_000, rows))
+			}))
+			t.Cleanup(server.Close)
 
-	indexer := newUniswapIndexerTestClient(server, version)
-	_, err := indexer.indexedNFTs(
-		context.Background(),
-		uniswapV4,
-		BlockRef{ChainID: Ethereum, Number: 100, Timestamp: 1_000_000},
-		uniswapIndexerTestOwner,
-	)
-	if err == nil || !strings.Contains(err.Error(), "more than 512 positions rows") {
-		t.Fatalf("cap error = %v", err)
-	}
-	if requestCount != 2 {
-		t.Fatalf("GraphQL requests = %d, want 2", requestCount)
+			indexer := newUniswapIndexerTestClient(server, processorVersion)
+			_, err = indexer.indexedNFTs(
+				context.Background(),
+				version,
+				BlockRef{ChainID: Ethereum, Number: 100, Timestamp: 1_000_000},
+				uniswapIndexerTestOwner,
+			)
+			want := fmt.Sprintf("more than %d positions rows", maximum)
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("cap error = %v, want %q", err, want)
+			}
+			// Pages until one row past the cap: ceil((maximum+1) / indexPageSize).
+			if wantRequests := (maximum + indexPageSize) / indexPageSize; requestCount != wantRequests {
+				t.Fatalf("GraphQL requests = %d, want %d", requestCount, wantRequests)
+			}
+		})
 	}
 }
 
