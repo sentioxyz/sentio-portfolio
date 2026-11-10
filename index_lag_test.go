@@ -65,13 +65,17 @@ func TestIndexQueryBlock(t *testing.T) {
 	latest := func(processed uint64) map[ChainID]sentioChainStatus {
 		return map[ChainID]sentioChainStatus{Ethereum: {State: "PROCESSING_LATEST", ProcessedBlock: processed}}
 	}
+	catchingUp := func(processed uint64) map[ChainID]sentioChainStatus {
+		return map[ChainID]sentioChainStatus{Ethereum: {State: "CATCHING_UP", ProcessedBlock: processed}}
+	}
 	for _, test := range []struct {
-		name      string
-		block     BlockRef
-		reads     []map[ChainID]sentioChainStatus
-		wantBlock uint64
-		wantReads int
-		wantError string
+		name       string
+		block      BlockRef
+		catchingUp bool
+		reads      []map[ChainID]sentioChainStatus
+		wantBlock  uint64
+		wantReads  int
+		wantError  string
 	}{
 		{
 			name:  "live past the processor",
@@ -101,6 +105,28 @@ func TestIndexQueryBlock(t *testing.T) {
 			wantError: "backfill is incomplete",
 		},
 		{
+			name:  "live while catching up, where the index reads it",
+			block: BlockRef{ChainID: Ethereum, Number: 200}, catchingUp: true,
+			reads: []map[ChainID]sentioChainStatus{catchingUp(150)}, wantBlock: 150, wantReads: 1,
+		},
+		{
+			name:  "fixed pin a catching-up processor has passed",
+			block: BlockRef{ChainID: Ethereum, Number: 200, Fixed: true}, catchingUp: true,
+			reads: []map[ChainID]sentioChainStatus{catchingUp(250)}, wantBlock: 200, wantReads: 1,
+		},
+		{
+			name:  "fixed pin a catching-up processor has not reached",
+			block: BlockRef{ChainID: Ethereum, Number: 200, Fixed: true}, catchingUp: true,
+			reads: []map[ChainID]sentioChainStatus{catchingUp(150), catchingUp(150)}, wantReads: 2,
+			wantError: "short of pinned block 200",
+		},
+		{
+			name:  "any other state, where the index reads a chain catching up",
+			block: BlockRef{ChainID: Ethereum, Number: 200}, catchingUp: true,
+			reads: []map[ChainID]sentioChainStatus{{Ethereum: {State: "QUEUING", ProcessedBlock: 250}}}, wantReads: 1,
+			wantError: "backfill is incomplete",
+		},
+		{
 			name:  "chain missing from the status",
 			block: BlockRef{ChainID: Ethereum, Number: 200},
 			reads: []map[ChainID]sentioChainStatus{{}}, wantReads: 1, wantError: "omitted chain 1",
@@ -108,7 +134,7 @@ func TestIndexQueryBlock(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			reads := 0
-			_, queryBlock, err := indexQueryBlock(test.block, func(forceRefresh bool) (map[ChainID]sentioChainStatus, error) {
+			_, queryBlock, err := indexQueryBlock(test.block, test.catchingUp, func(forceRefresh bool) (map[ChainID]sentioChainStatus, error) {
 				if forceRefresh != (reads > 0) {
 					t.Errorf("read %d forceRefresh = %t", reads, forceRefresh)
 				}

@@ -81,6 +81,14 @@ those with none before reading owners and pools: a V4 position earns fees only
 on its liquidity and is paid them whenever that liquidity changes, so an NFT
 without liquidity holds neither principal nor uncollected fees.
 
+Uniswap V2 (`uniswap-v2`) covers Uniswap V2 and the forks that deploy the same
+pair contract — SushiSwap V2, PancakeSwap V2 and Aerodrome — on Ethereum, BSC,
+Base and Arbitrum, through one index whose processor follows every fork's
+factory. A group is one pair, labelled with its fork, and reports the account's
+share of each reserve as `balanceOf × reserve / totalSupply`, every term read at
+the pin and kept exact as a numerator over the supply. Only LP tokens the
+account holds directly are covered: LP staked in a farm or gauge is not.
+
 Historical scans use a fail-closed availability registry in
 `protocol_availability.go`. Every adapter must declare an explicit outer window
 for every advertised chain before the engine can start; genesis support is

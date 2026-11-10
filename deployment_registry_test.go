@@ -494,6 +494,12 @@ var verifiedProtocolAvailabilityWindows = []expectedProtocolAvailabilityWindow{
 	{protocolID: "fluid", chainID: BSC, activationBlock: 71_737_128},
 	{protocolID: "fluid", chainID: Base, activationBlock: 38_678_564},
 	{protocolID: "fluid", chainID: Arbitrum, activationBlock: 228_709_698},
+	{protocolID: "uniswap-v2", chainID: Ethereum, activationBlock: 10_000_835},
+	{protocolID: "uniswap-v2", chainID: BSC, activationBlock: 5_205_069},
+	{protocolID: "uniswap-v2", chainID: Base, activationBlock: 2_631_214},
+	// SushiSwap's factory, the first V2 factory on Arbitrum, is pre-Nitro state no public archive
+	// serves; 70 is the block the V2 processor binds it from.
+	{protocolID: "uniswap-v2", chainID: Arbitrum, activationBlock: 70},
 	{protocolID: "uniswap-v3", chainID: Ethereum, activationBlock: 12_369_651},
 	{protocolID: "uniswap-v3", chainID: BSC, activationBlock: 26_324_045},
 	{protocolID: "uniswap-v3", chainID: Base, activationBlock: 1_371_714},

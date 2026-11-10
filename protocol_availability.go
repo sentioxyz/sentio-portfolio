@@ -223,6 +223,12 @@ var protocolAvailabilityByID = map[string]chainAvailability{
 		Polygon:  {availableFrom(79_090_648)},
 		Plasma:   {availableFrom(8_682_622)},
 	},
+	"uniswap-v2": {
+		Ethereum: {availableFrom(10_000_835)},
+		BSC:      {availableFrom(5_205_069)},
+		Base:     {availableFrom(2_631_214)},
+		Arbitrum: {availableFrom(70)},
+	},
 	"uniswap-v3": {
 		Ethereum:  {availableFrom(12_369_651)},
 		BSC:       {availableFrom(26_324_045)},

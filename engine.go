@@ -184,6 +184,7 @@ func NewEngineWithConfig(
 	adapters = append(adapters, newMorphoAdapter(config.sentioIndexer("morpho-blue")))
 	adapters = append(adapters, newPendleAdapter(config.sentioIndexer("pendle")))
 	adapters = append(adapters, newFluidAdapter())
+	adapters = append(adapters, newUniswapV2Adapter(config.sentioIndexer("uniswap-v2")))
 	adapters = append(adapters, newUniswapAdapters(
 		config.sentioIndexer("uniswap-v3"),
 		config.sentioIndexer("uniswap-v4"),
