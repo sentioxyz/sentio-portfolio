@@ -37,8 +37,14 @@ func (n *indexLagNote) Error() string {
 // far behind it is (checkIndexCheckpoint). A read at a fixed pin must find the processor past the
 // pin, since nothing makes up the blocks it has not processed and a historical scan is kept rather
 // than retried, so a status that trails the pin is read again before the read fails.
+//
+// The chain must be at PROCESSING_LATEST, unless catchingUp lets a processor still CATCHING_UP
+// answer too. The driver commits a catching-up chain's progress as it goes, so a query at or below
+// its processed block is as exact as one at a live processor; it is only further behind, which
+// the rules above already answer for.
 func indexQueryBlock(
 	block BlockRef,
+	catchingUp bool,
 	read func(forceRefresh bool) (map[ChainID]sentioChainStatus, error),
 ) (map[ChainID]sentioChainStatus, uint64, error) {
 	statuses, err := read(false)
@@ -55,7 +61,7 @@ func indexQueryBlock(
 	if !exists {
 		return nil, 0, fmt.Errorf("processor status omitted chain %d", block.ChainID)
 	}
-	if status.State != "PROCESSING_LATEST" {
+	if status.State != "PROCESSING_LATEST" && (!catchingUp || status.State != "CATCHING_UP") {
 		return nil, 0, fmt.Errorf(
 			"indexer backfill is incomplete for chain %d: state=%s processed=%d estimatedLatest=%d",
 			block.ChainID, status.State, status.ProcessedBlock, status.EstimatedLatest,

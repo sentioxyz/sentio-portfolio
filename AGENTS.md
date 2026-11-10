@@ -17,6 +17,15 @@ single processor:
   configuration — never an extra contract binding inside another protocol's
   processor.
 
+Uniswap V2 and its forks are one protocol, `uniswap-v2`: one adapter
+(`uniswap_v2.go`), one configuration, one project. SushiSwap V2, PancakeSwap V2
+and Aerodrome deploy the same pair contract behind their own factories, so the
+processor follows each fork's factory and the adapter reads every fork's LP
+balances of an account through one stream, labelling each group with its fork.
+A V2 fork joins by its factory, in `uniswapV2Forks` and in the processor, not as
+a protocol of its own; a pool contract that is not a V2 pair belongs to a
+protocol of its own.
+
 ### Indexed reads
 
 An adapter reads a Sentio index only through the indexed read module (`sentio_index.go`). A
@@ -120,6 +129,15 @@ read at a fixed pin needs the processor at or past the pin and otherwise fails a
 error, so a host that keeps historical scans retries it rather than storing a short answer. Every
 page and every lookup of a read asks at that one block, Uniswap's included.
 
+A chain an index names in `catchingUp` is read while its processor is still `CATCHING_UP`, by the
+same two rules: the driver commits a catching-up chain's progress as it goes, so a query at or
+below its processed block is exact, only further behind, and its lag note says how far. It exists
+for a processor whose backfill on one chain lags the others by weeks, where failing every read
+would hide the positions it has already indexed. Only the V2 index names one, BSC, until its
+processor reaches `PROCESSING_LATEST` there; remove the entry then rather than leave a standing
+exemption. Every other state still fails, and the presence probe never speaks for a chain that
+is catching up.
+
 An index read is certified by the index's `IndexerCheckpoint` row for the chain, carried by every
 page of the read at the query block and validated once by `checkIndexCheckpoint` against the pin:
 never past the query block; at a fixed pin no older than the backfill lag; on a live read any age,
@@ -130,6 +148,11 @@ engine per deployment), however the adapter's own read then ends, and the engine
 `coverage` note on the protocol and chain rather than a failure; adapters never handle it. Keep
 every lag rule in that one function and its constants; do not reintroduce per-indexer lag
 constants.
+
+The row's id is the chain ID, except for the V2 index, whose processor writes one row per fork,
+`<chainId>:<fork>`, every fork's at the same block. An index names the row it reads with
+`sentioIndex.checkpoint`; the V2 index reads the chain's earliest fork's, which has been written
+longest, and the presence probe reads the same row as the pages.
 
 Since the index lags the pin, the refs it lists may have been settled after the indexed block.
 An adapter must read a ref the account no longer holds at the pin as nothing, never as a
@@ -151,9 +174,10 @@ The start block an index declares must be the block the processor's checkpoint b
 at on that chain, which is also the adapter's own activation for the index. An index that started
 later than the adapter's window would read as empty there for up to the backfill lag instead of
 failing, so keep the two equal when adding a chain. The presence probe never uses the stand-in: a
-chain without a checkpoint is not proven empty and runs its own pages. The Lista, Morpho, Pendle
-and Euler indexes declare a start; the owner-token, account-request, mETH and Uniswap indexes
-require a written checkpoint.
+chain without a checkpoint is not proven empty and runs its own pages. The Lista, Morpho, Pendle,
+Euler and Uniswap V2 indexes declare a start, V2's the creation block of the chain's earliest
+fork; the owner-token, account-request, mETH and Uniswap V3 and V4 indexes require a written
+checkpoint.
 
 ## Wallet holdings
 

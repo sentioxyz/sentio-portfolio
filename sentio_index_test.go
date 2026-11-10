@@ -36,6 +36,8 @@ type fakeIndex struct {
 	// checkpoint answers the checkpoint rows of the n-th GraphQL request (from 0). Nil answers one
 	// row at the query block, one second before indexTestTimestamp.
 	checkpoint func(n int, queryBlock uint64) []map[string]any
+	// states overrides a chain's processor state; every other chain is at PROCESSING_LATEST.
+	states map[ChainID]string
 
 	mu      sync.Mutex
 	queries []string
@@ -43,7 +45,7 @@ type fakeIndex struct {
 
 var (
 	// Both match a field with or without an alias; the presence probe aliases one per chain.
-	fakeCheckpointField = regexp.MustCompile(`(?:(\w+): )?indexerCheckpoints\(first: 2, block: \{ number: (\d+) \}, where: \{ id: "(\d+)" \}\)`)
+	fakeCheckpointField = regexp.MustCompile(`(?:(\w+): )?indexerCheckpoints\(first: 2, block: \{ number: (\d+) \}, where: \{ id: "([^"]+)" \}\)`)
 	fakeStreamField     = regexp.MustCompile(`(?:(\w+): )?(\w+)\(first: (\d+), orderBy: id, orderDirection: asc, block: \{ number: (\d+) \}, where: \{ ([^}]*) \}\)`)
 	fakeWhereString     = func(field string) *regexp.Regexp { return regexp.MustCompile(field + `: "([^"]*)"`) }
 )
@@ -55,7 +57,14 @@ func newFakeIndex(t *testing.T, processed uint64) *fakeIndex {
 func (f *fakeIndex) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	writer.Header().Set("Content-Type", "application/json")
 	if request.Method == http.MethodGet {
-		_ = json.NewEncoder(writer).Encode(uniswapIndexerTestStatus("1", []ChainID{Ethereum, BSC, Base}, f.processed))
+		status := uniswapIndexerTestStatus("1", []ChainID{Ethereum, BSC, Base}, f.processed)
+		for _, state := range status["processors"].([]map[string]any)[0]["states"].([]map[string]any) {
+			chainID, _ := strconv.ParseUint(state["chainId"].(string), 10, 64)
+			if override, exists := f.states[ChainID(chainID)]; exists {
+				state["status"].(map[string]any)["state"] = override
+			}
+		}
+		_ = json.NewEncoder(writer).Encode(status)
 		return
 	}
 	var body struct {

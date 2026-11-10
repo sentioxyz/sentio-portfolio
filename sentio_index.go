@@ -42,6 +42,27 @@ type sentioIndex struct {
 	// a written one (checkIndexCheckpoint): at a fixed pin it is accepted only within the backfill
 	// lag of the start, and later a missing checkpoint fails as a stale one.
 	start func(ChainID) uint64
+	// checkpoint is the id of the IndexerCheckpoint row that certifies a read on a chain. Nil takes
+	// the chain ID, the row every processor writes but the V2 one, which writes one per fork.
+	checkpoint func(ChainID) string
+	// catchingUp names the chains read while their processor is still CATCHING_UP, rather than
+	// failing until it reaches PROCESSING_LATEST (indexQueryBlock). Nil names none. A chain named
+	// here answers as a lagging one does: live, wherever its processor has got to, with a lag note;
+	// at a fixed pin, only once the processor has passed the pin.
+	catchingUp func(ChainID) bool
+}
+
+// checkpointID is the id of the checkpoint row that certifies a read on chainID.
+func (x *sentioIndex) checkpointID(chainID ChainID) string {
+	if x.checkpoint != nil {
+		return x.checkpoint(chainID)
+	}
+	return strconv.FormatUint(uint64(chainID), 10)
+}
+
+// readsCatchingUp reports whether a read on chainID proceeds while its processor is catching up.
+func (x *sentioIndex) readsCatchingUp(chainID ChainID) bool {
+	return x.catchingUp != nil && x.catchingUp(chainID)
 }
 
 // indexWhere selects a stream's rows on one chain, paging aside.
@@ -246,13 +267,14 @@ func (x *sentioIndex) presenceProbe(streams []indexStreamer) (presenceProbe, str
 		config:         x.config,
 		requiredChains: x.chains,
 		fields:         fields,
+		checkpoints:    x.checkpoint,
 	}, strings.ToLower(account.Hex()), true
 }
 
 // queryBlock reads the processor status of block's chain, taking no lane slot, and returns it with
 // the block a read for block asks at (indexQueryBlock).
 func (x *sentioIndex) queryBlock(ctx context.Context, block BlockRef) (map[ChainID]sentioChainStatus, uint64, error) {
-	return indexQueryBlock(block, func(forceRefresh bool) (map[ChainID]sentioChainStatus, error) {
+	return indexQueryBlock(block, x.readsCatchingUp(block.ChainID), func(forceRefresh bool) (map[ChainID]sentioChainStatus, error) {
 		return x.api.chainStatusesForScan(ctx, x.config, x.chains, block.ChainID, forceRefresh)
 	})
 }
@@ -320,7 +342,7 @@ func (x *sentioIndex) pages(
 			return *want, lag, nil
 		}
 		var data map[string]json.RawMessage
-		if err := x.api.graphql(ctx, x.config.GraphQLURL, indexPageQuery(chainID, at.QueryBlock, open), &data); err != nil {
+		if err := x.api.graphql(ctx, x.config.GraphQLURL, indexPageQuery(x.checkpointID(chainID), at.QueryBlock, open), &data); err != nil {
 			return indexCheckpoint{}, nil, err
 		}
 		checkpoint, err := pageCheckpoint(data)
@@ -422,15 +444,15 @@ func pageCheckpoint(data map[string]json.RawMessage) (indexCheckpoint, error) {
 	return parseIndexCheckpoint(raw)
 }
 
-// indexCheckpointField renders the field that reads a chain's checkpoint rows at block, under alias
-// when one is given: a page asks for one chain's, the presence probe for every chain's.
-func indexCheckpointField(alias string, chainID ChainID, block uint64) string {
+// indexCheckpointField renders the field that reads the checkpoint rows of id at block, under alias
+// when one is given: a page asks for its chain's, the presence probe for every chain's.
+func indexCheckpointField(alias string, id string, block uint64) string {
 	if alias != "" {
 		alias += ": "
 	}
 	return fmt.Sprintf(
-		"%sindexerCheckpoints(first: 2, block: { number: %d }, where: { id: \"%d\" }) { blockNumber timestampMs }",
-		alias, block, chainID,
+		"%sindexerCheckpoints(first: 2, block: { number: %d }, where: { id: %s }) { blockNumber timestampMs }",
+		alias, block, indexLiteral(id),
 	)
 }
 
@@ -461,12 +483,12 @@ func parseIndexCheckpoint(raw json.RawMessage) (indexCheckpoint, error) {
 	return indexCheckpoint{written: true, block: block, ms: ms}, nil
 }
 
-// indexPageQuery renders one page: the chain's checkpoint and each open stream after its cursor,
-// all at block.
-func indexPageQuery(chainID ChainID, block uint64, cursors []*indexCursor) string {
+// indexPageQuery renders one page: the checkpoint row checkpointID names and each open stream
+// after its cursor, all at block.
+func indexPageQuery(checkpointID string, block uint64, cursors []*indexCursor) string {
 	var query strings.Builder
 	query.WriteString("query IndexPage {\n")
-	query.WriteString("  " + indexCheckpointField("", chainID, block) + "\n")
+	query.WriteString("  " + indexCheckpointField("", checkpointID, block) + "\n")
 	for _, cursor := range cursors {
 		fmt.Fprintf(
 			&query,

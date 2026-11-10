@@ -529,10 +529,13 @@ func TestEngineRegistersPresencePrefetchers(t *testing.T) {
 	engine := NewEngineWithConfig(nil, nil, EngineConfig{SentioIndexers: map[string]SentioIndexerConfig{
 		"morpho-blue": testSentioIndexerConfig("morpho"),
 		"pendle":      testSentioIndexerConfig("pendle"),
+		"uniswap-v2":  testSentioIndexerConfig("uniswap-v2"),
 		"uniswap-v3":  testSentioIndexerConfig("uniswap-v3"),
 		"uniswap-v4":  testSentioIndexerConfig("uniswap-v4"),
 	}})
-	want := map[string]bool{"morpho-blue": true, "pendle": true, "uniswap-v3": true, "uniswap-v4": true}
+	want := map[string]bool{
+		"morpho-blue": true, "pendle": true, "uniswap-v2": true, "uniswap-v3": true, "uniswap-v4": true,
+	}
 	for _, adapter := range engine.adapters {
 		_, prefetches := adapter.(presencePrefetcher)
 		if prefetches != want[adapter.Info().ID] {

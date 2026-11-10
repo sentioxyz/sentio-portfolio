@@ -41,6 +41,17 @@ type presenceProbe struct {
 	config         SentioIndexerConfig
 	requiredChains []ChainID
 	fields         []presenceField
+	// checkpoints names the checkpoint row of each chain, as the index's pages read it
+	// (sentioIndex.checkpoint); nil takes the chain ID.
+	checkpoints func(ChainID) string
+}
+
+// checkpointID is the id of the checkpoint row the probe reads on chainID.
+func (p presenceProbe) checkpointID(chainID ChainID) string {
+	if p.checkpoints != nil {
+		return p.checkpoints(chainID)
+	}
+	return strconv.FormatUint(uint64(chainID), 10)
 }
 
 // presenceProof is what the probe established for one chain: no rows for the account as of
@@ -169,6 +180,8 @@ type presenceTarget struct {
 // presenceTargets selects the chains the probe can speak for: pinned in this scan, configured for
 // the indexer, and with a status the per-chain flow accepts (indexQueryBlock). A chain whose
 // status it rejects fails in its own per-chain flow, and the probe must not pre-empt that error.
+// A chain still catching up is left out even where the index reads it (sentioIndex.catchingUp): it
+// is rarely within the lag a proof needs, and its own page reports how far behind it is.
 func presenceTargets(
 	probe presenceProbe,
 	pinned map[ChainID]BlockRef,
@@ -206,7 +219,7 @@ func presenceQuery(probe presenceProbe, targets map[ChainID]presenceTarget) stri
 	query.WriteString("query Presence {\n")
 	for _, chainID := range chainIDs {
 		block := strconv.FormatUint(targets[chainID].queryBlock, 10)
-		query.WriteString("  " + indexCheckpointField(presenceAlias("cp", chainID), chainID, targets[chainID].queryBlock) + "\n")
+		query.WriteString("  " + indexCheckpointField(presenceAlias("cp", chainID), probe.checkpointID(chainID), targets[chainID].queryBlock) + "\n")
 		for index, field := range probe.fields {
 			fmt.Fprintf(
 				&query,
