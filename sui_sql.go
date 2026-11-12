@@ -149,6 +149,18 @@ func (r *suiHistoryIndex) calculatePortfolio(ctx context.Context, owner SuiAddre
 			return result, err
 		}
 		result.Groups = append(lending, vaults...)
+	case "cetus":
+		// The sample is read through the same object reader the node path reads
+		// head state through, so loadSuiCLMM and suiCLMMGroups compute both, and
+		// the sample's own timestamp is the time rewards accrue to.
+		positions, pools, err := loadSuiCLMM(ctx, owner, data, cetusCLMMPackage)
+		if err != nil {
+			return result, err
+		}
+		result.Groups, err = suiCLMMGroups(ctx, data, r.protocolID, positions, pools, data.pin)
+		if err != nil {
+			return result, err
+		}
 	default:
 		return result, fmt.Errorf("unsupported Sui processor protocol")
 	}

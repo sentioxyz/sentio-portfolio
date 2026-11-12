@@ -332,8 +332,8 @@ the `sui.rpc.v2` services a fullnode, or a proxy in front of one, serves. The ru
   statement, executed once, with no Sui node call and no status or GraphQL follow-up; an
   unconfigured index is an error, never a node read. Hosts supply it as the engine's
   `SentioIndexers["suilend"]`: a `SentioIndexerConfig.SQLURL` (the project's `…/sql/execute`)
-  and an explicit processor version. Volo, Cetus and Bluefin
-  still read head state from a node and still have no history.
+  and an explicit processor version. Volo and Bluefin still read head state from a node and
+  have no history; Cetus reads its head from the node and its past from its index, see below.
 - Every SQL statement goes through `sentio_sql.go`: submitted to the async execute endpoint on the
   LARGE engine and polled at `…/sql/query_result/{id}` until it finishes. A poll that fails
   transiently is asked again; the submission never is, because asking again executes the
@@ -371,7 +371,19 @@ the `sui.rpc.v2` services a fullnode, or a proxy in front of one, serves. The ru
   compared against an observed count the same way `objectCount` is — a protocol
   that declares no value kinds still fails closed on a nonzero `valueCount`, and
   the observed count is only read where the schema has that table.
-- The Suilend and NAVI schema is version 2: `PortfolioSnapshot`, `PortfolioObjectState` and
+- Cetus is read like NAVI: its head from the node, its past only from its index
+  (`SentioIndexers["cetus"]`), never one as a fallback for the other. A position NFT is the only
+  root, reached through the owner index; its pool comes from `relatedId`, and its `PositionInfo`
+  record and boundary ticks from the derived object IDs the processor writes into its `links`
+  (`cetusLinkedFields`). Those are dynamic fields of the pool's tables, never owned by the
+  wallet, so follow the links rather than scanning either kind. Both paths run `loadSuiCLMM` and
+  `suiCLMMGroups`, which read only a `suiCLMMObjectSource` and coin metadata; a sample's
+  timestamp is the time rewards accrue to. Anyone can open a pool, so the index holds a coin for
+  every one, past a statement's row limit: a Cetus read selects only the metadata of the pools it
+  selected (`suiSQLMetadataCoins`), and the range view restricts each sample to its own pools
+  the same way. A pool's current tick may be `MIN_TICK - 1` after a swap to the minimum price;
+  only a position's ticks are bounded to the tick range.
+- The Suilend, NAVI and Cetus schema is version 2: `PortfolioSnapshot`, `PortfolioObjectState` and
   `PortfolioTokenMetadata`, plus the narrow `PortfolioObjectIndex` and `PortfolioOwnerIndex`
   read indexes. Shared checkpoint, version, timestamp and count fields are native signed 64-bit
   integers. Object-state IDs are `<kind>:<20-digit source checkpoint>:<immutable object-version

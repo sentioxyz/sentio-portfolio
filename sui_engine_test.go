@@ -392,19 +392,20 @@ func TestSuiPinnedScanNeverReadsNodeState(t *testing.T) {
 		nodes := &fakeSuiNodeProtocols{}
 		navi := &fakeSuiIndex{id: "navi", samples: hourlySamples("navi", 1000, 24)}
 		suilend := &fakeSuiIndex{id: "suilend", samples: hourlySamples("suilend", 1000, 24)}
+		cetus := &fakeSuiIndex{id: "cetus", samples: hourlySamples("cetus", 1000, 24)}
 		wallet := &fakeSuiWallet{balances: map[uint64][]SuiCoinBalance{1005: {{CoinType: suiLongType, Amount: big.NewInt(7)}}}}
-		test := &suiEngineTest{t: t, node: node, nodes: nodes, prices: &fakeSuiPrices{}, wallet: wallet, indexes: []*fakeSuiIndex{navi, suilend}}
+		test := &suiEngineTest{t: t, node: node, nodes: nodes, prices: &fakeSuiPrices{}, wallet: wallet, indexes: []*fakeSuiIndex{navi, suilend, cetus}}
 		response := test.engine().ScanWithOptions(context.Background(), owner, SuiScanOptions{Pin: pin})
 
 		if state, _ := node.counts(); state != 0 || len(nodes.reads) != 0 {
 			t.Fatalf("pinned scan read node state: %d state reads, protocol reads %v", state, nodes.reads)
 		}
-		for _, id := range []string{"volo-vaults", "cetus", "bluefin"} {
+		for _, id := range []string{"volo-vaults", "bluefin"} {
 			if !suiHasError(response, id, "protocol", "only latest state is supported") || suiSnapshotOf(response, id) != nil {
 				t.Fatalf("%s at a pin: %+v", id, response.Errors)
 			}
 		}
-		for _, id := range []string{"wallet", "navi", "suilend"} {
+		for _, id := range []string{"wallet", "navi", "suilend", "cetus"} {
 			if snapshot := suiSnapshotOf(response, id); snapshot == nil || snapshot.Checkpoint.Sequence != 1005 {
 				t.Fatalf("%s not answered at the sample: %+v %+v", id, snapshot, response.Errors)
 			}
@@ -414,10 +415,12 @@ func TestSuiPinnedScanNeverReadsNodeState(t *testing.T) {
 		}
 	}
 
-	// Without the wallet, a pinned scan does not even dial.
+	// Without the wallet, a pinned scan does not even dial, and an index that is not configured is
+	// reported as such rather than answered from the node.
 	test := &suiEngineTest{t: t, nodeErr: errors.New("must not dial"), indexes: []*fakeSuiIndex{{id: "suilend", samples: hourlySamples("suilend", 1000, 3)}}}
-	response := test.engine().ScanWithOptions(context.Background(), owner, SuiScanOptions{Pin: SuiAtCheckpoint(1001), ProtocolIDs: map[string]struct{}{"suilend": {}, "cetus": {}}})
-	if test.dials.Load() != 0 || suiSnapshotOf(response, "suilend") == nil {
+	response := test.engine().ScanWithOptions(context.Background(), owner, SuiScanOptions{Pin: SuiAtCheckpoint(1001), ProtocolIDs: map[string]struct{}{"suilend": {}, "cetus": {}, "bluefin": {}}})
+	if test.dials.Load() != 0 || suiSnapshotOf(response, "suilend") == nil || !suiHasError(response, "cetus", "protocol", "not configured") ||
+		!suiHasError(response, "bluefin", "protocol", "only latest state is supported") {
 		t.Fatalf("dials %d, response %+v", test.dials.Load(), response)
 	}
 }
@@ -654,7 +657,9 @@ func TestSuiPinnedTimeScanAnswersAsARangeInstant(t *testing.T) {
 	test, _, _ := suiRangeFixture(t)
 	engine := test.engine()
 	ranged := engine.ScanRange(context.Background(), owner, []time.Time{at})[0].Response
-	single := engine.ScanWithOptions(context.Background(), owner, SuiScanOptions{Pin: SuiAtTime(at), ProtocolIDs: map[string]struct{}{"wallet": {}, "navi": {}, "suilend": {}}})
+	// A range reads every protocol with a past; Cetus has no index in this fixture, and both
+	// report it unconfigured alike.
+	single := engine.ScanWithOptions(context.Background(), owner, SuiScanOptions{Pin: SuiAtTime(at), ProtocolIDs: map[string]struct{}{"wallet": {}, "navi": {}, "suilend": {}, "cetus": {}}})
 	ranged.CompletedAt, single.CompletedAt = time.Time{}, time.Time{}
 	if !reflect.DeepEqual(ranged, single) {
 		t.Fatalf("range instant and pinned scan differ:\n%+v\n%+v", ranged, single)
@@ -758,16 +763,20 @@ func TestSuiProtocolsReportWhatIsConfigured(t *testing.T) {
 		"navi":        {ID: "navi", Name: "NAVI", History: true, Latest: true},
 		"volo-vaults": {ID: "volo-vaults", Name: "Volo Vaults", Latest: true},
 		"suilend":     {ID: "suilend", Name: "Suilend", History: true, Latest: true, Pinned: true},
-		"cetus":       {ID: "cetus", Name: "Cetus", Latest: true},
+		"cetus":       {ID: "cetus", Name: "Cetus", History: true, Latest: true},
 		"bluefin":     {ID: "bluefin", Name: "Bluefin", Latest: true},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("protocols %+v", got)
 	}
-	if err := engine.HistoryReady(); err == nil || !strings.Contains(err.Error(), "wallet") || !strings.Contains(err.Error(), "navi") {
+	if err := engine.HistoryReady(); err == nil || !strings.Contains(err.Error(), "wallet") || !strings.Contains(err.Error(), "navi") || !strings.Contains(err.Error(), "cetus") {
 		t.Fatalf("history ready: %v", err)
 	}
 	test.wallet, test.indexes = &fakeSuiWallet{}, []*fakeSuiIndex{{id: "suilend"}, {id: "navi"}}
+	if err := test.engine().HistoryReady(); err == nil || !strings.Contains(err.Error(), "cetus") {
+		t.Fatalf("history ready without the Cetus index: %v", err)
+	}
+	test.indexes = append(test.indexes, &fakeSuiIndex{id: "cetus"})
 	if err := test.engine().HistoryReady(); err != nil {
 		t.Fatal(err)
 	}

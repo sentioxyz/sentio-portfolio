@@ -128,9 +128,19 @@ func (p *suiCLMMParser) coin(f suiFields, k string) string {
 	return coin
 }
 func (p *suiCLMMParser) tick(f suiFields, k string) int32 {
+	return p.tickFrom(f, k, -443636)
+}
+
+// currentTick is a pool's current tick. A swap that drains a pool to the minimum price leaves it
+// at MIN_TICK - 1, one below any tick a position can name, and the pool stays readable there.
+func (p *suiCLMMParser) currentTick(f suiFields, k string) int32 {
+	return p.tickFrom(f, k, -443637)
+}
+
+func (p *suiCLMMParser) tickFrom(f suiFields, k string, lowest int32) int32 {
 	bits := p.uint(p.object(f, k), "bits", 32)
 	tick := int32(uint32(bits.Uint64()))
-	if tick < -443636 || tick > 443636 {
+	if tick < lowest || tick > 443636 {
 		p.fail(fmt.Errorf("CLMM tick is outside supported range"))
 	}
 	return tick
