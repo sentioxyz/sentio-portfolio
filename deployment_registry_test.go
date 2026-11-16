@@ -551,6 +551,7 @@ var verifiedProtocolAvailabilityWindows = []expectedProtocolAvailabilityWindow{
 	{protocolID: "uniswap-v4", chainID: Monad, activationBlock: 29_255_924},
 	{protocolID: "uniswap-v4", chainID: Avalanche, activationBlock: 56_195_389},
 	{protocolID: "uniswap-v4", chainID: Optimism, activationBlock: 130_947_685},
+	{protocolID: "polymarket", chainID: Polygon, activationBlock: 86_107_178},
 	{protocolID: "wallet", chainID: Ethereum, fromGenesis: true},
 	{protocolID: "wallet", chainID: BSC, fromGenesis: true},
 	{protocolID: "wallet", chainID: Base, fromGenesis: true},

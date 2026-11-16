@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"reflect"
 	"strconv"
 	"strings"
@@ -50,6 +51,42 @@ type sentioIndex struct {
 	// here answers as a lagging one does: live, wherever its processor has got to, with a lag note;
 	// at a fixed pin, only once the processor has passed the pin.
 	catchingUp func(ChainID) bool
+	// latest certifies the reads of an index whose processor writes no IndexerCheckpoint row. Nil
+	// reads the checkpoint row (checkpoint).
+	latest *indexLatestRow
+}
+
+// indexLatestRow stands in for the checkpoint of a processor that writes none: the newest row, at
+// the query block, of an entity the processor writes as the chain advances. Every page carries it
+// as it would a checkpoint row, so the read is still certified by the response that returned its
+// rows, held to one state across its pages, and validated against the pin by checkIndexCheckpoint.
+//
+// The row proves the processor had written through its block. It is only as recent as the
+// entity's newest row, so an entity written every few blocks keeps the lag it reports honest; a
+// quiet one makes a live read look further behind than it is, which costs a lag note, never a
+// wrong position. A chain with no row yet falls back to the index's start, as a missing
+// checkpoint does.
+type indexLatestRow struct {
+	Entity string
+	// BlockField and SecondsField name the block the row was written at and that block's unix
+	// time in seconds.
+	BlockField   string
+	SecondsField string
+}
+
+// checkpointField renders the field a page of the index reads its certificate from at block, under
+// alias when one is given.
+func (x *sentioIndex) checkpointField(alias string, chainID ChainID, block uint64) string {
+	if x.latest == nil {
+		return indexCheckpointField(alias, x.checkpointID(chainID), block)
+	}
+	if alias == "" {
+		alias = "indexerCheckpoints"
+	}
+	return fmt.Sprintf(
+		"%s: %s(first: 1, orderBy: %s, orderDirection: desc, block: { number: %d }) { blockNumber: %s timestampSeconds: %s }",
+		alias, x.latest.Entity, x.latest.BlockField, block, x.latest.BlockField, x.latest.SecondsField,
+	)
 }
 
 // checkpointID is the id of the checkpoint row that certifies a read on chainID.
@@ -74,12 +111,15 @@ type indexWhere struct {
 	Terms []indexTerm
 }
 
-// indexTerm is one field of a where clause. Value is an int, a uint64, a string or a []string,
-// rendered as a literal: every value is one the kernel produced.
+// indexTerm is one field of a where clause. Value is an int, a uint64, a string, a []string or an
+// indexAnyOf, rendered as a literal: every value is one the kernel produced.
 type indexTerm struct {
 	Field string
 	Value any
 }
+
+// indexAnyOf is the value of an "or" term: a row matches when it matches any one of the terms.
+type indexAnyOf []indexTerm
 
 // indexStream is one entity paged by id under its own cursor. Rows of type R are decoded into T
 // once the read has admitted them: within the stream's prefix, after the cursor, no more than
@@ -236,7 +276,9 @@ func (x *sentioIndex) prefetchPresence(ctx context.Context, streams ...indexStre
 // proven empty: a probe on any other where clause would prove nothing the pages would read. The
 // probe renders each stream's where clause as the pages do, without the cursor.
 func (x *sentioIndex) presenceProbe(streams []indexStreamer) (presenceProbe, string, bool) {
-	if !x.probe || len(streams) == 0 {
+	// The probe certifies each chain with its checkpoint row, which an index certified by its
+	// latest row does not write.
+	if !x.probe || x.latest != nil || len(streams) == 0 {
 		return presenceProbe{}, "", false
 	}
 	account := streams[0].spec().account
@@ -342,7 +384,7 @@ func (x *sentioIndex) pages(
 			return *want, lag, nil
 		}
 		var data map[string]json.RawMessage
-		if err := x.api.graphql(ctx, x.config.GraphQLURL, indexPageQuery(x.checkpointID(chainID), at.QueryBlock, open), &data); err != nil {
+		if err := x.api.graphql(ctx, x.config.GraphQLURL, indexPageQuery(x.checkpointField("", chainID, at.QueryBlock), at.QueryBlock, open), &data); err != nil {
 			return indexCheckpoint{}, nil, err
 		}
 		checkpoint, err := pageCheckpoint(data)
@@ -456,11 +498,14 @@ func indexCheckpointField(alias string, id string, block uint64) string {
 	)
 }
 
-// parseIndexCheckpoint reads the checkpoint rows one time-travel query returned: none, or one.
+// parseIndexCheckpoint reads the checkpoint rows one time-travel query returned: none, or one. A
+// row carries its time in milliseconds, or in seconds when an index's latest row stands in for
+// the checkpoint (indexLatestRow).
 func parseIndexCheckpoint(raw json.RawMessage) (indexCheckpoint, error) {
 	var rows []struct {
-		BlockNumber string `json:"blockNumber"`
-		TimestampMS string `json:"timestampMs"`
+		BlockNumber      string  `json:"blockNumber"`
+		TimestampMS      string  `json:"timestampMs"`
+		TimestampSeconds *string `json:"timestampSeconds"`
 	}
 	if err := json.Unmarshal(raw, &rows); err != nil {
 		return indexCheckpoint{}, fmt.Errorf("GraphQL returned malformed checkpoints")
@@ -476,6 +521,16 @@ func parseIndexCheckpoint(raw json.RawMessage) (indexCheckpoint, error) {
 	if err != nil {
 		return indexCheckpoint{}, fmt.Errorf("invalid checkpoint block %q", rows[0].BlockNumber)
 	}
+	if seconds := rows[0].TimestampSeconds; seconds != nil {
+		if rows[0].TimestampMS != "" {
+			return indexCheckpoint{}, fmt.Errorf("checkpoint carries two timestamps")
+		}
+		value, err := strconv.ParseUint(*seconds, 10, 64)
+		if err != nil || value > math.MaxUint64/1_000 {
+			return indexCheckpoint{}, fmt.Errorf("invalid checkpoint timestamp %q", *seconds)
+		}
+		return indexCheckpoint{written: true, block: block, ms: value * 1_000}, nil
+	}
 	ms, err := strconv.ParseUint(rows[0].TimestampMS, 10, 64)
 	if err != nil {
 		return indexCheckpoint{}, fmt.Errorf("invalid checkpoint timestamp %q", rows[0].TimestampMS)
@@ -483,12 +538,12 @@ func parseIndexCheckpoint(raw json.RawMessage) (indexCheckpoint, error) {
 	return indexCheckpoint{written: true, block: block, ms: ms}, nil
 }
 
-// indexPageQuery renders one page: the checkpoint row checkpointID names and each open stream
-// after its cursor, all at block.
-func indexPageQuery(checkpointID string, block uint64, cursors []*indexCursor) string {
+// indexPageQuery renders one page: the certificate checkpoint renders and each open stream after
+// its cursor, all at block.
+func indexPageQuery(checkpoint string, block uint64, cursors []*indexCursor) string {
 	var query strings.Builder
 	query.WriteString("query IndexPage {\n")
-	query.WriteString("  " + indexCheckpointField("", checkpointID, block) + "\n")
+	query.WriteString("  " + checkpoint + "\n")
 	for _, cursor := range cursors {
 		fmt.Fprintf(
 			&query,
@@ -532,6 +587,12 @@ func indexLiteral(value any) string {
 		return "[" + strings.Join(items, ", ") + "]"
 	case int, int64, uint64:
 		return fmt.Sprint(value)
+	case indexAnyOf:
+		items := make([]string, 0, len(value))
+		for _, term := range value {
+			items = append(items, "{ "+term.Field+": "+indexLiteral(term.Value)+" }")
+		}
+		return "[" + strings.Join(items, ", ") + "]"
 	default:
 		panic(fmt.Sprintf("index where value of type %T", value))
 	}

@@ -14,9 +14,15 @@ import (
 // AssetID is the stable, strongly typed identity shared with price providers.
 // Symbol and decimals are intentionally excluded because neither identifies an
 // asset and both can differ between data sources.
+//
+// TokenID is set for an ERC-1155 token (Token.TokenID) and empty otherwise. A
+// provider that does not quote ERC-1155 tokens must report one with a TokenID as
+// a failure, never answer for the contract at Address: the contract is not the
+// asset.
 type AssetID struct {
 	ChainID ChainID
 	Address common.Address
+	TokenID string
 }
 
 // PriceProvider is the only valuation dependency of the calculation kernel.
@@ -59,16 +65,21 @@ var chainPriceNames = map[ChainID]string{
 }
 
 func AssetForToken(token Token) AssetID {
-	return AssetID{ChainID: token.ChainID, Address: token.Address}
+	return AssetID{ChainID: token.ChainID, Address: token.Address, TokenID: token.TokenID}
 }
 
-// PriceKey is the stable key used by Response.Prices.
+// PriceKey is the stable key used by Response.Prices: chain and contract, then the token id for an
+// ERC-1155 token.
 func PriceKey(token Token) string {
-	return fmt.Sprintf(
+	key := fmt.Sprintf(
 		"%s:%s",
 		chainPriceNames[token.ChainID],
 		strings.ToLower(token.Address.Hex()),
 	)
+	if token.TokenID != "" {
+		key += ":" + token.TokenID
+	}
+	return key
 }
 
 // priceQuery is one provider call: the tokens valued at one instant. A zero At

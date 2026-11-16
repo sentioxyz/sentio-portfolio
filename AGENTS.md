@@ -179,6 +179,15 @@ Euler and Uniswap V2 indexes declare a start, V2's the creation block of the cha
 fork; the owner-token, account-request, mETH and Uniswap V3 and V4 indexes require a written
 checkpoint.
 
+An index whose processor writes no checkpoint row at all declares `sentioIndex.latest` instead
+(`indexLatestRow`): the newest row, at the query block, of an entity its processor writes as the
+chain advances, carried by every page in the checkpoint's place and validated by the same
+`checkIndexCheckpoint`. Choose an entity written every few blocks — a quiet one only makes a live
+read report a lag it does not have — and keep its query cheap, since every page repeats it. Such
+an index cannot probe: the probe certifies each chain with its checkpoint row. Polymarket's is the
+only one, certified by its newest deposit wallet, and declares its processor's start block for
+the days before the first wallet. Prefer a checkpoint row for a processor that can write one.
+
 ## Wallet holdings
 
 A host-injected `WalletBalanceProvider` is the only ERC-20 discovery source for
