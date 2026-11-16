@@ -40,6 +40,12 @@ func suiSQLProtocolKinds(protocol string) (suiSQLKinds, error) {
 			children: []string{"principal", "receiptState"},
 			values:   []string{"emode"},
 		}, nil
+	case "cetus":
+		// A position NFT is owned outright and names its pool. Its PositionInfo
+		// record and boundary ticks are dynamic fields of the pool's tables,
+		// reached through the derived IDs the processor writes into the
+		// position's links (cetusLinkedFields).
+		return suiSQLKinds{roots: []string{"position"}, direct: []string{"pool"}, children: []string{"positionInfo", "tick"}}, nil
 	}
 	return suiSQLKinds{}, fmt.Errorf("unsupported Sui processor protocol")
 }
@@ -195,6 +201,11 @@ func (r *suiHistoryIndex) portfolioSQL(owner SuiAddress, selection suiSQLSelecti
 			` AS payload FROM (SELECT * FROM "PortfolioValue" WHERE ` + suiSQLIDRange([]string{"emode"}, nil, upper) + ` AND ` + visible +
 			` AND account IN (SELECT account FROM accounts) ORDER BY checkpoint DESC LIMIT 1 BY kind,account,market)`
 	}
+	if r.protocolID == "cetus" {
+		// The linked IDs are exact object IDs, so this stage is a lookup in the
+		// object index like any other, with no scan of either kind's range.
+		latest("child_states", cetusLinkedIDs("roots"), kinds.children)
+	}
 	// The object output is one primary-key fetch over every stage's array. The
 	// stage CTEs stay for the protocols' set logic, but a union of them here was
 	// expanded again by each output branch, fetching every stage several times
@@ -202,7 +213,10 @@ func (r *suiHistoryIndex) portfolioSQL(owner SuiAddress, selection suiSQLSelecti
 	ctes = append(ctes, `objects AS (SELECT * FROM "PortfolioObjectState_raw" WHERE id IN (SELECT arrayJoin(arrayConcat(`+strings.Join(stageIDs, ",")+`))) AND `+visible+` ORDER BY id DESC,materializedAtCheckpoint DESC LIMIT 1 BY objectId)`)
 	// Token metadata is a few dozen rows per protocol. Reading all of it costs
 	// less than deriving the referenced coin types from another pass over objects.
-	ctes = append(ctes, `metadata AS (SELECT * FROM "PortfolioTokenMetadata" WHERE checkpoint <= (SELECT materializedAtCheckpoint FROM snapshot) AND materializedAtCheckpoint <= (SELECT materializedAtCheckpoint FROM snapshot) ORDER BY checkpoint DESC LIMIT 1 BY coinType)`)
+	// Cetus is the exception: anyone can open a pool, so its index holds tens of
+	// thousands of coins, past the row limit of a statement, and a read takes the
+	// coins of the pools it selected.
+	ctes = append(ctes, `metadata AS (SELECT * FROM "PortfolioTokenMetadata" WHERE checkpoint <= (SELECT materializedAtCheckpoint FROM snapshot) AND materializedAtCheckpoint <= (SELECT materializedAtCheckpoint FROM snapshot)`+suiSQLMetadataCoins(r.protocolID)+` ORDER BY checkpoint DESC LIMIT 1 BY coinType)`)
 	snapshotFields := []string{"id", "checkpoint", "timestampMs", "digest", "schemaVersion", "startCheckpoint", "materializedAtCheckpoint", "nextCheckpoint", "nextTimestampMs", "previousCheckpoint", "objectCount", "valueCount", "observedObjectCount", "observedValueCount"}
 	// Counts are computed only in this output branch. Putting these scans into
 	// snapshot's WHERE makes every dependency reuse expand the global scans again.
@@ -228,6 +242,28 @@ func (r *suiHistoryIndex) portfolioSQL(owner SuiAddress, selection suiSQLSelecti
 	}
 	return "WITH " + strings.Join(ctes, ",\n") + "\n" + strings.Join(branches, "\nUNION ALL\n"), nil
 }
+
+// cetusLinkedIDs is the set of linked object IDs of the positions a CTE or
+// alias holds. A missing field extracts as the empty string, which no object
+// ID matches.
+func cetusLinkedIDs(positions string) string {
+	fields := make([]string, 0, len(cetusLinkedFields))
+	for _, field := range cetusLinkedFields {
+		fields = append(fields, `JSONExtractString(links,`+sqlString(field)+`)`)
+	}
+	return `(SELECT arrayJoin([` + strings.Join(fields, ",") + `]) FROM ` + positions + `)`
+}
+
+// suiSQLMetadataCoins restricts a statement's token metadata to the coins of
+// the pools it selected, for the protocol whose index holds too many to read
+// whole. A pool's links carry its pair and its reward coins.
+func suiSQLMetadataCoins(protocol string) string {
+	if protocol != "cetus" {
+		return ""
+	}
+	return ` AND coinType IN (SELECT arrayJoin(JSONExtract(links,'coinTypes','Array(String)')) FROM direct_states WHERE kind='pool')`
+}
+
 func suiSQLObjectPayload() string {
 	return sqlPayload("id", "objectId", "kind", "version", "digest", "state", "ownerKind", "owner", "objectType", "content", "checkpoint", "timestampMs", "transactionDigest", "materializedAtCheckpoint", "parentId", "key", "relatedId", "links")
 }

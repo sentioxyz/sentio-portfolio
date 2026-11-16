@@ -83,7 +83,15 @@ func readSuiCLMMLatest(ctx context.Context, protocol string, owner SuiAddress, r
 	return result, nil
 }
 
-func loadSuiCLMM(ctx context.Context, owner SuiAddress, reader SuiObjectReader, pkg string) ([]suiCLMMPosition, map[string]suiCLMMPool, error) {
+// suiCLMMObjectSource is what loadSuiCLMM reads: a node at its head, or a completed sample of a
+// processor index. The loader never asks it for a checkpoint, so both answer for the state they
+// hold.
+type suiCLMMObjectSource interface {
+	OwnedObjects(context.Context, SuiAddress, string) ([]SuiObject, error)
+	Objects(context.Context, []string) (map[string]SuiObject, error)
+}
+
+func loadSuiCLMM(ctx context.Context, owner SuiAddress, reader suiCLMMObjectSource, pkg string) ([]suiCLMMPosition, map[string]suiCLMMPool, error) {
 	owned, err := reader.OwnedObjects(ctx, owner, pkg+"::position::Position")
 	if err != nil {
 		return nil, nil, err
@@ -322,7 +330,7 @@ func parseSuiCLMMAccrual(parser *suiCLMMParser, f suiFields, p *suiCLMMPosition,
 	}
 }
 func parseSuiCLMMPool(parser *suiCLMMParser, o SuiObject, f suiFields, pkg string) suiCLMMPool {
-	p := suiCLMMPool{object: o, price: parser.uint(f, "current_sqrt_price", 128), liquidity: parser.uint(f, "liquidity", 128), current: parser.tick(f, "current_tick_index")}
+	p := suiCLMMPool{object: o, price: parser.uint(f, "current_sqrt_price", 128), liquidity: parser.uint(f, "liquidity", 128), current: parser.currentTick(f, "current_tick_index")}
 	if parser.address(f, "id") != o.ID || p.price.Sign() == 0 {
 		parser.fail(fmt.Errorf("invalid CLMM pool identity or price"))
 	}
@@ -348,7 +356,7 @@ func parseSuiCLMMPool(parser *suiCLMMParser, o SuiObject, f suiFields, pkg strin
 	return p
 }
 
-func suiCLMMGroups(ctx context.Context, reader SuiReader, protocol string, positions []suiCLMMPosition, pools map[string]suiCLMMPool, head SuiCheckpoint) ([]SuiGroup, error) {
+func suiCLMMGroups(ctx context.Context, reader suiCoinMetadataReader, protocol string, positions []suiCLMMPosition, pools map[string]suiCLMMPool, head SuiCheckpoint) ([]SuiGroup, error) {
 	groups := []SuiGroup{}
 	coins := map[string]bool{}
 	for _, p := range positions {

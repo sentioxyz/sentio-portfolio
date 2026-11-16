@@ -229,13 +229,18 @@ func (r *suiHistoryIndex) rangeSQL(owner SuiAddress, from, to time.Time, limit i
 			` AS payload FROM (SELECT * FROM "PortfolioValue" WHERE (id >= 'emode:' AND id <= ` + bound("emode", "last_checkpoint") + `) AND materializedAtCheckpoint <= last_materialized` +
 			` AND account IN (SELECT account FROM accounts))`
 	}
+	if r.protocolID == "cetus" {
+		// Every root version of every sample names its linked objects, so the
+		// union over the range's roots covers each sample's own selection.
+		stage("child_states", cetusLinkedIDs("roots"), kinds.children)
+	}
 	all := `arrayConcat(` + strings.Join(versions, ",") + `)`
 	output = append(output,
 		`SELECT 'version' AS rowType,toJSONString(map('objectId',tupleElement(v,1),'kind',tupleElement(v,2),'stateId',tupleElement(v,3),'checkpoint',toString(tupleElement(v,4)))) AS payload FROM (SELECT arrayJoin(`+all+`) AS v)`,
 		// Every visibility variant of a selected version: which one a sample reads
 		// depends on that sample's materialization bound.
 		`SELECT 'object' AS rowType,`+sqlPayload(suiSQLObjectFieldsWithoutContent()...)+` AS payload,toString(content) AS objectContent FROM (SELECT * FROM "PortfolioObjectState_raw" WHERE id IN (SELECT arrayJoin(arrayMap(v -> tupleElement(v, 3), `+all+`))) AND materializedAtCheckpoint <= last_materialized ORDER BY id, materializedAtCheckpoint LIMIT 1 BY id, materializedAtCheckpoint)`,
-		`SELECT 'metadata' AS rowType,`+sqlPayload("coinType", "decimals", "symbol", "name", "checkpoint", "materializedAtCheckpoint", "status")+` AS payload FROM (SELECT * FROM "PortfolioTokenMetadata" WHERE checkpoint <= last_materialized AND materializedAtCheckpoint <= last_materialized)`,
+		`SELECT 'metadata' AS rowType,`+sqlPayload("coinType", "decimals", "symbol", "name", "checkpoint", "materializedAtCheckpoint", "status")+` AS payload FROM (SELECT * FROM "PortfolioTokenMetadata" WHERE checkpoint <= last_materialized AND materializedAtCheckpoint <= last_materialized`+suiSQLMetadataCoins(r.protocolID)+`)`,
 	)
 	if valueBranch != "" {
 		output = append(output, valueBranch)
@@ -609,6 +614,17 @@ func (v *suiSQLRangeView) sample(protocol string, owner SuiAddress, snapshot sui
 		keep(v.latest(children, kinds.children, checkpoint, materialized))
 		values = v.sampleValues(accounts, checkpoint, materialized)
 	}
+	if protocol == "cetus" {
+		linked := map[string]bool{}
+		for _, row := range roots {
+			for _, field := range cetusLinkedFields {
+				if id := jsonString(row.Links, field); id != "" {
+					linked[id] = true
+				}
+			}
+		}
+		keep(v.latest(linked, kinds.children, checkpoint, materialized))
+	}
 	// The object output keeps, per object, the newest selected version.
 	result := suiSQLResult{snapshots: []suiSQLSnapshot{snapshot}, values: values}
 	for _, rows := range selected {
@@ -622,6 +638,22 @@ func (v *suiSQLRangeView) sample(protocol string, owner SuiAddress, snapshot sui
 	}
 	sort.Slice(result.objects, func(i, j int) bool { return result.objects[i].ObjectID < result.objects[j].ObjectID })
 	result.metadata = v.sampleMetadata(materialized)
+	if protocol == "cetus" {
+		// portfolioSQL reads only the coins of the pools it selected
+		// (suiSQLMetadataCoins); the range read the coins of every sample's.
+		coins := map[string]bool{}
+		for _, row := range directStates {
+			var links struct {
+				CoinTypes []string `json:"coinTypes"`
+			}
+			if row.Kind == "pool" && json.Unmarshal([]byte(row.Links), &links) == nil {
+				for _, coin := range links.CoinTypes {
+					coins[coin] = true
+				}
+			}
+		}
+		result.metadata = slices.DeleteFunc(result.metadata, func(m suiSQLMetadata) bool { return !coins[m.CoinType] })
+	}
 	return result, nil
 }
 

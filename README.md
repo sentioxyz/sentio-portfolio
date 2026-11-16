@@ -112,9 +112,9 @@ is never replaced by another, because each answers for a different checkpoint:
 | Protocol | Latest | Pinned |
 | --- | --- | --- |
 | `wallet` | node holdings | wallet history, at the protocol samples' checkpoint |
-| `navi` | node object state | processor index |
+| `navi`, `cetus` | node object state | processor index |
 | `suilend` | processor index: the newest completed sample, at most 2h1m old | processor index |
-| `volo-vaults`, `cetus`, `bluefin` | node object state | not read |
+| `volo-vaults`, `bluefin` | node object state | not read |
 
 A pinned scan never reads node state: a latest-only protocol reports that it was not read rather
 than answering for the head under the pin's name, and the only node request a pinned scan may make
@@ -180,6 +180,14 @@ Coin metadata and USD valuation follow the same path as the other Sui protocols.
 Each NFT remains a separate group, with principal, fees and rewards identified in
 component metadata. This surface covers directly held CLMM positions; farm/strategy
 wrappers, Cetus vault shares and Bluefin perpetual accounts are not enumerated.
+A pool swapped to its minimum price has current tick `MIN_TICK - 1`, one below any
+tick a position can name, and is read there.
+
+Cetus's past comes from its processor index (`SentioIndexers["cetus"]`), sampled daily
+from publication and hourly from a fixed instant, like NAVI and Suilend. A sample holds
+each position NFT, its pool, and the `PositionInfo` record and boundary ticks the
+position links to, and the same calculation runs over it with the sample's timestamp
+as the time rewards accrue to.
 The accounting layouts follow the [Cetus SDK](https://github.com/CetusProtocol/cetus-clmm-sui-sdk)
 and [Bluefin contract interfaces](https://github.com/fireflyprotocol/bluefin-spot-contract-interface).
 
@@ -229,7 +237,7 @@ Latest reads report the heads observed before and after reading
 to nodes at different heights. Regressing heads do not discard positions or
 trigger synchronization retries; the original observations are preserved. They
 do not bound the object versions read or describe an atomic portfolio at one
-checkpoint. Volo, Cetus and Bluefin have no history, so a pinned scan reports them unread;
+checkpoint. Volo and Bluefin have no history, so a pinned scan reports them unread;
 preserve this metadata when combining snapshots.
 
 Lending projects reserve interest indices forward to the observed timestamp using

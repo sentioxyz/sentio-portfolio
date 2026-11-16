@@ -75,6 +75,7 @@ type suiNodeSource interface {
 var suiIndexes = map[string]func(SentioIndexerConfig) (*suiHistoryIndex, error){
 	"suilend": newSuilendIndex,
 	"navi":    newNaviIndex,
+	"cetus":   newCetusIndex,
 }
 
 // NewSuiEngine builds the Sui engine on engine's indexer lane and observer, reading each indexed
@@ -139,15 +140,16 @@ type suiRoute struct {
 }
 
 // suiRoutes is every Sui protocol, in the order every response lists them. Suilend has no node
-// path, so even its latest state is the newest completed sample. NAVI reads its head from the
-// node, which is fresher than its newest sample, and its past from its index. The wallet's past
-// comes from wallet history, read at the checkpoint the protocol samples beside it answer for.
+// path, so even its latest state is the newest completed sample. NAVI and Cetus read their head
+// from the node, which is fresher than their newest sample, and their past from their indexes.
+// The wallet's past comes from wallet history, read at the checkpoint the protocol samples beside
+// it answer for.
 var suiRoutes = []suiRoute{
 	{id: "wallet", name: "Wallet", latest: suiFromNode, pinned: suiFromWalletHistory},
 	{id: "navi", name: "NAVI", latest: suiFromNode, pinned: suiFromIndex},
 	{id: "volo-vaults", name: "Volo Vaults", latest: suiFromNode, pinned: suiUnread},
 	{id: "suilend", name: "Suilend", latest: suiFromIndex, pinned: suiFromIndex},
-	{id: "cetus", name: "Cetus", latest: suiFromNode, pinned: suiUnread},
+	{id: "cetus", name: "Cetus", latest: suiFromNode, pinned: suiFromIndex},
 	{id: "bluefin", name: "Bluefin", latest: suiFromNode, pinned: suiUnread},
 }
 

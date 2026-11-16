@@ -238,6 +238,59 @@ func naviHistoryFixture(owner, other, account string) *suiSQLHistoryFixture {
 	return f
 }
 
+func cetusHistoryFixture(owner, other string) *suiSQLHistoryFixture {
+	f := &suiSQLHistoryFixture{checkpoints: []int{10, 20, 30, 40, 50}}
+	links := func(info, lower, upper string) string {
+		return `{"positionInfoId":"` + naviAddress(info) + `","lowerTickId":"` + naviAddress(lower) + `","upperTickId":"` + naviAddress(upper) + `"}`
+	}
+	// A position transferred away and back, one the owner closes between
+	// samples, and another wallet's position sharing a boundary tick.
+	f.object("0x11", "position", 5, 1, "live", owner, naviAddress("0x21"), "", "", links("0x31", "0x41", "0x42"), 0)
+	f.object("0x11", "position", 24, 2, "live", other, naviAddress("0x21"), "", "", links("0x31", "0x41", "0x42"), 0)
+	f.object("0x11", "position", 43, 3, "live", owner, naviAddress("0x21"), "", "", links("0x31", "0x41", "0x42"), 0)
+	f.object("0x12", "position", 15, 1, "live", owner, naviAddress("0x22"), "", "", links("0x32", "0x43", "0x44"), 0)
+	f.object("0x12", "position", 35, 2, "deleted", "", "", "", "", "{}", 0)
+	f.object("0x13", "position", 8, 1, "live", other, naviAddress("0x21"), "", "", links("0x33", "0x41", "0x45"), 0)
+	ab, bc := `{"coinTypes":["0xc::a::A","0xc::b::B"]}`, `{"coinTypes":["0xc::b::B","0xc::c::C"]}`
+	for i, cp := range []int{2, 18, 33, 47} {
+		f.object("0x21", "pool", cp, i+1, "live", "", "", "", "", ab, 0)
+	}
+	for i, cp := range []int{12, 29} {
+		f.object("0x22", "pool", cp, i+1, "live", "", "", "", "", bc, 0)
+	}
+	// PositionInfo records and ticks live under the pools' tables; only the
+	// positions' links lead to them.
+	for i, cp := range []int{5, 16, 27, 44} {
+		f.object("0x31", "positionInfo", cp, i+1, "live", "", "", naviAddress("0x91"), naviAddress("0x11"), "{}", 0)
+	}
+	f.object("0x32", "positionInfo", 15, 1, "live", "", "", naviAddress("0x92"), naviAddress("0x12"), "{}", 0)
+	f.object("0x32", "positionInfo", 35, 2, "deleted", "", "", "", "", "{}", 0)
+	f.object("0x33", "positionInfo", 8, 1, "live", "", "", naviAddress("0x91"), naviAddress("0x13"), "{}", 0)
+	for i, cp := range []int{5, 21, 38} {
+		f.object("0x41", "tick", cp, i+1, "live", "", "", naviAddress("0x81"), "-100", "{}", 0)
+	}
+	f.object("0x42", "tick", 5, 1, "live", "", "", naviAddress("0x81"), "100", "{}", 0)
+	f.object("0x42", "tick", 31, 2, "deleted", "", "", "", "", "{}", 0)
+	f.object("0x43", "tick", 15, 1, "live", "", "", naviAddress("0x82"), "-60", "{}", 0)
+	f.object("0x44", "tick", 15, 1, "live", "", "", naviAddress("0x82"), "60", "{}", 0)
+	f.object("0x45", "tick", 8, 1, "live", "", "", naviAddress("0x81"), "200", "{}", 0)
+	// A tick version visible only after its sample's bound, and a replayed pool.
+	f.object("0x41", "tick", 37, 9, "live", "", "", naviAddress("0x81"), "-100", "{}", 55)
+	replay := f.object("0x21", "pool", 20, 30, "live", "", "", "", "", ab, 0)
+	late := map[string]string{}
+	for k, v := range replay {
+		late[k] = v
+	}
+	late["materializedAtCheckpoint"] = "45"
+	f.objects = append(f.objects, replay, late)
+	// Metadata of a coin no selected pool holds stays out of every read.
+	f.coin("0xc::a::A", 3, 4, "A")
+	f.coin("0xc::b::B", 13, 14, "B")
+	f.coin("0xc::c::C", 26, 27, "C")
+	f.coin("0xc::d::D", 2, 3, "D")
+	return f
+}
+
 // Opt in with PORTFOLIO_CLICKHOUSE_BINARY. Every sample a range statement returns
 // must be exactly what portfolioSQL returns for it: the same certificate and
 // counts, the same objects at the same versions and visibility, the same metadata
@@ -257,6 +310,7 @@ func TestSuiSQLRangeMatchesPointStatements(t *testing.T) {
 	}{
 		{"suilend", suilendHistoryFixture(owner.Hex(), other.Hex())},
 		{"navi", naviHistoryFixture(owner.Hex(), other.Hex(), account.Hex())},
+		{"cetus", cetusHistoryFixture(owner.Hex(), other.Hex())},
 	} {
 		t.Run(tc.protocol, func(t *testing.T) {
 			setup := tc.fixture.setup()

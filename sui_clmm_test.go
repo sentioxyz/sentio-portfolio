@@ -3,6 +3,7 @@ package portfolio
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"slices"
@@ -420,6 +421,85 @@ func TestSuiCLMMKeepsSeparateNFTsInOnePool(t *testing.T) {
 				g := got.Groups[i]
 				if g.ID != protocol+":"+id || len(g.Components) != 5 || g.Components[0].AmountRaw != "50" {
 					t.Fatalf("position %d: %+v", i, g)
+				}
+			}
+		})
+	}
+}
+
+// A swap that drains a pool to the minimum price leaves its current tick at MIN_TICK - 1, one
+// below any tick a position can name. The pool stays readable there: a position below its range
+// holds only token A, and fees and rewards inside its range stop growing.
+func TestSuiCLMMPoolAtMinimumPriceIsReadable(t *testing.T) {
+	for _, protocol := range []string{"cetus", "bluefin"} {
+		t.Run(protocol, func(t *testing.T) {
+			f, owner := clmmFixture(protocol)
+			mutate := func(id string, change func(map[string]any)) {
+				object := f.objects[id]
+				var fields map[string]any
+				_ = json.Unmarshal([]byte(object.Content), &fields)
+				change(fields)
+				content, _ := json.Marshal(fields)
+				object.Content = string(content)
+				f.objects[id] = object
+			}
+			// Below the range, growth inside is the lower tick's outside growth less
+			// the upper tick's, so the fixture's in-range snapshots would run
+			// backwards: start them at zero and keep the upper tick below the lower.
+			pkg := cetusCLMMPackage
+			if protocol == "bluefin" {
+				pkg = bluefinCLMMPackage
+			}
+			upperID, _, _, _ := suiCLMMTickKey(naviAddress("0x23"), 100, pkg)
+			mutate(upperID, func(fields map[string]any) {
+				value := fields["value"].(map[string]any)
+				if protocol == "cetus" {
+					value = value["value"].(map[string]any)
+				}
+				value["fee_growth_outside_b"] = "0"
+			})
+			if protocol == "cetus" {
+				address, _ := ParseSuiAddress(naviAddress("0x22"))
+				info, _ := suiCLMMFieldID(naviAddress("0x24"), "0x2::object::ID", address[:])
+				mutate(info, func(fields map[string]any) {
+					value := fields["value"].(map[string]any)["value"].(map[string]any)
+					value["fee_growth_inside_a"], value["fee_growth_inside_b"] = "0", "0"
+					value["rewards"].([]any)[0].(map[string]any)["growth_inside"] = "0"
+				})
+			} else {
+				mutate(naviAddress("0x22"), func(fields map[string]any) {
+					fields["fee_growth_coin_a"], fields["fee_growth_coin_b"] = "0", "0"
+					fields["reward_infos"].([]any)[0].(map[string]any)["reward_growth_inside_last"] = "0"
+				})
+			}
+			pool := f.objects[naviAddress("0x21")]
+			var fields map[string]any
+			_ = json.Unmarshal([]byte(pool.Content), &fields)
+			fields["current_tick_index"] = clmmTickBits(-443637)
+			fields["current_sqrt_price"] = "4295048016"
+			content, _ := json.Marshal(fields)
+			pool.Content = string(content)
+			f.objects[pool.ID] = pool
+			got, err := newSuiNodeProtocols().ReadLatest(context.Background(), protocol, owner, f)
+			if err != nil || len(got.Errors) != 0 || len(got.Groups) != 1 {
+				t.Fatalf("read %+v %v", got, err)
+			}
+			g := got.Groups[0]
+			if g.Metadata["currentTick"] != int32(-443637) {
+				t.Fatalf("current tick %v", g.Metadata["currentTick"])
+			}
+			for _, c := range g.Components {
+				if c.Kind == "asset" && c.Coin.CoinType != suiLongType {
+					t.Fatalf("a position below its range holds token B: %+v", g.Components)
+				}
+			}
+			for _, tick := range []int32{-443638, 443637} {
+				fields["current_tick_index"] = clmmTickBits(tick)
+				content, _ = json.Marshal(fields)
+				pool.Content = string(content)
+				f.objects[pool.ID] = pool
+				if got, err := newSuiNodeProtocols().ReadLatest(context.Background(), protocol, owner, f); err == nil && len(got.Errors) == 0 {
+					t.Fatalf("current tick %d was accepted", tick)
 				}
 			}
 		})
