@@ -250,6 +250,9 @@ var protocolAvailabilityByID = map[string]chainAvailability{
 		Avalanche: {availableFrom(56_195_389)},
 		Optimism:  {availableFrom(130_947_685)},
 	},
+	"polymarket": {
+		Polygon: {availableFrom(polymarketIndexStart)},
+	},
 	"wallet": {
 		Ethereum:  {availableFromGenesis()},
 		BSC:       {availableFromGenesis()},

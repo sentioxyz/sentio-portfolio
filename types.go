@@ -53,6 +53,11 @@ type Token struct {
 	Address  common.Address `json:"address"`
 	Symbol   string         `json:"symbol"`
 	Decimals uint8          `json:"decimals"`
+	// TokenID is the decimal id of an ERC-1155 token within the contract at Address, and empty for
+	// an ERC-20 or a native coin. One ERC-1155 contract holds many assets with prices of their own
+	// (every outcome of every prediction market shares one contract), so the id is part of what
+	// the token is: it keys the token's quote (AssetID, PriceKey) together with the contract.
+	TokenID string `json:"tokenId,omitempty"`
 }
 
 type Source struct {

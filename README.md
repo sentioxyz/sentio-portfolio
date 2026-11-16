@@ -89,6 +89,24 @@ share of each reserve as `balanceOf × reserve / totalSupply`, every term read a
 the pin and kept exact as a numerator over the supply. Only LP tokens the
 account holds directly are covered: LP staked in a farm or gauge is not.
 
+Polymarket (`polymarket`, Polygon) reports the outcome shares a Polymarket wallet
+holds — the address polymarket.com shows on a profile, not the key that signs for
+it. Every outcome is an ERC-1155 token of the Conditional Tokens contract, so a
+share is reported as a `Token` with a `tokenId`, one group per token held. Its
+index (`SentioIndexers["polymarket"]`) names the tokens a wallet has moved since
+the index's start block; the amount is `balanceOf` at the pin, and the condition
+and outcome the index gives a token are checked against the token's id. A token
+held since before the start block and not moved since is not read, and neither is
+a holding of a tenth of a share or less, Polymarket's own dust floor. A market that
+had resolved at the pin values its share at the payout through USDC.e; a share
+that pays nothing is not reported. An open market's share is quoted by its own
+`tokenId`, so the host's `PriceProvider` must quote ERC-1155 tokens to value it —
+the order book midpoint is the price Polymarket and DeBank show — and report them
+as failures otherwise. A book missing a side has no midpoint, and an outcome no
+market lists at all (the unnamed placeholders a neg-risk conversion mints beside
+every listed outcome) has no book: the wallet holds such a share, and it is
+reported unpriced rather than valued at a guess.
+
 Historical scans use a fail-closed availability registry in
 `protocol_availability.go`. Every adapter must declare an explicit outer window
 for every advertised chain before the engine can start; genesis support is

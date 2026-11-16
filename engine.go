@@ -189,6 +189,7 @@ func NewEngineWithConfig(
 		config.sentioIndexer("uniswap-v3"),
 		config.sentioIndexer("uniswap-v4"),
 	)...)
+	adapters = append(adapters, newPolymarketAdapter(config.sentioIndexer("polymarket")))
 	adapters = append(adapters, newWalletAdapter())
 	registrations := mustRegisterAdapters(adapters, protocolAvailabilityByID)
 	disabledChains := make(map[ChainID]struct{}, len(config.DisabledChains))

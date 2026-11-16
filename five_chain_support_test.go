@@ -56,6 +56,7 @@ func TestFiveChainAdapterMatrix(t *testing.T) {
 		"pendle":        {Monad, Plasma, Optimism},
 		"sonne":         {Optimism},
 		"spark":         {Avalanche, Optimism},
+		"polymarket":    {Polygon},
 		"stader":        {Polygon},
 		"uniswap-v3":    {Polygon, Monad, Plasma, Avalanche, Optimism},
 		"uniswap-v4":    {Polygon, Monad, Avalanche, Optimism},
@@ -65,7 +66,7 @@ func TestFiveChainAdapterMatrix(t *testing.T) {
 		"yearn-v3":      {Polygon},
 	}
 	protocols := NewEngine(nil, nil).Protocols()
-	if got, expected := len(protocols), 49; got != expected {
+	if got, expected := len(protocols), 50; got != expected {
 		t.Fatalf("protocol count = %d, want %d", got, expected)
 	}
 	for _, protocol := range protocols {
