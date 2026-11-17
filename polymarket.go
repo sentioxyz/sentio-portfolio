@@ -111,7 +111,7 @@ func polymarketCalls(ctx context.Context, client *RPCClient, block BlockRef, cal
 			rows, err := client.ParallelCalls(callCtx, block, calls[start:end])
 			if err != nil {
 				once.Do(func() {
-					first = fmt.Errorf("calls %d-%d: %w", start, end-1, err)
+					first = fmt.Errorf("batch from call %d: %w", start, err)
 					cancel()
 				})
 				return

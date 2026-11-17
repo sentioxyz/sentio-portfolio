@@ -128,6 +128,12 @@ func retryableRPCError(err error) bool {
 		if code == -32005 || code == -32009 {
 			return true
 		}
+		// A node that ran out of time on a call answers the next attempt like any other: a
+		// provider under load times out a batch element ("read timeout", "request timed out",
+		// "execution aborted (timeout = 5s)") that succeeds when asked again.
+		if message := strings.ToLower(rpcError.Error()); strings.Contains(message, "timeout") || strings.Contains(message, "timed out") {
+			return true
+		}
 		if code == -32000 {
 			message := strings.ToLower(rpcError.Error())
 			return strings.Contains(message, "header not found") ||
