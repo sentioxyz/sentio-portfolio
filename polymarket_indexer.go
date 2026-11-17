@@ -16,13 +16,15 @@ import (
 //
 // A Position row stays after its position closes. It carries the net of every transfer of the
 // token in and out of the wallet since the index's start (balance), and, from the first transfer
-// out, the wallet's balance just before the start (seedBalance); their sum is the wallet's balance.
-// Only a row whose sum is above the dust floor names a token to read: the server selects those with
-// no balance before the start by their net alone, and the adapter drops the rest of a sum at or
-// below the floor. Market making leaves an active wallet tens of thousands of positions closed to
-// a remainder, which cost nothing this way. That trusts the index to have summed each transfer, as
-// reading every row trusts it to have seen each one; the amount is still the contract's balance at
-// the pin.
+// out (seeded), the wallet's balance just before the start (seedBalance); once seeded, their sum
+// is the wallet's balance. Before its first transfer out a row's balance before the start is not
+// known, so the row names a token to read whatever its net: shares held before the start and
+// topped up by a remainder since are still held. A seeded row names one only when its sum is
+// above the dust floor. The server selects the rows that can (a net above the floor, a balance
+// before the start, or no transfer out yet) and the adapter drops the seeded rest. Market making
+// leaves an active wallet tens of thousands of positions closed to a remainder, which cost nothing
+// this way. That trusts the index to have summed each transfer, as reading every row trusts it to
+// have seen each one; the amount is still the contract's balance at the pin.
 //
 // Its processor writes no IndexerCheckpoint. Deposit wallets are created every few blocks, and
 // the processor writes a Wallet row for each at its block, so the newest Wallet row certifies a
@@ -54,10 +56,11 @@ type polymarketPositionRow struct {
 	TokenID     string `json:"tokenId"`
 	Balance     string `json:"balance"`
 	SeedBalance string `json:"seedBalance"`
+	Seeded      bool   `json:"seeded"`
 }
 
-// polymarketCandidate is a token a Position row names, and whether the row's balance is above the
-// dust floor.
+// polymarketCandidate is a token a Position row names, and whether the wallet may hold more than
+// the dust floor of it.
 type polymarketCandidate struct {
 	id   *big.Int
 	held bool
@@ -98,10 +101,13 @@ func polymarketPositionStream(account common.Address, lead string) *indexStream[
 		Where: func(ChainID) indexWhere {
 			return indexWhere{Prefix: prefix + lead, Terms: []indexTerm{
 				{"wallet", strings.ToLower(account.Hex())},
-				// A closed position keeps its row. A row with no balance before the start holds its
-				// net since, so only one above the dust floor can hold a share worth reading; a row
-				// with a balance before the start is selected, and its sum decides.
-				{"or", indexAnyOf{{"balance_gt", strconv.Itoa(polymarketDustUnits)}, {"seedBalance_not", "0"}}},
+				// A closed position keeps its row. A seeded row with no balance before the start
+				// holds its net since, so only one above the dust floor can hold a share worth
+				// reading; a row with a balance before the start is selected, and its sum decides; a
+				// row not yet seeded may hold shares from before the start, so it is selected too.
+				{"or", indexAnyOf{
+					{"balance_gt", strconv.Itoa(polymarketDustUnits)}, {"seedBalance_not", "0"}, {"seeded", false},
+				}},
 			}}
 		},
 		Decode: func(_ ChainID, id string, row polymarketPositionRow) (polymarketCandidate, error) {
@@ -111,7 +117,8 @@ func polymarketPositionStream(account common.Address, lead string) *indexStream[
 			if !ok || !balanceOK || !seedOK || row.Wallet != strings.ToLower(account.Hex()) || id != prefix+row.TokenID {
 				return polymarketCandidate{}, fmt.Errorf("GraphQL returned malformed Polymarket position row %q", id)
 			}
-			return polymarketCandidate{id: tokenID, held: new(big.Int).Add(balance, seed).Cmp(dust) > 0}, nil
+			held := !row.Seeded || new(big.Int).Add(balance, seed).Cmp(dust) > 0
+			return polymarketCandidate{id: tokenID, held: held}, nil
 		},
 	}
 }
