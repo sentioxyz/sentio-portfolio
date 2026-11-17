@@ -118,8 +118,8 @@ type indexWhere struct {
 	Terms []indexTerm
 }
 
-// indexTerm is one field of a where clause. Value is an int, a uint64, a string, a []string or an
-// indexAnyOf, rendered as a literal: every value is one the kernel produced.
+// indexTerm is one field of a where clause. Value is an int, a uint64, a bool, a string, a
+// []string or an indexAnyOf, rendered as a literal: every value is one the kernel produced.
 type indexTerm struct {
 	Field string
 	Value any
@@ -687,7 +687,7 @@ func indexLiteral(value any) string {
 			items = append(items, indexLiteral(item))
 		}
 		return "[" + strings.Join(items, ", ") + "]"
-	case int, int64, uint64:
+	case int, int64, uint64, bool:
 		return fmt.Sprint(value)
 	case indexAnyOf:
 		items := make([]string, 0, len(value))

@@ -621,6 +621,8 @@ func (s *polymarketIndexServer) ServeHTTP(writer http.ResponseWriter, request *h
 			for key, value := range row {
 				converted[key] = value
 			}
+			// The index writes seeded as a boolean, false until the wallet's first transfer out.
+			converted["seeded"] = row["seeded"] == "true"
 			all = append(all, converted)
 		}
 	} else {
@@ -713,7 +715,7 @@ func TestPolymarketIndexIsCertifiedByItsNewestWallet(t *testing.T) {
 			"indexerCheckpoints: wallets(first: 1, orderBy: createdBlock, orderDirection: desc, block: { number: 97000000 })",
 			"blockNumber: createdBlock timestampSeconds: createdAt",
 			`id_starts_with: "` + wallet + `-`,
-			`or: [{ balance_gt: "100000" }, { seedBalance_not: "0" }]`,
+			`or: [{ balance_gt: "100000" }, { seedBalance_not: "0" }, { seeded: false }]`,
 		} {
 			if !strings.Contains(query, want) {
 				t.Errorf("page query lacks %q:\n%s", want, query)
@@ -820,24 +822,31 @@ func TestPolymarketIndexReadsAWalletInAStreamPerLeadingDigit(t *testing.T) {
 	}
 }
 
-// A row names a token to read only when its balance, the wallet's before the start and its net
-// since, is above the dust floor: market making leaves tens of thousands of positions closed to a
-// remainder. The server selects rows with no balance before the start by their net alone.
+// A seeded row names a token to read only when its balance, the wallet's before the start and its
+// net since, is above the dust floor: market making leaves tens of thousands of positions closed to
+// a remainder. A row not yet seeded is read whatever its net, since its balance before the start
+// is unknown.
 func TestPolymarketIndexReadsOnlyRowsAboveTheDustFloor(t *testing.T) {
 	account := common.HexToAddress("0x00000000000000000000000000000000000000Aa")
 	wallet := strings.ToLower(account.Hex())
-	row := func(id, balance, seed string) map[string]string {
-		return map[string]string{"id": wallet + "-" + id, "wallet": wallet, "tokenId": id, "balance": balance, "seedBalance": seed}
+	row := func(id, balance, seed string, seeded bool) map[string]string {
+		return map[string]string{
+			"id": wallet + "-" + id, "wallet": wallet, "tokenId": id, "balance": balance, "seedBalance": seed,
+			"seeded": strconv.FormatBool(seeded),
+		}
 	}
 	server := &polymarketIndexServer{
 		processed: 97_000_000, walletBlock: 97_000_000, walletTime: 1_794_000_000,
 		rows: []map[string]string{
-			row("11", "2000000", "0"),        // bought since the start
-			row("22", "100000", "0"),         // a remainder of a tenth of a share
-			row("33", "-5000000", "5000000"), // held before the start, sold since
-			row("44", "-1000000", "3000000"), // held before the start, partly sold
-			row("55", "-4900000", "5000000"), // held before the start, sold to a remainder
-			row("66", "0", "7000000"),        // held before the start, untouched in net
+			row("11", "2000000", "0", false),       // bought since the start, never sold
+			row("22", "100000", "0", true),         // bought and sold since the start to a remainder
+			row("33", "-5000000", "5000000", true), // held before the start, sold since
+			row("44", "-1000000", "3000000", true), // held before the start, partly sold
+			row("55", "-4900000", "5000000", true), // held before the start, sold to a remainder
+			row("66", "0", "7000000", true),        // held before the start, untouched in net
+			// Never moved out, so its balance before the start is unknown: shares held before the
+			// start and topped up by a remainder since are still held.
+			row("77", "10000", "0", false),
 		},
 	}
 	read, err := polymarketTestIndexer(t, server).TokenIDs(t.Context(), nil, BlockRef{ChainID: Polygon, Number: 97_000_000, Timestamp: 1_794_000_000}, account)
@@ -848,8 +857,13 @@ func TestPolymarketIndexReadsOnlyRowsAboveTheDustFloor(t *testing.T) {
 	for index, id := range read.TokenIDs {
 		got[index] = id.String()
 	}
-	if strings.Join(got, ",") != "11,44,66" {
-		t.Fatalf("token ids = %v, want 11, 44 and 66", got)
+	if strings.Join(got, ",") != "11,44,66,77" {
+		t.Fatalf("token ids = %v, want 11, 44, 66 and 77", got)
+	}
+	for _, query := range server.queriesOf("positions") {
+		if !strings.Contains(query, `or: [{ balance_gt: "100000" }, { seedBalance_not: "0" }, { seeded: false }]`) {
+			t.Fatalf("page does not select the rows not yet seeded:\n%s", query)
+		}
 	}
 }
 

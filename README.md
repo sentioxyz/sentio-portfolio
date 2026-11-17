@@ -95,8 +95,8 @@ it. Every outcome is an ERC-1155 token of the Conditional Tokens contract, so a
 share is reported as a `Token` with a `tokenId`, one group per token held. Its
 index (`SentioIndexers["polymarket"]`) names the tokens a wallet has moved since
 the index's start block, with the wallet's balance of each by the index's own
-sums; only a token whose balance there is above a tenth of a share, Polymarket's
-own dust floor, is read. The amount is `balanceOf` at the pin, and the condition
+sums once the wallet has moved the token out; a token whose balance there is a
+tenth of a share or less, Polymarket's own dust floor, is not read. The amount is `balanceOf` at the pin, and the condition
 and outcome the index gives a token are checked against the token's id. A token
 held since before the start block and not moved since is not read, and neither is
 a holding at or below the dust floor. A market that
