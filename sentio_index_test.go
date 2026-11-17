@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 )
@@ -27,7 +28,7 @@ var indexTestAccount = common.HexToAddress("0x0000000000000000000000000000000000
 
 // fakeIndex is an index server holding entity rows, answering the processor status read and the
 // time-travel queries the indexed read module renders. Rows are served by id order under the
-// stream's id_starts_with and id_gt, a page at most first long.
+// stream's id_starts_with, id_gte and id_gt, a page at most first long.
 type fakeIndex struct {
 	t         *testing.T
 	processed uint64
@@ -98,13 +99,17 @@ func (f *fakeIndex) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 		if found := fakeWhereString("id_starts_with").FindStringSubmatch(where); found != nil {
 			prefix = found[1]
 		}
+		from := ""
 		if found := fakeWhereString("id_gt").FindStringSubmatch(where); found != nil {
 			after = found[1]
+		}
+		if found := fakeWhereString("id_gte").FindStringSubmatch(where); found != nil {
+			from = found[1]
 		}
 		rows := make([]map[string]any, 0)
 		for _, row := range f.sortedRows(entity) {
 			id := row["id"].(string)
-			if strings.HasPrefix(id, prefix) && id > after && len(rows) < first {
+			if strings.HasPrefix(id, prefix) && id > after && id >= from && len(rows) < first {
 				rows = append(rows, row)
 			}
 		}
@@ -509,7 +514,7 @@ func TestIndexReadSkipsAChainProvenEmpty(t *testing.T) {
 		}
 	}
 	if !strings.Contains(probeWhere, "id_starts_with") ||
-		pageWhere != probeWhere+`, id_gt: "`+indexTestPrefix(Base)+`"` {
+		pageWhere != probeWhere+`, id_gte: "`+indexTestPrefix(Base)+`"` {
 		t.Fatalf("probe where %q is not the page's %q without its cursor", probeWhere, pageWhere)
 	}
 
@@ -638,5 +643,124 @@ func TestIndexReadRefusesAnIllDeclaredStream(t *testing.T) {
 	if _, err := index.read(context.Background(), nil, indexTestPin(Ethereum), twice...); err == nil ||
 		!strings.Contains(err.Error(), "testRefs twice") {
 		t.Fatalf("error = %v, want an entity read twice refused", err)
+	}
+}
+
+// indexTestSplitStream reads the test account's rows on Ethereum whose id continues the account's
+// prefix with lead, in pages of pageSize.
+func indexTestSplitStream(lead string, pageSize int) *indexStream[indexTestRow, string] {
+	stream := indexTestStream("testRefs", 4_096)
+	stream.PageSize = pageSize
+	stream.Where = func(chainID ChainID) indexWhere {
+		return indexWhere{Prefix: indexTestPrefix(chainID) + lead, Terms: []indexTerm{
+			{"chainId", int(chainID)},
+			{"account", strings.ToLower(indexTestAccount.Hex())},
+		}}
+	}
+	return stream
+}
+
+// overlapping wraps an index server and records how many of its GraphQL requests were in flight at
+// once, holding each for a moment so that requests sent together overlap.
+type overlapping struct {
+	next             http.Handler
+	inFlight, widest atomic.Int64
+}
+
+func (o *overlapping) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	if request.Method == http.MethodPost {
+		now := o.inFlight.Add(1)
+		defer o.inFlight.Add(-1)
+		for {
+			widest := o.widest.Load()
+			if now <= widest || o.widest.CompareAndSwap(widest, now) {
+				break
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	o.next.ServeHTTP(writer, request)
+}
+
+// A concurrent index pages each stream in requests of its own, all at once: the server answers the
+// fields of one request one after another. Its streams may read one entity, each under its own
+// prefix and page size, and every page still carries the one checkpoint.
+func TestConcurrentIndexReadPagesEachStreamAlone(t *testing.T) {
+	fake := newFakeIndex(t, indexTestBlock)
+	fake.indexTestRows("testRefs", Ethereum, 20)
+	index := fake.serve("test")
+	wrapper := &overlapping{next: fake}
+	server := httptest.NewServer(wrapper)
+	t.Cleanup(server.Close)
+	index.config.GraphQLURL, index.config.StatusURL = server.URL+"/graphql", server.URL+"/status"
+	index.api.httpClient = server.Client()
+	index.concurrent = true
+	// The rows' ids end in 0000 to 0019: the first stream holds ten, the second ten, each paged by four.
+	low, high := indexTestSplitStream("000", 4), indexTestSplitStream("001", 4)
+
+	if _, err := index.read(context.Background(), nil, indexTestPin(Ethereum), low, high); err != nil {
+		t.Fatal(err)
+	}
+	if len(low.Rows()) != 10 || low.Rows()[0] != "0" || len(high.Rows()) != 10 || high.Rows()[9] != "19" {
+		t.Fatalf("read %v and %v", low.Rows(), high.Rows())
+	}
+	requests := fake.requests()
+	if len(requests) != 6 {
+		t.Fatalf("sent %d requests, want three pages of four for each stream", len(requests))
+	}
+	for _, query := range requests {
+		if strings.Count(query, "testRefs(first: 4,") != 1 {
+			t.Fatalf("a request does not read exactly one stream in pages of four:\n%s", query)
+		}
+	}
+	if wrapper.widest.Load() < 2 {
+		t.Fatal("the streams' requests did not overlap")
+	}
+}
+
+// The first stream to fail ends the read with its own error, not the cancellation it causes in the
+// others, and every stream is held to one checkpoint.
+func TestConcurrentIndexReadFailsWithTheFirstError(t *testing.T) {
+	fake := newFakeIndex(t, indexTestBlock)
+	fake.indexTestRows("testRefs", Ethereum, 20)
+	index := fake.serve("test")
+	index.concurrent = true
+	bounded := indexTestSplitStream("001", 4)
+	bounded.MaxRows = 3
+	_, err := index.read(context.Background(), nil, indexTestPin(Ethereum), indexTestSplitStream("000", 4), bounded)
+	if err == nil || !strings.Contains(err.Error(), "index holds more than 3 testRefs rows") {
+		t.Fatalf("error = %v, want the bounded stream's", err)
+	}
+
+	moving := newFakeIndex(t, indexTestBlock)
+	moving.indexTestRows("testRefs", Ethereum, 20)
+	moving.checkpoint = func(n int, queryBlock uint64) []map[string]any {
+		return []map[string]any{fakeCheckpointRow(queryBlock-uint64(n), indexTestTimestamp-1)}
+	}
+	changed := moving.serve("test")
+	changed.concurrent = true
+	_, err = changed.read(context.Background(), nil, indexTestPin(Ethereum), indexTestSplitStream("000", 4), indexTestSplitStream("001", 4))
+	if err == nil || !strings.Contains(err.Error(), "GraphQL pagination changed checkpoint") {
+		t.Fatalf("error = %v, want the changed checkpoint", err)
+	}
+}
+
+// A stream's prefix may be a whole row id, such as a one-digit token id's: the first page starts
+// at the prefix itself.
+func TestIndexReadReadsARowWhoseIDIsThePrefix(t *testing.T) {
+	fake := newFakeIndex(t, indexTestBlock)
+	fake.rows["testRefs"] = []map[string]any{
+		{"id": indexTestPrefix(Ethereum) + "7", "account": strings.ToLower(indexTestAccount.Hex()), "value": "7"},
+		{"id": indexTestPrefix(Ethereum) + "71", "account": strings.ToLower(indexTestAccount.Hex()), "value": "71"},
+	}
+	stream := indexTestSplitStream("7", 0)
+	if _, err := fake.serve("test").read(context.Background(), nil, indexTestPin(Ethereum), stream); err != nil {
+		t.Fatal(err)
+	}
+	if rows := stream.Rows(); len(rows) != 2 || rows[0] != "7" {
+		t.Fatalf("read %v, want the row whose id is the prefix too", rows)
+	}
+	if query := fake.requests()[0]; !strings.Contains(query, `id_gte: "`+indexTestPrefix(Ethereum)+`7"`) || strings.Contains(query, "id_gt:") {
+		t.Fatalf("first page does not start at the prefix:\n%s", query)
 	}
 }

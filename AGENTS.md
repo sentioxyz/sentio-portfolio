@@ -35,7 +35,8 @@ unwritten checkpoint. A read declares **entity streams** (`indexStream`): one Gr
 paged by `id` under its own cursor, with its where clause (`indexWhere`), its row bound, and a
 `Decode` that checks what only the protocol knows of a row. The module owns everything else, in
 this order: the processor status (`indexQueryBlock`), the presence proof, the pages — every stream
-of the read in one request per page, rows in `id` order within the stream's prefix — and the
+of the read in one request per page, rows in `id` order within the stream's prefix, the first page
+from the prefix itself (`id_gte`) and each later one after its cursor (`id_gt`) — and the
 checkpoint that certifies them (`checkIndexCheckpoint`). A read returns an `indexAt`, where it
 answered; a lookup that depends on what the read found (Pendle's token and market lookups) reads
 at that `indexAt`, at the same block and held to the same checkpoint. Do not send an indexer
@@ -178,6 +179,17 @@ chain without a checkpoint is not proven empty and runs its own pages. The Lista
 Euler and Uniswap V2 indexes declare a start, V2's the creation block of the chain's earliest
 fork; the owner-token, account-request, mETH and Uniswap V3 and V4 indexes require a written
 checkpoint.
+
+The server answers the fields of one request one after another, at about a thousand rows a
+second. An index read that must return thousands of rows to an interactive scan declares
+`sentioIndex.concurrent`: each stream of a read then pages in requests of its own, all at once
+(each still holding a lane slot), the first page to return certifies the read, and every later
+page of every stream must carry the same checkpoint. Its streams may name one entity more than
+once, so one account's rows can be split across streams by a further prefix. A stream may also
+ask for larger pages (`indexStream.PageSize`): a request's time grows more slowly than its rows.
+Polymarket's index is the only concurrent one: a wallet's positions in one stream per leading
+digit of the token id, in pages of five thousand, and its outcome token lookups a thousand ids to
+a stream.
 
 An index whose processor writes no checkpoint row at all declares `sentioIndex.latest` instead
 (`indexLatestRow`): the newest row, at the query block, of an entity its processor writes as the

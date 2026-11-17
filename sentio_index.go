@@ -3,11 +3,13 @@ package portfolio
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
 )
@@ -54,6 +56,11 @@ type sentioIndex struct {
 	// latest certifies the reads of an index whose processor writes no IndexerCheckpoint row. Nil
 	// reads the checkpoint row (checkpoint).
 	latest *indexLatestRow
+	// concurrent pages each stream of a read in requests of its own, all at once, rather than every
+	// stream in each request. The server answers the fields of one request one after another, so a
+	// read split across streams finishes in a fraction of the time only when each stream is its own
+	// request. Its streams may name one entity more than once.
+	concurrent bool
 }
 
 // indexLatestRow stands in for the checkpoint of a processor that writes none: the newest row, at
@@ -132,6 +139,9 @@ type indexStream[R, T any] struct {
 	Account common.Address
 	Where   func(ChainID) indexWhere
 	MaxRows int
+	// PageSize is the most rows one page asks for; zero takes indexPageSize. A request's time grows
+	// more slowly than its rows, so a stream of thousands of rows reads faster in large pages.
+	PageSize int
 	// Decode checks what only the protocol knows of a row — its chain, its account, the id its
 	// fields rebuild — and converts it.
 	Decode func(chainID ChainID, id string, row R) (T, error)
@@ -143,7 +153,11 @@ type indexStream[R, T any] struct {
 func (s *indexStream[R, T]) Rows() []T { return s.rows }
 
 func (s *indexStream[R, T]) spec() *indexStreamSpec {
-	return &indexStreamSpec{entity: s.Entity, account: s.Account, where: s.Where, maxRows: s.MaxRows}
+	pageSize := s.PageSize
+	if pageSize <= 0 {
+		pageSize = indexPageSize
+	}
+	return &indexStreamSpec{entity: s.Entity, account: s.Account, where: s.Where, maxRows: s.MaxRows, pageSize: pageSize}
 }
 
 func (s *indexStream[R, T]) fields() ([]string, error) {
@@ -171,10 +185,11 @@ type indexStreamer interface {
 }
 
 type indexStreamSpec struct {
-	entity  string
-	account common.Address
-	where   func(ChainID) indexWhere
-	maxRows int
+	entity   string
+	account  common.Address
+	where    func(ChainID) indexWhere
+	maxRows  int
+	pageSize int
 }
 
 // jsonFields lists the GraphQL fields a row type selects: its json names, embedded structs' too.
@@ -327,15 +342,16 @@ type indexCursor struct {
 	spec   *indexStreamSpec
 	where  indexWhere
 	fields []string
-	after  string
-	rows   int
-	done   bool
+	// after is the id of the last row read, empty before the first.
+	after string
+	rows  int
+	done  bool
 }
 
 // first is how many rows the cursor's next page asks for: a page, or one past what the stream
 // may hold, so a stream with too many rows is caught without reading them all.
 func (c *indexCursor) first() int {
-	return min(indexPageSize, c.spec.maxRows+1-c.rows)
+	return min(c.spec.pageSize, c.spec.maxRows+1-c.rows)
 }
 
 // pages reads streams to their ends at at.QueryBlock and returns the checkpoint the pages carried.
@@ -357,8 +373,8 @@ func (x *sentioIndex) pages(
 	for _, stream := range streams {
 		spec := stream.spec()
 		// A page keys each stream's rows by its entity, and a stream with no bound would fail on
-		// its first row.
-		if _, twice := entities[spec.entity]; twice {
+		// its first row. A concurrent read sends each stream alone.
+		if _, twice := entities[spec.entity]; twice && !x.concurrent {
 			return indexCheckpoint{}, nil, fmt.Errorf("index read names %s twice", spec.entity)
 		}
 		entities[spec.entity] = struct{}{}
@@ -370,9 +386,90 @@ func (x *sentioIndex) pages(
 			return indexCheckpoint{}, nil, err
 		}
 		where := spec.where(chainID)
-		cursors = append(cursors, &indexCursor{stream: stream, spec: spec, where: where, fields: fields, after: where.Prefix})
+		cursors = append(cursors, &indexCursor{stream: stream, spec: spec, where: where, fields: fields})
 	}
-	var lag *indexLagNote
+	certificate := &pageCertificate{want: want}
+	if !x.concurrent || len(cursors) == 1 {
+		if err := x.pageCursors(ctx, client, at, cursors, certificate); err != nil {
+			return indexCheckpoint{}, nil, err
+		}
+		return *certificate.want, certificate.lag, nil
+	}
+	// The first stream to fail ends the others; its error is the read's.
+	pageCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var (
+		wait  sync.WaitGroup
+		once  sync.Once
+		first error
+	)
+	for _, cursor := range cursors {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			if err := x.pageCursors(pageCtx, client, at, []*indexCursor{cursor}, certificate); err != nil {
+				once.Do(func() {
+					first = err
+					cancel()
+				})
+			}
+		}()
+	}
+	wait.Wait()
+	if first != nil {
+		// A stream ended by another's failure reports the cancellation, never the cause; the cause
+		// is the first error. The caller's own deadline is reported as itself.
+		if errors.Is(first, context.Canceled) && ctx.Err() != nil {
+			return indexCheckpoint{}, nil, ctx.Err()
+		}
+		return indexCheckpoint{}, nil, first
+	}
+	return *certificate.want, certificate.lag, nil
+}
+
+// pageCertificate is the checkpoint every page of one read must carry: the one wanted, or, until a
+// page has returned, none yet. The first page to return certifies the read (certify); the pages of
+// concurrent streams share it.
+type pageCertificate struct {
+	mu   sync.Mutex
+	want *indexCheckpoint
+	lag  *indexLagNote
+}
+
+// admit holds a page's checkpoint to the read's: it certifies the first and requires every later
+// one to equal it.
+func (c *pageCertificate) admit(
+	ctx context.Context,
+	x *sentioIndex,
+	client *RPCClient,
+	at indexAt,
+	checkpoint indexCheckpoint,
+) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.want == nil {
+		lag, err := x.certify(ctx, client, at, checkpoint)
+		if err != nil {
+			return err
+		}
+		c.want, c.lag = &checkpoint, lag
+		return nil
+	}
+	if checkpoint != *c.want {
+		return fmt.Errorf("GraphQL pagination changed checkpoint")
+	}
+	return nil
+}
+
+// pageCursors reads cursors to their ends, every open one in each request.
+func (x *sentioIndex) pageCursors(
+	ctx context.Context,
+	client *RPCClient,
+	at indexAt,
+	cursors []*indexCursor,
+	certificate *pageCertificate,
+) error {
+	chainID := at.block.ChainID
 	for {
 		open := make([]*indexCursor, 0, len(cursors))
 		for _, cursor := range cursors {
@@ -381,27 +478,22 @@ func (x *sentioIndex) pages(
 			}
 		}
 		if len(open) == 0 {
-			return *want, lag, nil
+			return nil
 		}
 		var data map[string]json.RawMessage
 		if err := x.api.graphql(ctx, x.config.GraphQLURL, indexPageQuery(x.checkpointField("", chainID, at.QueryBlock), at.QueryBlock, open), &data); err != nil {
-			return indexCheckpoint{}, nil, err
+			return err
 		}
 		checkpoint, err := pageCheckpoint(data)
 		if err != nil {
-			return indexCheckpoint{}, nil, err
+			return err
 		}
-		if want == nil {
-			if lag, err = x.certify(ctx, client, at, checkpoint); err != nil {
-				return indexCheckpoint{}, nil, err
-			}
-			want = &checkpoint
-		} else if checkpoint != *want {
-			return indexCheckpoint{}, nil, fmt.Errorf("GraphQL pagination changed checkpoint")
+		if err := certificate.admit(ctx, x, client, at, checkpoint); err != nil {
+			return err
 		}
 		for _, cursor := range open {
 			if err := cursor.page(chainID, data); err != nil {
-				return indexCheckpoint{}, nil, err
+				return err
 			}
 		}
 	}
@@ -548,7 +640,7 @@ func indexPageQuery(checkpoint string, block uint64, cursors []*indexCursor) str
 		fmt.Fprintf(
 			&query,
 			"  %s(first: %d, orderBy: id, orderDirection: asc, block: { number: %d }, where: { %s }) { %s }\n",
-			cursor.spec.entity, cursor.first(), block, renderIndexWhere(cursor.where, cursor.after),
+			cursor.spec.entity, cursor.first(), block, renderIndexPageWhere(cursor.where, cursor.after),
 			strings.Join(append([]string{"id"}, cursor.fields...), " "),
 		)
 	}
@@ -571,6 +663,16 @@ func renderIndexWhere(where indexWhere, after string) string {
 		parts = append(parts, "id_gt: "+indexLiteral(after))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// renderIndexPageWhere renders a page's where clause: the stream's, after the cursor. Before the
+// first row it starts the id range at the prefix itself (id_gte), which a row's id may equal when
+// the prefix is not a separator-ended key, such as a leading digit of a token id.
+func renderIndexPageWhere(where indexWhere, after string) string {
+	if after == "" && where.Prefix != "" {
+		return renderIndexWhere(where, "") + ", id_gte: " + indexLiteral(where.Prefix)
+	}
+	return renderIndexWhere(where, after)
 }
 
 // indexLiteral renders a value as a GraphQL literal. JSON's string escapes are GraphQL's.

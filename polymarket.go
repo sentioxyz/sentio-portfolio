@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
@@ -71,6 +72,65 @@ var (
 // redeems a lost bet still holds its shares, so a trader's resolutions run to the thousands.
 const polymarketViewBatch = 100
 
+const (
+	// polymarketRPCBatch is the calls one JSON-RPC batch carries, as RPCClient.ParallelCalls sends
+	// them.
+	polymarketRPCBatch = 16
+	// polymarketRPCConcurrency is how many of one wallet's JSON-RPC batches are in flight at once.
+	// A trader holding thousands of tokens needs tens of batches for its balances and as many for
+	// its resolutions, which one after another outlast an interactive scan.
+	polymarketRPCConcurrency = 8
+)
+
+// polymarketCalls makes calls at the pin, polymarketRPCBatch to a JSON-RPC batch and
+// polymarketRPCConcurrency batches at once, and returns their results in the calls' order.
+func polymarketCalls(ctx context.Context, client *RPCClient, block BlockRef, calls []ContractCall) ([][]any, error) {
+	if len(calls) <= polymarketRPCBatch {
+		return client.ParallelCalls(ctx, block, calls)
+	}
+	results := make([][]any, len(calls))
+	callCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	slots := make(chan struct{}, polymarketRPCConcurrency)
+	var (
+		wait  sync.WaitGroup
+		once  sync.Once
+		first error
+	)
+	for start := 0; start < len(calls); start += polymarketRPCBatch {
+		end := min(start+polymarketRPCBatch, len(calls))
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			select {
+			case slots <- struct{}{}:
+			case <-callCtx.Done():
+				return
+			}
+			defer func() { <-slots }()
+			rows, err := client.ParallelCalls(callCtx, block, calls[start:end])
+			if err != nil {
+				once.Do(func() {
+					first = fmt.Errorf("calls %d-%d: %w", start, end-1, err)
+					cancel()
+				})
+				return
+			}
+			copy(results[start:end], rows)
+		}()
+	}
+	wait.Wait()
+	// A batch ended by another's failure reports nothing; one ended by the caller's own deadline
+	// reports that.
+	if first != nil && (ctx.Err() == nil || !errors.Is(first, context.Canceled)) {
+		return nil, first
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
 var polymarketMulticallABI = MustABI(`[
   {"type":"function","name":"aggregate3","stateMutability":"payable",
    "inputs":[{"name":"calls","type":"tuple[]","components":[
@@ -109,7 +169,7 @@ func polymarketViews(ctx context.Context, client *RPCClient, block BlockRef, vie
 			Contract: polymarketMulticall, ABI: polymarketMulticallABI, Method: "aggregate3", Args: []any{packed},
 		})
 	}
-	rows, err := client.ParallelCalls(ctx, block, calls)
+	rows, err := polymarketCalls(ctx, client, block, calls)
 	if err != nil {
 		return nil, err
 	}
@@ -251,7 +311,7 @@ func polymarketBalances(
 	if len(calls) == 0 {
 		return nil, nil
 	}
-	rows, err := client.ParallelCalls(ctx, block, calls)
+	rows, err := polymarketCalls(ctx, client, block, calls)
 	if err != nil {
 		return nil, fmt.Errorf("Polymarket balances: %w", err)
 	}

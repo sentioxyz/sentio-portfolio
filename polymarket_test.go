@@ -3,10 +3,13 @@ package portfolio
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -111,6 +114,10 @@ type polymarketStubRPC struct {
 	numerators   map[common.Hash][]*big.Int
 	mu           sync.Mutex
 	methods      map[string]int
+	// delay holds each HTTP request, so that requests sent together overlap; widest is the most
+	// that were in flight at once.
+	delay            time.Duration
+	inFlight, widest int
 }
 
 func (s *polymarketStubRPC) dispatch(to common.Address, data []byte) (string, map[string]any) {
@@ -200,6 +207,16 @@ func (s *polymarketStubRPC) aggregate(data []byte) (string, map[string]any) {
 }
 
 func (s *polymarketStubRPC) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	s.mu.Lock()
+	s.inFlight++
+	s.widest = max(s.widest, s.inFlight)
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.inFlight--
+		s.mu.Unlock()
+	}()
+	time.Sleep(s.delay)
 	raw, err := io.ReadAll(request.Body)
 	if err != nil {
 		s.t.Errorf("read RPC body: %v", err)
@@ -398,6 +415,79 @@ func TestPolymarketPositionsReadBalancesAndResolutionsAtThePin(t *testing.T) {
 	}
 }
 
+// A trader who never redeems holds thousands of tokens. Its balances and resolutions take tens of
+// calls each, sent as JSON-RPC batches at once rather than one after another, and every result
+// lands with its call.
+func TestPolymarketReadsAHeavyWalletInConcurrentBatches(t *testing.T) {
+	const held = 40 * polymarketBalanceBatch
+	stub := &polymarketStubRPC{
+		t: t, balances: make(map[string]*big.Int), denominators: make(map[common.Hash]*big.Int),
+		numerators: make(map[common.Hash][]*big.Int), methods: make(map[string]int), delay: 20 * time.Millisecond,
+	}
+	ids := make([]*big.Int, 0, held)
+	tokens := make(map[string]polymarketToken, held)
+	for index := 0; index < held; index++ {
+		// Tokens of one condition each: a balance per token, a resolution per condition.
+		condition := common.BigToHash(big.NewInt(int64(index + 1)))
+		token := polymarketToken{ID: big.NewInt(int64(1_000_000 + index)), ConditionID: condition, IndexSet: 1}
+		ids = append(ids, token.ID)
+		tokens[token.ID.String()] = token
+		stub.balances[token.ID.String()] = big.NewInt(int64(1_000_000 + index))
+		if index%2 == 0 {
+			stub.denominators[condition] = big.NewInt(1)
+			stub.numerators[condition] = []*big.Int{big.NewInt(int64(index % 4 / 2))}
+		}
+	}
+	server := httptest.NewServer(stub)
+	t.Cleanup(server.Close)
+	client, err := DialRPC(t.Context(), Polygon, server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(client.Close)
+	block := BlockRef{ChainID: Polygon, Number: 97_000_000, Timestamp: 1_794_000_000}
+
+	holdings, err := polymarketBalances(t.Context(), client, block, common.HexToAddress("0xaa"), ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(holdings) != held {
+		t.Fatalf("read %d holdings, want %d", len(holdings), held)
+	}
+	for index, holding := range holdings {
+		if holding.id.Cmp(ids[index]) != 0 || holding.amount.Int64() != int64(1_000_000+index) {
+			t.Fatalf("holding %d = %s of %s, want its own balance", index, holding.amount, holding.id)
+		}
+	}
+	positions := make([]polymarketPosition, len(holdings))
+	for index, holding := range holdings {
+		positions[index] = polymarketPosition{holding: holding, token: tokens[holding.id.String()]}
+	}
+	calls := make([]ContractCall, len(positions))
+	for index, position := range positions {
+		calls[index] = ContractCall{Contract: polymarketCTF, ABI: polymarketCTFABI, Method: "payoutDenominator", Args: []any{position.token.ConditionID}}
+	}
+	rows, err := polymarketViews(t.Context(), client, block, calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, row := range rows {
+		denominator, err := BigIntAt(row, 0)
+		if err != nil || denominator.Int64() != int64(1-index%2) {
+			t.Fatalf("condition %d resolution = %v (%v)", index, denominator, err)
+		}
+	}
+	if stub.methods["balanceOfBatch"] != held/polymarketBalanceBatch || stub.methods["aggregate3"] != held/polymarketViewBatch {
+		t.Fatalf("contract reads = %v", stub.methods)
+	}
+	if stub.widest < 2 {
+		t.Fatal("the wallet's JSON-RPC batches were sent one after another")
+	}
+	if stub.widest > polymarketRPCConcurrency {
+		t.Fatalf("%d JSON-RPC batches were in flight at once, more than %d", stub.widest, polymarketRPCConcurrency)
+	}
+}
+
 func TestPolymarketPositionsBeforeTheIndexStartReadNothing(t *testing.T) {
 	adapter := newPolymarketAdapterWithIndexer(polymarketFixedIndexer{})
 	groups, err := adapter.Positions(t.Context(), nil, BlockRef{ChainID: Polygon, Number: polymarketIndexStart - 1}, common.HexToAddress("0xaa"))
@@ -466,15 +556,32 @@ func (p fixedPriceProvider) USDPricesAt(ctx context.Context, tokens []Token, _ t
 }
 
 // polymarketIndexServer is Polymarket's index for one wallet: a processor at processed, the newest
-// deposit wallet at walletBlock, and the wallet's position rows. It records every GraphQL query.
+// deposit wallet at walletBlock, the wallet's position rows and the outcome token rows. It answers
+// each query as the index does — rows under the field's id_starts_with, from its id_gte, after its
+// id_gt, among its id_in, at most first of them in id order — and records it.
 type polymarketIndexServer struct {
 	processed   uint64
 	walletBlock uint64
 	walletTime  uint64
 	rows        []map[string]string
-	mu          sync.Mutex
-	queries     []string
+	tokens      []map[string]any
+	// unfiltered answers every query with every row, as a server ignoring the where clause would.
+	unfiltered bool
+	// walletBlockFor, when set, answers the newest wallet's block for a query instead of walletBlock.
+	walletBlockFor func(query string) uint64
+
+	mu      sync.Mutex
+	queries []string
 }
+
+var (
+	polymarketTestFirst    = regexp.MustCompile(`(positions|outcomeTokens)\(first: (\d+),`)
+	polymarketTestPrefix   = regexp.MustCompile(`id_starts_with: "([^"]*)"`)
+	polymarketTestAfter    = regexp.MustCompile(`id_gt: "([^"]*)"`)
+	polymarketTestFrom     = regexp.MustCompile(`id_gte: "([^"]*)"`)
+	polymarketTestIDsIn    = regexp.MustCompile(`id_in: \[([^\]]*)\]`)
+	polymarketTestQuotedID = regexp.MustCompile(`"([^"]*)"`)
+)
 
 func (s *polymarketIndexServer) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	writer.Header().Set("Content-Type", "application/json")
@@ -489,20 +596,80 @@ func (s *polymarketIndexServer) ServeHTTP(writer http.ResponseWriter, request *h
 	s.mu.Lock()
 	s.queries = append(s.queries, body.Query)
 	s.mu.Unlock()
+	walletBlock := s.walletBlock
+	if s.walletBlockFor != nil {
+		walletBlock = s.walletBlockFor(body.Query)
+	}
 	checkpoints := []map[string]string{}
-	if s.walletBlock != 0 {
+	if walletBlock != 0 {
 		checkpoints = append(checkpoints, map[string]string{
-			"blockNumber": strconv.FormatUint(s.walletBlock, 10), "timestampSeconds": strconv.FormatUint(s.walletTime, 10),
+			"blockNumber": strconv.FormatUint(walletBlock, 10), "timestampSeconds": strconv.FormatUint(s.walletTime, 10),
 		})
 	}
-	rows := s.rows
-	if rows == nil {
-		rows = []map[string]string{}
+	data := map[string]any{"indexerCheckpoints": checkpoints}
+	field := polymarketTestFirst.FindStringSubmatch(body.Query)
+	if field == nil {
+		_ = json.NewEncoder(writer).Encode(map[string]any{"data": data})
+		return
 	}
-	// Every fixture fits one page, so a page never follows it.
-	_ = json.NewEncoder(writer).Encode(map[string]any{"data": map[string]any{
-		"indexerCheckpoints": checkpoints, "positions": rows,
-	}})
+	entity := field[1]
+	first, _ := strconv.Atoi(field[2])
+	var all []map[string]any
+	if entity == "positions" {
+		for _, row := range s.rows {
+			converted := make(map[string]any, len(row))
+			for key, value := range row {
+				converted[key] = value
+			}
+			all = append(all, converted)
+		}
+	} else {
+		all = append(all, s.tokens...)
+	}
+	sort.Slice(all, func(left, right int) bool { return all[left]["id"].(string) < all[right]["id"].(string) })
+	prefix, after := "", ""
+	if found := polymarketTestPrefix.FindStringSubmatch(body.Query); found != nil {
+		prefix = found[1]
+	}
+	from := ""
+	if found := polymarketTestAfter.FindStringSubmatch(body.Query); found != nil {
+		after = found[1]
+	}
+	if found := polymarketTestFrom.FindStringSubmatch(body.Query); found != nil {
+		from = found[1]
+	}
+	var wanted map[string]bool
+	if found := polymarketTestIDsIn.FindStringSubmatch(body.Query); found != nil {
+		wanted = make(map[string]bool)
+		for _, id := range polymarketTestQuotedID.FindAllStringSubmatch(found[1], -1) {
+			wanted[id[1]] = true
+		}
+	}
+	rows := make([]map[string]any, 0)
+	for _, row := range all {
+		id := row["id"].(string)
+		if !s.unfiltered && (!strings.HasPrefix(id, prefix) || id <= after || id < from || (wanted != nil && !wanted[id])) {
+			continue
+		}
+		if len(rows) < first {
+			rows = append(rows, row)
+		}
+	}
+	data[entity] = rows
+	_ = json.NewEncoder(writer).Encode(map[string]any{"data": data})
+}
+
+// queriesOf returns the recorded queries that read entity.
+func (s *polymarketIndexServer) queriesOf(entity string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for _, query := range s.queries {
+		if strings.Contains(query, entity+"(") {
+			out = append(out, query)
+		}
+	}
+	return out
 }
 
 func polymarketTestIndexer(t *testing.T, server *polymarketIndexServer) *polymarketIndexer {
@@ -526,8 +693,8 @@ func TestPolymarketIndexIsCertifiedByItsNewestWallet(t *testing.T) {
 	server := &polymarketIndexServer{
 		processed: 97_000_000, walletBlock: 96_999_990, walletTime: pinTime - 20,
 		rows: []map[string]string{
-			{"id": wallet + "-11", "wallet": wallet, "tokenId": "11"},
-			{"id": wallet + "-22", "wallet": wallet, "tokenId": "22"},
+			{"id": wallet + "-11", "wallet": wallet, "tokenId": "11", "balance": "2000000", "seedBalance": "0"},
+			{"id": wallet + "-22", "wallet": wallet, "tokenId": "22", "balance": "2000000", "seedBalance": "0"},
 		},
 	}
 	indexer := polymarketTestIndexer(t, server)
@@ -541,19 +708,20 @@ func TestPolymarketIndexIsCertifiedByItsNewestWallet(t *testing.T) {
 	if read.IndexerBlock != 97_000_000 {
 		t.Fatalf("indexer block = %d", read.IndexerBlock)
 	}
-	query := server.queries[0]
-	for _, want := range []string{
-		"indexerCheckpoints: wallets(first: 1, orderBy: createdBlock, orderDirection: desc, block: { number: 97000000 })",
-		"blockNumber: createdBlock timestampSeconds: createdAt",
-		`id_starts_with: "` + wallet + `-"`,
-		`or: [{ balance_not: "0" }, { seedBalance_not: "0" }]`,
-	} {
-		if !strings.Contains(query, want) {
-			t.Errorf("page query lacks %q:\n%s", want, query)
+	for _, query := range server.queriesOf("positions") {
+		for _, want := range []string{
+			"indexerCheckpoints: wallets(first: 1, orderBy: createdBlock, orderDirection: desc, block: { number: 97000000 })",
+			"blockNumber: createdBlock timestampSeconds: createdAt",
+			`id_starts_with: "` + wallet + `-`,
+			`or: [{ balance_gt: "100000" }, { seedBalance_not: "0" }]`,
+		} {
+			if !strings.Contains(query, want) {
+				t.Errorf("page query lacks %q:\n%s", want, query)
+			}
 		}
-	}
-	if strings.Contains(query, "indexerCheckpoints(") {
-		t.Errorf("page query reads a checkpoint row the processor does not write:\n%s", query)
+		if strings.Contains(query, "indexerCheckpoints(") {
+			t.Errorf("page query reads a checkpoint row the processor does not write:\n%s", query)
+		}
 	}
 
 	// A fixed pin a week and more past the newest wallet is stale, as a checkpoint would be.
@@ -569,17 +737,204 @@ func TestPolymarketIndexIsCertifiedByItsNewestWallet(t *testing.T) {
 func TestPolymarketIndexRejectsAForeignRow(t *testing.T) {
 	account := common.HexToAddress("0x00000000000000000000000000000000000000Aa")
 	wallet := strings.ToLower(account.Hex())
-	for _, row := range []map[string]string{
-		{"id": wallet + "-11", "wallet": wallet, "tokenId": "12"},
-		{"id": wallet + "-011", "wallet": wallet, "tokenId": "011"},
-		{"id": wallet + "-11", "wallet": "0x00000000000000000000000000000000000000bb", "tokenId": "11"},
+	for _, test := range []struct {
+		row        map[string]string
+		unfiltered bool
+		error      string
+	}{
+		{row: map[string]string{"id": wallet + "-11", "wallet": wallet, "tokenId": "12", "balance": "2000000", "seedBalance": "0"}, error: "malformed Polymarket position row"},
+		{row: map[string]string{"id": wallet + "-11", "wallet": wallet, "tokenId": "11", "balance": "1e6", "seedBalance": "0"}, error: "malformed Polymarket position row"},
+		// A token id with a leading zero is no token's: the stream for the digit 0 reads it, and it fails.
+		{row: map[string]string{"id": wallet + "-011", "wallet": wallet, "tokenId": "011", "balance": "2000000", "seedBalance": "0"}, error: "malformed Polymarket position row"},
+		{row: map[string]string{"id": wallet + "-11", "wallet": "0x00000000000000000000000000000000000000bb", "tokenId": "11", "balance": "2000000", "seedBalance": "0"}, error: "malformed Polymarket position row"},
+		// A row answered to the stream of another leading digit is outside the stream's prefix.
+		{row: map[string]string{"id": wallet + "-22", "wallet": wallet, "tokenId": "22", "balance": "2000000", "seedBalance": "0"}, unfiltered: true, error: "foreign positions row"},
 	} {
 		indexer := polymarketTestIndexer(t, &polymarketIndexServer{
-			processed: 97_000_000, walletBlock: 97_000_000, walletTime: 1_794_000_000, rows: []map[string]string{row},
+			processed: 97_000_000, walletBlock: 97_000_000, walletTime: 1_794_000_000,
+			rows: []map[string]string{test.row}, unfiltered: test.unfiltered,
 		})
-		if _, err := indexer.TokenIDs(t.Context(), nil, BlockRef{ChainID: Polygon, Number: 97_000_000, Timestamp: 1_794_000_000}, account); err == nil {
-			t.Errorf("row %v was accepted", row)
+		_, err := indexer.TokenIDs(t.Context(), nil, BlockRef{ChainID: Polygon, Number: 97_000_000, Timestamp: 1_794_000_000}, account)
+		if err == nil || !strings.Contains(err.Error(), test.error) {
+			t.Errorf("row %v: error = %v, want %q", test.row, err, test.error)
 		}
+	}
+}
+
+// polymarketTestRows are position rows of wallet for each token id.
+func polymarketTestRows(wallet string, ids []string) []map[string]string {
+	rows := make([]map[string]string, len(ids))
+	for index, id := range ids {
+		rows[index] = map[string]string{"id": wallet + "-" + id, "wallet": wallet, "tokenId": id, "balance": "2000000", "seedBalance": "0"}
+	}
+	return rows
+}
+
+// A trader's rows run to the tens of thousands, and the server answers one request's rows at about
+// a thousand a second, so the wallet is read in one stream per leading digit of the token id, each
+// in requests of its own and in large pages. Together the streams read every row, in id order.
+func TestPolymarketIndexReadsAWalletInAStreamPerLeadingDigit(t *testing.T) {
+	account := common.HexToAddress("0x00000000000000000000000000000000000000Aa")
+	wallet := strings.ToLower(account.Hex())
+	// "3" is a whole id equal to its stream's prefix, which the stream still reads.
+	ids := []string{"905", "11", "3", "22"}
+	// One digit's rows run past a page.
+	for index := 0; index <= polymarketIndexPageSize; index++ {
+		ids = append(ids, strconv.Itoa(700_000+index))
+	}
+	server := &polymarketIndexServer{
+		processed: 97_000_000, walletBlock: 96_999_990, walletTime: 1_794_000_000 - 20, rows: polymarketTestRows(wallet, ids),
+	}
+	read, err := polymarketTestIndexer(t, server).TokenIDs(t.Context(), nil, BlockRef{ChainID: Polygon, Number: 97_000_000, Timestamp: 1_794_000_000}, account)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(ids)
+	if len(read.TokenIDs) != len(ids) {
+		t.Fatalf("read %d token ids, want %d", len(read.TokenIDs), len(ids))
+	}
+	for index, id := range read.TokenIDs {
+		if id.String() != ids[index] {
+			t.Fatalf("token id %d = %s, want %s: the rows are not in id order", index, id, ids[index])
+		}
+	}
+	perDigit := make(map[string]int)
+	for _, query := range server.queriesOf("positions") {
+		lead := polymarketTestPrefix.FindStringSubmatch(query)[1]
+		perDigit[strings.TrimPrefix(lead, wallet+"-")]++
+		if !strings.Contains(query, fmt.Sprintf("positions(first: %d,", polymarketIndexPageSize)) {
+			t.Errorf("page does not ask for %d rows:\n%s", polymarketIndexPageSize, query)
+		}
+		if strings.Count(query, "positions(") != 1 {
+			t.Errorf("a request reads more than one stream:\n%s", query)
+		}
+	}
+	for digit := '0'; digit <= '9'; digit++ {
+		want := 1
+		if digit == '7' {
+			want = 2
+		}
+		if perDigit[string(digit)] != want {
+			t.Errorf("stream %c sent %d pages, want %d (pages = %v)", digit, perDigit[string(digit)], want, perDigit)
+		}
+	}
+}
+
+// A row names a token to read only when its balance, the wallet's before the start and its net
+// since, is above the dust floor: market making leaves tens of thousands of positions closed to a
+// remainder. The server selects rows with no balance before the start by their net alone.
+func TestPolymarketIndexReadsOnlyRowsAboveTheDustFloor(t *testing.T) {
+	account := common.HexToAddress("0x00000000000000000000000000000000000000Aa")
+	wallet := strings.ToLower(account.Hex())
+	row := func(id, balance, seed string) map[string]string {
+		return map[string]string{"id": wallet + "-" + id, "wallet": wallet, "tokenId": id, "balance": balance, "seedBalance": seed}
+	}
+	server := &polymarketIndexServer{
+		processed: 97_000_000, walletBlock: 97_000_000, walletTime: 1_794_000_000,
+		rows: []map[string]string{
+			row("11", "2000000", "0"),        // bought since the start
+			row("22", "100000", "0"),         // a remainder of a tenth of a share
+			row("33", "-5000000", "5000000"), // held before the start, sold since
+			row("44", "-1000000", "3000000"), // held before the start, partly sold
+			row("55", "-4900000", "5000000"), // held before the start, sold to a remainder
+			row("66", "0", "7000000"),        // held before the start, untouched in net
+		},
+	}
+	read, err := polymarketTestIndexer(t, server).TokenIDs(t.Context(), nil, BlockRef{ChainID: Polygon, Number: 97_000_000, Timestamp: 1_794_000_000}, account)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, len(read.TokenIDs))
+	for index, id := range read.TokenIDs {
+		got[index] = id.String()
+	}
+	if strings.Join(got, ",") != "11,44,66" {
+		t.Fatalf("token ids = %v, want 11, 44 and 66", got)
+	}
+}
+
+// The bound on a wallet's rows holds across its streams: no stream past it, the wallet still is.
+func TestPolymarketIndexBoundsAWalletsRowsAcrossItsStreams(t *testing.T) {
+	account := common.HexToAddress("0x00000000000000000000000000000000000000Aa")
+	wallet := strings.ToLower(account.Hex())
+	perDigit := polymarketMaxIndexedPositions/9 + 1
+	ids := make([]string, 0, 9*perDigit)
+	for digit := 1; digit <= 9; digit++ {
+		for index := 0; index < perDigit; index++ {
+			ids = append(ids, strconv.Itoa(digit*10_000_000+index))
+		}
+	}
+	server := &polymarketIndexServer{processed: 97_000_000, walletBlock: 97_000_000, walletTime: 1_794_000_000, rows: polymarketTestRows(wallet, ids)}
+	_, err := polymarketTestIndexer(t, server).TokenIDs(t.Context(), nil, BlockRef{ChainID: Polygon, Number: 97_000_000, Timestamp: 1_794_000_000}, account)
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("more than %d positions rows", polymarketMaxIndexedPositions)) {
+		t.Fatalf("error = %v, want the wallet's row bound", err)
+	}
+}
+
+// Every page of every stream carries the read's one certificate.
+func TestPolymarketIndexHoldsItsStreamsToOneCertificate(t *testing.T) {
+	account := common.HexToAddress("0x00000000000000000000000000000000000000Aa")
+	wallet := strings.ToLower(account.Hex())
+	server := &polymarketIndexServer{
+		processed: 97_000_000, walletTime: 1_794_000_000, rows: polymarketTestRows(wallet, []string{"11", "22"}),
+		walletBlockFor: func(query string) uint64 {
+			if strings.Contains(query, `id_starts_with: "`+wallet+`-2"`) {
+				return 96_999_999
+			}
+			return 97_000_000
+		},
+	}
+	_, err := polymarketTestIndexer(t, server).TokenIDs(t.Context(), nil, BlockRef{ChainID: Polygon, Number: 97_000_000, Timestamp: 1_794_000_000}, account)
+	if err == nil || !strings.Contains(err.Error(), "GraphQL pagination changed checkpoint") {
+		t.Fatalf("error = %v, want the changed checkpoint", err)
+	}
+}
+
+// A lookup names its ids polymarketLookupBatch to a request, each in one page.
+func TestPolymarketOutcomeLookupIsBatched(t *testing.T) {
+	account := common.HexToAddress("0x00000000000000000000000000000000000000Aa")
+	wallet := strings.ToLower(account.Hex())
+	const count = 2*polymarketLookupBatch + 7
+	ids := make([]*big.Int, 0, count+1)
+	tokens := make([]map[string]any, 0, count)
+	for index := 0; index < count; index++ {
+		id := big.NewInt(int64(1_000_000 + index))
+		ids = append(ids, id)
+		tokens = append(tokens, map[string]any{
+			"id": id.String(), "conditionId": "0x" + fmt.Sprintf("%064x", index+1), "outcomeIndex": 0, "indexSet": 1,
+		})
+	}
+	// An id named twice is asked for once; one the index does not describe is left out.
+	ids = append(ids, ids[0], big.NewInt(9))
+	server := &polymarketIndexServer{
+		processed: 97_000_000, walletBlock: 97_000_000, walletTime: 1_794_000_000,
+		rows: polymarketTestRows(wallet, []string{"11"}), tokens: tokens,
+	}
+	read, err := polymarketTestIndexer(t, server).TokenIDs(t.Context(), nil, BlockRef{ChainID: Polygon, Number: 97_000_000, Timestamp: 1_794_000_000}, account)
+	if err != nil {
+		t.Fatal(err)
+	}
+	described, err := read.Tokens(t.Context(), ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(described) != count || described["1000000"].ConditionID != common.HexToHash("0x01") {
+		t.Fatalf("described %d tokens, want %d", len(described), count)
+	}
+	lookups := server.queriesOf("outcomeTokens")
+	if len(lookups) != 3 {
+		t.Fatalf("sent %d lookups, want 3", len(lookups))
+	}
+	asked := 0
+	for _, query := range lookups {
+		named := len(polymarketTestQuotedID.FindAllString(polymarketTestIDsIn.FindStringSubmatch(query)[1], -1))
+		if named > polymarketLookupBatch || !strings.Contains(query, fmt.Sprintf("outcomeTokens(first: %d,", named+1)) {
+			t.Errorf("a lookup names %d ids:\n%.200s", named, query)
+		}
+		asked += named
+	}
+	if asked != count+1 {
+		t.Fatalf("lookups named %d ids, want %d", asked, count+1)
 	}
 }
 

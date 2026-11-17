@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"strconv"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -14,34 +15,61 @@ import (
 // probe.
 //
 // A Position row stays after its position closes. It carries the net of every transfer of the
-// token in and out of the wallet since the index's start, and, from the first transfer out, the
-// wallet's balance just before the start; both are zero only for a position opened and closed since
-// the start. Only the other rows are read, so a trader's thousands of closed positions cost
-// nothing. That trusts the index to have summed each transfer, as reading every row trusts it to
-// have seen each one; the amount is still the contract's balance at the pin.
+// token in and out of the wallet since the index's start (balance), and, from the first transfer
+// out, the wallet's balance just before the start (seedBalance); their sum is the wallet's balance.
+// Only a row whose sum is above the dust floor names a token to read: the server selects those with
+// no balance before the start by their net alone, and the adapter drops the rest of a sum at or
+// below the floor. Market making leaves an active wallet tens of thousands of positions closed to
+// a remainder, which cost nothing this way. That trusts the index to have summed each transfer, as
+// reading every row trusts it to have seen each one; the amount is still the contract's balance at
+// the pin.
 //
 // Its processor writes no IndexerCheckpoint. Deposit wallets are created every few blocks, and
 // the processor writes a Wallet row for each at its block, so the newest Wallet row certifies a
 // read in its place (indexLatestRow). Before the first wallet the index's start stands in.
+//
+// A lost bet's share stays held until redeemed, so a trader who never redeems holds thousands of
+// tokens, each read, then looked up. The server answers about a thousand rows a second to one
+// request, too slow for an interactive scan, so the index is read concurrently
+// (sentioIndex.concurrent): the wallet's rows in one stream per leading digit of the token id, in
+// large pages, and the lookup in batches of ids.
 type polymarketIndexer struct {
 	index *sentioIndex
 }
 
 func newPolymarketIndexer(config SentioIndexerConfig) *polymarketIndexer {
 	return &polymarketIndexer{index: &sentioIndex{
-		name:   "polymarket",
-		api:    newSentioAPIClient(),
-		config: config,
-		chains: []ChainID{Polygon},
-		start:  func(ChainID) uint64 { return polymarketIndexStart },
-		latest: &indexLatestRow{Entity: "wallets", BlockField: "createdBlock", SecondsField: "createdAt"},
+		name:       "polymarket",
+		api:        newSentioAPIClient(),
+		config:     config,
+		chains:     []ChainID{Polygon},
+		start:      func(ChainID) uint64 { return polymarketIndexStart },
+		latest:     &indexLatestRow{Entity: "wallets", BlockField: "createdBlock", SecondsField: "createdAt"},
+		concurrent: true,
 	}}
 }
 
 type polymarketPositionRow struct {
-	Wallet  string `json:"wallet"`
-	TokenID string `json:"tokenId"`
+	Wallet      string `json:"wallet"`
+	TokenID     string `json:"tokenId"`
+	Balance     string `json:"balance"`
+	SeedBalance string `json:"seedBalance"`
 }
+
+// polymarketCandidate is a token a Position row names, and whether the row's balance is above the
+// dust floor.
+type polymarketCandidate struct {
+	id   *big.Int
+	held bool
+}
+
+const (
+	// polymarketIndexPageSize is the rows one page of a position stream asks for. A page of five
+	// thousand returns in about three and a half seconds, ten pages of five hundred in eight.
+	polymarketIndexPageSize = 5_000
+	// polymarketLookupBatch is the ids one outcome token lookup names; each batch is one request.
+	polymarketLookupBatch = 1_000
+)
 
 // polymarketPositionPrefix starts the id of every Position row of account: the lowercase wallet
 // and a hyphen, then the token id.
@@ -49,24 +77,41 @@ func polymarketPositionPrefix(account common.Address) string {
 	return strings.ToLower(account.Hex()) + "-"
 }
 
-func polymarketPositionStream(account common.Address) *indexStream[polymarketPositionRow, *big.Int] {
+// polymarketPositionStreams read account's Position rows, one stream per leading digit of the
+// token id, so the streams together select every row the wallet prefix does whose token id starts
+// with a digit. A token id is a decimal integer, so no other row names one.
+func polymarketPositionStreams(account common.Address) []*indexStream[polymarketPositionRow, polymarketCandidate] {
+	streams := make([]*indexStream[polymarketPositionRow, polymarketCandidate], 0, 10)
+	for digit := '0'; digit <= '9'; digit++ {
+		streams = append(streams, polymarketPositionStream(account, string(digit)))
+	}
+	return streams
+}
+
+// polymarketPositionStream reads account's Position rows whose token id starts with lead.
+func polymarketPositionStream(account common.Address, lead string) *indexStream[polymarketPositionRow, polymarketCandidate] {
 	prefix := polymarketPositionPrefix(account)
-	return &indexStream[polymarketPositionRow, *big.Int]{
+	dust := big.NewInt(polymarketDustUnits)
+	return &indexStream[polymarketPositionRow, polymarketCandidate]{
 		Entity: "positions", Account: account, MaxRows: polymarketMaxIndexedPositions,
+		PageSize: polymarketIndexPageSize,
 		Where: func(ChainID) indexWhere {
-			return indexWhere{Prefix: prefix, Terms: []indexTerm{
+			return indexWhere{Prefix: prefix + lead, Terms: []indexTerm{
 				{"wallet", strings.ToLower(account.Hex())},
-				// A closed position keeps its row, so an active trader's rows run to the tens of
-				// thousands; only a row that may still hold something names a token to read.
-				{"or", indexAnyOf{{"balance_not", "0"}, {"seedBalance_not", "0"}}},
+				// A closed position keeps its row. A row with no balance before the start holds its
+				// net since, so only one above the dust floor can hold a share worth reading; a row
+				// with a balance before the start is selected, and its sum decides.
+				{"or", indexAnyOf{{"balance_gt", strconv.Itoa(polymarketDustUnits)}, {"seedBalance_not", "0"}}},
 			}}
 		},
-		Decode: func(_ ChainID, id string, row polymarketPositionRow) (*big.Int, error) {
+		Decode: func(_ ChainID, id string, row polymarketPositionRow) (polymarketCandidate, error) {
 			tokenID, ok := polymarketParseTokenID(row.TokenID)
-			if !ok || row.Wallet != strings.ToLower(account.Hex()) || id != prefix+row.TokenID {
-				return nil, fmt.Errorf("GraphQL returned malformed Polymarket position row %q", id)
+			balance, balanceOK := new(big.Int).SetString(row.Balance, 10)
+			seed, seedOK := new(big.Int).SetString(row.SeedBalance, 10)
+			if !ok || !balanceOK || !seedOK || row.Wallet != strings.ToLower(account.Hex()) || id != prefix+row.TokenID {
+				return polymarketCandidate{}, fmt.Errorf("GraphQL returned malformed Polymarket position row %q", id)
 			}
-			return tokenID, nil
+			return polymarketCandidate{id: tokenID, held: new(big.Int).Add(balance, seed).Cmp(dust) > 0}, nil
 		},
 	}
 }
@@ -77,17 +122,34 @@ type polymarketOutcomeTokenRow struct {
 	IndexSet     int64  `json:"indexSet"`
 }
 
+// polymarketOutcomeTokenStreams look ids up, polymarketLookupBatch to a stream.
+func polymarketOutcomeTokenStreams(ids []*big.Int) []*indexStream[polymarketOutcomeTokenRow, polymarketToken] {
+	seen := make(map[string]struct{}, len(ids))
+	unique := make([]*big.Int, 0, len(ids))
+	for _, id := range ids {
+		if _, duplicate := seen[id.String()]; !duplicate {
+			seen[id.String()] = struct{}{}
+			unique = append(unique, id)
+		}
+	}
+	streams := make([]*indexStream[polymarketOutcomeTokenRow, polymarketToken], 0, (len(unique)+polymarketLookupBatch-1)/polymarketLookupBatch)
+	for start := 0; start < len(unique); start += polymarketLookupBatch {
+		streams = append(streams, polymarketOutcomeTokenStream(unique[start:min(start+polymarketLookupBatch, len(unique))]))
+	}
+	return streams
+}
+
+// polymarketOutcomeTokenStream looks up ids, which are distinct, in one page.
 func polymarketOutcomeTokenStream(ids []*big.Int) *indexStream[polymarketOutcomeTokenRow, polymarketToken] {
 	wanted := make(map[string]*big.Int, len(ids))
 	values := make([]string, 0, len(ids))
 	for _, id := range ids {
-		if _, duplicate := wanted[id.String()]; !duplicate {
-			wanted[id.String()] = id
-			values = append(values, id.String())
-		}
+		wanted[id.String()] = id
+		values = append(values, id.String())
 	}
 	return &indexStream[polymarketOutcomeTokenRow, polymarketToken]{
-		Entity: "outcomeTokens", MaxRows: len(values),
+		// A page one past the ids holds every row they name and shows there is no other.
+		Entity: "outcomeTokens", MaxRows: len(values), PageSize: len(values) + 1,
 		Where: func(ChainID) indexWhere {
 			return indexWhere{Terms: []indexTerm{{"id_in", values}}}
 		},
@@ -113,22 +175,49 @@ func (i *polymarketIndexer) TokenIDs(
 	block BlockRef,
 	account common.Address,
 ) (polymarketRead, error) {
-	positions := polymarketPositionStream(account)
-	at, err := i.index.read(ctx, client, block, positions)
+	positions := polymarketPositionStreams(account)
+	streams := make([]indexStreamer, len(positions))
+	for index, stream := range positions {
+		streams[index] = stream
+	}
+	at, err := i.index.read(ctx, client, block, streams...)
 	if err != nil {
 		return polymarketRead{}, fmt.Errorf("Polymarket index query: %w", err)
 	}
+	// The streams follow one another in id order, so their rows do too.
+	tokenIDs := make([]*big.Int, 0)
+	rows := 0
+	for _, stream := range positions {
+		rows += len(stream.Rows())
+		for _, candidate := range stream.Rows() {
+			if candidate.held {
+				tokenIDs = append(tokenIDs, candidate.id)
+			}
+		}
+	}
+	if rows > polymarketMaxIndexedPositions {
+		return polymarketRead{}, fmt.Errorf("Polymarket index query: index holds more than %d positions rows", polymarketMaxIndexedPositions)
+	}
 	return polymarketRead{
 		IndexerBlock: at.QueryBlock,
-		TokenIDs:     positions.Rows(),
+		TokenIDs:     tokenIDs,
 		Tokens: func(ctx context.Context, ids []*big.Int) (map[string]polymarketToken, error) {
-			stream := polymarketOutcomeTokenStream(ids)
-			if err := at.read(ctx, stream); err != nil {
+			lookups := polymarketOutcomeTokenStreams(ids)
+			if len(lookups) == 0 {
+				return map[string]polymarketToken{}, nil
+			}
+			streams := make([]indexStreamer, len(lookups))
+			for index, stream := range lookups {
+				streams[index] = stream
+			}
+			if err := at.read(ctx, streams...); err != nil {
 				return nil, err
 			}
-			tokens := make(map[string]polymarketToken, len(stream.Rows()))
-			for _, token := range stream.Rows() {
-				tokens[token.ID.String()] = token
+			tokens := make(map[string]polymarketToken, len(ids))
+			for _, stream := range lookups {
+				for _, token := range stream.Rows() {
+					tokens[token.ID.String()] = token
+				}
 			}
 			return tokens, nil
 		},
