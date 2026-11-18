@@ -30,7 +30,11 @@ type rpcTestServer struct {
 	headLag       bool
 	// timeout answers the first attempt's first element with a node timeout.
 	timeout bool
-	result  string
+	// revertCode and revertMessage, when set, are the first element's revert in place of code 3
+	// "execution reverted".
+	revertCode    int
+	revertMessage string
+	result        string
 }
 
 func (s *rpcTestServer) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -71,6 +75,9 @@ func (s *rpcTestServer) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		if index == 0 && (attempt == 1 || !s.retryable) {
 			code := 3
 			message := "execution reverted"
+			if s.revertMessage != "" {
+				code, message = s.revertCode, s.revertMessage
+			}
 			if s.headLag {
 				code = -32000
 				message = "header not found"
@@ -201,6 +208,33 @@ func TestParallelCallsAllowFailurePreservesContractRevert(t *testing.T) {
 	}
 	if results[1].Error != nil {
 		t.Fatalf("successful sibling failed: %v", results[1].Error)
+	}
+}
+
+// A revert whose reason reads like a timeout is still the call's answer: it stays on its element,
+// asked once, and its sibling's result is kept.
+func TestParallelCallsAllowFailureKeepsARevertThatMentionsATimeout(t *testing.T) {
+	for _, test := range []struct {
+		code    int
+		message string
+	}{
+		{3, "execution reverted: timeout"},
+		{-32000, "execution reverted: request timed out"},
+	} {
+		t.Run(test.message, func(t *testing.T) {
+			client, handler := newRPCTestClient(t, false)
+			handler.revertCode, handler.revertMessage = test.code, test.message
+			results, err := client.ParallelCallsAllowFailure(context.Background(), BlockRef{ChainID: Ethereum, Number: 1, Fixed: true}, rpcTestCalls())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if handler.batchAttempts != 1 {
+				t.Fatalf("batch attempts = %d, want 1", handler.batchAttempts)
+			}
+			if results[0].Error == nil || results[1].Error != nil {
+				t.Fatalf("results = %+v, want the revert on the first and the sibling read", results)
+			}
+		})
 	}
 }
 
