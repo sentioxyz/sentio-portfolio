@@ -28,7 +28,9 @@ type rpcTestServer struct {
 	batchAttempts int
 	retryable     bool
 	headLag       bool
-	result        string
+	// timeout answers the first attempt's first element with a node timeout.
+	timeout bool
+	result  string
 }
 
 func (s *rpcTestServer) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -72,6 +74,9 @@ func (s *rpcTestServer) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			if s.headLag {
 				code = -32000
 				message = "header not found"
+			} else if s.timeout {
+				code = -32000
+				message = "read timeout"
 			} else if s.retryable {
 				code = -32005
 				message = "request limit exceeded"
@@ -156,6 +161,24 @@ func TestParallelCallsAllowFailureRetriesHeaderPropagationLag(t *testing.T) {
 	for index, result := range results {
 		if result.Error != nil {
 			t.Fatalf("result %d error after retry: %v", index, result.Error)
+		}
+	}
+}
+
+// A provider under load times out a batch element; asked again, it answers.
+func TestParallelCallsRetriesANodeTimeout(t *testing.T) {
+	client, handler := newRPCTestClient(t, true)
+	handler.timeout = true
+	rows, err := client.ParallelCalls(context.Background(), BlockRef{ChainID: Ethereum, Number: 1}, rpcTestCalls())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handler.batchAttempts != 2 {
+		t.Fatalf("batch attempts = %d, want 2", handler.batchAttempts)
+	}
+	for index, row := range rows {
+		if value, err := BigIntAt(row, 0); err != nil || value.Cmp(big.NewInt(7)) != 0 {
+			t.Fatalf("row %d = %v, %v; want 7", index, value, err)
 		}
 	}
 }
