@@ -125,17 +125,23 @@ func retryableRPCError(err error) bool {
 	var rpcError rpc.Error
 	if errors.As(err, &rpcError) {
 		code := rpcError.ErrorCode()
+		message := strings.ToLower(rpcError.Error())
+		// A contract revert is the call's own answer, whatever its reason says ("execution
+		// reverted: timeout"): asked again, it reverts again, and a revert stays on its element
+		// (ParallelCallsAllowFailure) rather than failing its batch.
+		if code == 3 || strings.Contains(message, "revert") {
+			return false
+		}
 		if code == -32005 || code == -32009 {
 			return true
 		}
 		// A node that ran out of time on a call answers the next attempt like any other: a
 		// provider under load times out a batch element ("read timeout", "request timed out",
 		// "execution aborted (timeout = 5s)") that succeeds when asked again.
-		if message := strings.ToLower(rpcError.Error()); strings.Contains(message, "timeout") || strings.Contains(message, "timed out") {
+		if strings.Contains(message, "timeout") || strings.Contains(message, "timed out") {
 			return true
 		}
 		if code == -32000 {
-			message := strings.ToLower(rpcError.Error())
 			return strings.Contains(message, "header not found") ||
 				strings.Contains(message, "unknown block") ||
 				strings.Contains(message, "block not found") ||
